@@ -1,4 +1,5 @@
-import type { BuildKind, ObjKind, WeaponId, ZombieType } from '../types';
+import type { ObjKind, ZombieType } from '../types';
+import type { ItemId } from './items';
 
 // ---------------- ワールド / 通信 ----------------
 export const TILE = 40;
@@ -26,8 +27,6 @@ export const NIGHT_SECONDS = 45;
 export const CYCLE_SECONDS = DAY_SECONDS + NIGHT_SECONDS;
 /** 松明の明かりの半径(px) */
 export const TORCH_LIGHT = 200;
-/** 何日ごとに大襲撃（ホード）が来るか */
-export const HORDE_EVERY = 5;
 /** ゲーム開始時刻（分） */
 export const START_MINUTE = 8 * 60;
 
@@ -59,46 +58,10 @@ export const PLAYER = {
   staminaDelay: 0.7,
 };
 
-/** 共有チェストに入れられるアイテム（表示名・1回で動かす量） */
-export const CHEST_ITEMS: { id: string; name: string; step: number }[] = [
-  { id: 'ammo', name: '弾薬', step: 12 },
-  { id: 'shells', name: 'シェル', step: 6 },
-  { id: 'gunpowder', name: '火薬', step: 1 },
-  { id: 'food', name: '食料', step: 1 },
-  { id: 'medkit', name: '救急キット', step: 1 },
-  { id: 'cloth', name: '布', step: 1 },
-  { id: 'herb', name: '薬草', step: 1 },
-  { id: 'parts', name: '武器パーツ', step: 1 },
-  { id: 'kit', name: 'タレットキット', step: 1 },
-];
 
-export interface WeaponStats {
-  name: string;
-  magSize: number;
-  fireInterval: number;
-  reloadTime: number;
-  bulletSpeed: number;
-  bulletLife: number;
-  damage: number;
-  spread: number;
-  pellets: number;
-  knock: number;
-  auto: boolean;
-  noiseRadius: number;
-  /** 撃ったときのカメラの揺れ */
-  kick: number;
-}
-
-export const WEAPONS: Record<WeaponId, WeaponStats> = {
-  pistol: { name: 'ハンドガン', magSize: 12, fireInterval: 0.2, reloadTime: 1.3, bulletSpeed: 1000, bulletLife: 0.65, damage: 24, spread: 0.035, pellets: 1, knock: 110, auto: false, noiseRadius: 650, kick: 2.5 },
-  rifle: { name: 'アサルトライフル', magSize: 30, fireInterval: 0.095, reloadTime: 1.7, bulletSpeed: 1150, bulletLife: 0.7, damage: 20, spread: 0.06, pellets: 1, knock: 80, auto: true, noiseRadius: 800, kick: 2 },
-  shotgun: { name: 'ショットガン', magSize: 6, fireInterval: 0.6, reloadTime: 2.0, bulletSpeed: 900, bulletLife: 0.32, damage: 15, spread: 0.32, pellets: 7, knock: 170, auto: false, noiseRadius: 900, kick: 7 },
-};
 
 /** 銃口までの距離 */
 export const MUZZLE = 26;
-/** 互換用（旧コード参照） */
-export const GUN = { muzzle: MUZZLE, reloadTime: WEAPONS.pistol.reloadTime, magSize: WEAPONS.pistol.magSize };
 
 export const AXE = {
   interval: 0.45,
@@ -128,6 +91,7 @@ export interface ZombieStats {
 export const ZOMBIE: Record<ZombieType, ZombieStats> = {
   walker: { radius: 14, hp: 60, daySpeed: 42, nightSpeed: 88, damage: 10, wallDamage: 18, attackInterval: 1.0, color: '#565a4a', skin: '#8e9278' },
   runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#5c5048', skin: '#a2968a' },
+  soldier: { radius: 14, hp: 150, daySpeed: 55, nightSpeed: 92, damage: 16, wallDamage: 30, attackInterval: 0.9, color: '#4a4f3c', skin: '#8a8c76' },
   brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#46483e', skin: '#7a7e6a' },
 };
 
@@ -165,6 +129,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
   rubble: 1,
   sandbag: 400,
   stash: 1,
+  bag: 1,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -198,75 +163,27 @@ export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree'
 /** ゾンビが破壊して進む建築物 */
 export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall', 'turret', 'door']);
 
-export const BUILD_COST: Record<BuildKind, { wood: number; scrap: number }> = {
-  woodWall: { wood: 5, scrap: 0 },
-  ironWall: { wood: 0, scrap: 6 },
-  spike: { wood: 4, scrap: 0 },
-  torch: { wood: 2, scrap: 0 },
-  barbed: { wood: 0, scrap: 3 },
-  turret: { wood: 0, scrap: 4 },
-};
 
-export const SPIKE = {
-  dps: 30,
-  slow: 0.45,
-  wearPerSec: 7,
-};
 
-export const REPAIR = {
-  interval: 0.35,
-  amount: 70,
-};
 
-export const REGROW = {
-  tree: 150,
-  car: 220,
-  crate: 150,
-  mcrate: 300,
-  box: 0, // 収納箱は毎朝補充
-};
 
-/** ホットバー（9スロット） */
+/** ホットバー（キー 1〜5。6〜9 は空き） */
 export const SLOTS = [
-  { id: 0, key: '1', name: '斧（近接・解体）', short: 'MELEE' },
-  { id: 1, key: '2', name: '銃', short: 'GUN' },
-  { id: 2, key: '3', name: 'ショットガン', short: 'SHOTGUN' },
-  { id: 3, key: '4', name: '建築・修理', short: 'BUILD' },
+  { id: 0, key: '1', name: '斧（近接）', short: 'MELEE' },
+  { id: 1, key: '2', name: 'メイン武器', short: 'PRIMARY' },
+  { id: 2, key: '3', name: 'サブ武器', short: 'SIDEARM' },
+  { id: 3, key: '4', name: '回復', short: 'MEDS' },
   { id: 4, key: '5', name: '食料', short: 'FOOD' },
-  { id: 5, key: '6', name: '救急キット', short: 'MED' },
+  { id: 5, key: '6', name: '', short: '' },
   { id: 6, key: '7', name: '', short: '' },
   { id: 7, key: '8', name: '', short: '' },
   { id: 8, key: '9', name: '', short: '' },
 ] as const;
 /** 中身のある（選択できる）スロット数 */
-export const USABLE_SLOTS = 6;
+export const USABLE_SLOTS = 5;
 
-/** 建築ツールの設計図（B キーで切替） */
-export const BLUEPRINTS: { kind: BuildKind; name: string }[] = [
-  { kind: 'woodWall', name: '木の壁' },
-  { kind: 'ironWall', name: '鉄の壁' },
-  { kind: 'spike', name: 'ウッドスパイク' },
-  { kind: 'torch', name: '松明' },
-  { kind: 'barbed', name: '有刺鉄線' },
-  { kind: 'turret', name: '自動タレット' },
-];
 
-/** 有刺鉄線：上を通るゾンビを大きく減速＋少しダメージ */
-export const BARBED = { dps: 9, slow: 0.32, wearPerSec: 3 };
 
-/** 自動タレット */
-export const TURRET = { range: 340, fireInterval: 0.3, damage: 17, maxAmmo: 60, startAmmo: 30, noise: 260 };
-
-/** クラフト素材の名前 */
-export const MATERIAL_NAMES = {
-  wood: '木材',
-  scrap: '鉄',
-  gunpowder: '火薬',
-  cloth: '布',
-  herb: '薬草',
-  parts: '武器パーツ',
-} as const;
-export type MaterialId = keyof typeof MATERIAL_NAMES;
 
 export interface Recipe {
   id: string;
@@ -274,18 +191,21 @@ export interface Recipe {
   desc: string;
   /** 作業台の近くでしか作れない */
   bench: boolean;
-  cost: Partial<Record<MaterialId, number>>;
+  cost: Partial<Record<ItemId, number>>;
+  out: { id: ItemId; n: number };
 }
 
-/** クラフトレシピ（木材・鉄はチーム共有、それ以外は個人の持ち物から消費） */
+/** クラフトレシピ（素材はバックパックから消費し、完成品はバックパックへ） */
 export const RECIPES: Recipe[] = [
-  { id: 'ammo', name: '弾薬 ×10', desc: 'ハンドガン・ライフル用の弾', bench: false, cost: { gunpowder: 1, scrap: 1 } },
-  { id: 'shells', name: 'ショットガンシェル ×6', desc: 'ショットガン用の散弾', bench: false, cost: { gunpowder: 2, scrap: 1 } },
-  { id: 'medkit', name: '救急キット', desc: 'HPを55回復する', bench: false, cost: { cloth: 2, herb: 1 } },
-  { id: 'kit', name: 'タレットキット', desc: '建築ツールで設置。近づくゾンビを自動で撃つ（[F]で弾を補充）', bench: true, cost: { scrap: 8, parts: 2, gunpowder: 2 } },
-  { id: 'rifle', name: 'アサルトライフル', desc: '銃をフルオート30連発に強化', bench: true, cost: { parts: 3, scrap: 10 } },
-  { id: 'shotgun', name: 'ショットガン', desc: '近距離の群れを一掃する散弾銃', bench: true, cost: { parts: 2, scrap: 8, wood: 4 } },
-  { id: 'axe', name: '鋼の斧', desc: '近接ダメージ1.6倍・採取量2倍', bench: true, cost: { scrap: 6, parts: 1 } },
+  { id: 'bandage', name: '包帯', desc: '布から包帯を作る', bench: false, cost: { cloth: 2 }, out: { id: 'bandage', n: 1 } },
+  { id: 'ammo9', name: '9mm弾 ×15', desc: 'ハンドガン・SMG 用', bench: true, cost: { gunpowder: 1, scrap: 1 }, out: { id: 'ammo9', n: 15 } },
+  { id: 'ammo762', name: '7.62mm弾 ×10', desc: 'ライフル用', bench: true, cost: { gunpowder: 2, scrap: 2 }, out: { id: 'ammo762', n: 10 } },
+  { id: 'shells', name: '12ゲージ弾 ×6', desc: 'ショットガン用', bench: true, cost: { gunpowder: 2, scrap: 1 }, out: { id: 'shells', n: 6 } },
+  { id: 'medkit', name: '救急キット', desc: '包帯と薬品を調合', bench: true, cost: { bandage: 2, chem: 1 }, out: { id: 'medkit', n: 1 } },
+  { id: 'suppressor', name: 'サプレッサー', desc: '銃声を抑えるアタッチメント', bench: true, cost: { parts: 2, scrap: 4 }, out: { id: 'suppressor', n: 1 } },
+  { id: 'extmag', name: '拡張マガジン', desc: '装弾数 +60%', bench: true, cost: { parts: 2, scrap: 3 }, out: { id: 'extmag', n: 1 } },
+  { id: 'grip', name: 'フォアグリップ', desc: '反動・ばらつき軽減', bench: true, cost: { parts: 1, scrap: 3 }, out: { id: 'grip', n: 1 } },
+  { id: 'scope', name: 'スコープ', desc: '視界が伸び命中精度アップ', bench: true, cost: { parts: 1, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
 ];
 
 /** 作業台を使える距離(px) */
@@ -305,6 +225,10 @@ export const T_FENCE = 8; // 金網フェンス（通れないが見通せる）
 /** 屋内の床 */
 export const INDOOR_FLOORS: ReadonlySet<number> = new Set([T_FLOOR, T_WOOD, T_TILE]);
 
-/** 拠点の敷地（タイル座標）：フェンスで囲まれた安全地帯 */
+/** 倉庫の大きさ */
+export const STORAGE_SHARED = 40;
+export const STORAGE_PERSONAL = 24;
+
+/** 拠点の敷地（タイル座標）：フェンスで囲まれた安全地帯（ゾンビは入ってこない） */
 export const SAFEHOUSE = { x: 31, y: 21, w: 18, h: 17 };
 export const CAMPFIRE_TILE = { x: 44, y: 33 };

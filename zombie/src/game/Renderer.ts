@@ -2,15 +2,12 @@
 // Renderer: カメラ・マップ・夜の暗闇＆懐中電灯ライティング・建築グリッド・HUD・ミニマップ
 //   見た目（キャラ・オブジェクト）の描画は Art.ts の ArtSet に委譲している
 // ============================================================
-import type { BuildKind, GameMode, ObjSnap, PlayerSnap, ViewState, WeaponId, ZombieSnap } from '../types';
+import type { GameMode, ObjSnap, PlayerSnap, ViewState, WeaponId, ZombieSnap } from '../types';
 import { Tool } from '../types';
 import { type ArtSet, type PlayerAnim, type TallQuery, VectorArt, type ZombieAnim } from './Art';
 import {
-  BREAKABLE_KINDS,
-  BUILD_COST,
   CYCLE_SECONDS,
   DAY_SECONDS,
-  HORDE_EVERY,
   MAP_H,
   MAP_W,
   PLAYER,
@@ -19,18 +16,18 @@ import {
   T_WINDOW,
   TILE,
   TORCH_LIGHT,
-  BLUEPRINTS,
   SLOTS,
   USABLE_SLOTS,
-  WEAPONS,
   WORLD_H,
   WORLD_W,
   ZOMBIE,
 } from './constants';
 import type { Decal, Effects } from './Effects';
-import { circleOverlapsTile, clamp } from './physics';
+import { clamp } from './physics';
 import { type Viewer, Vision } from './vision';
 import { locationAt, type TileWorld } from './world';
+import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
+import { CONTAINER_KINDS } from './Engine';
 
 /** 落ち影と側面を持つ「高い」建築物 */
 const WALL_KINDS: ReadonlySet<ObjSnap['kind']> = new Set<ObjSnap['kind']>(['stone', 'woodWall', 'ironWall']);
@@ -46,8 +43,6 @@ export interface RenderOptions {
   /** ゲスト自機は射撃/近接アニメをローカルで発生させるので、カウンタ検出をしない */
   skipAnimDetectId: number | null;
   localTool: number;
-  localBp: number;
-  altDown: boolean;
   reviveHint: boolean;
   interactHint: string | null;
   syncMs?: number;
@@ -57,8 +52,7 @@ export interface RenderOptions {
 /** 射撃・近接・リロードを検出したときに呼ばれるフック（効果音用） */
 /** プレイヤーが手に持っている射撃武器 */
 export function weaponOfSnap(p: PlayerSnap): WeaponId {
-  if (p.tool === Tool.Shotgun && p.inv.shotgun) return 'shotgun';
-  return p.inv.gun >= 1 ? 'rifle' : 'pistol';
+  return heldWeapon(p)?.id ?? 'pistol';
 }
 
 export interface AnimHooks {
@@ -133,7 +127,6 @@ export class Renderer {
   private localId = -1;
   /** 照準の広がり（連射で広がる） */
   private bloom = 0;
-  private lastStash = { wood: 0, scrap: 0 };
   private forest: CanvasPattern | null = null;
   private curLoc: string | null = null;
   private locToast: { text: string; sub: string; color: string; life: number } | null = null;
@@ -289,7 +282,6 @@ export class Renderer {
     // 壁の落ち影（重なっても濃くならないよう1つのパスでまとめて塗る）
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
-    this.lastStash = view.stash;
     for (const ob of visible) if (WALL_KINDS.has(ob.kind)) ctx.rect(ob.tx * TILE + 7, ob.ty * TILE + 10, TILE, TILE);
     ctx.fill();
     const tall: ObjSnap[] = [];
@@ -307,7 +299,7 @@ export class Renderer {
     const vis = this.vision;
     const zombiesSeen = view.zombies.filter((z) => vis.isVisible(z.x, z.y));
 
-    this.drawBuildGhost(o, me);
+    this.drawSearch(view, me);
     this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
     for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
@@ -534,76 +526,46 @@ export class Renderer {
     }
   }
 
-  // ---------------- 建築グリッド・ゴースト ----------------
+  // ---------------- 探索（漁り）の表示 ----------------
 
-  private drawBuildGhost(o: RenderOptions, me: PlayerSnap | undefined): void {
-    if (!me || me.status !== 'alive' || o.localTool !== Tool.Build) return;
-    const kind: BuildKind = BLUEPRINTS[o.localBp]?.kind ?? 'woodWall';
+  /** 近くの未探索の入れ物に印を付け、探索中は進捗バーを出す */
+  private drawSearch(view: ViewState, me: PlayerSnap | undefined): void {
     const { ctx } = this;
-    const mw = this.screenToWorld(o.mouseX, o.mouseY);
-    const tx = Math.floor(mw.x / TILE);
-    const ty = Math.floor(mw.y / TILE);
-
-    // 周囲のグリッド線（カーソルから離れるほど薄く）
-    for (let gy = ty - 5; gy <= ty + 5; gy++)
-      for (let gx = tx - 5; gx <= tx + 5; gx++) {
-        const d = Math.hypot(gx - tx, gy - ty);
-        if (d > 5) continue;
-        ctx.strokeStyle = `rgba(180,220,255,${0.16 * (1 - d / 5.5)})`;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(gx * TILE + 0.5, gy * TILE + 0.5, TILE - 1, TILE - 1);
-      }
-    // 設置範囲
-    ctx.setLineDash([6, 8]);
-    ctx.strokeStyle = 'rgba(180,220,255,0.25)';
-    ctx.beginPath();
-    ctx.arc(me.x, me.y, PLAYER.buildRange, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    const cx = (tx + 0.5) * TILE;
-    const cy = (ty + 0.5) * TILE;
-    const ob = this.world.objAt(tx, ty);
-    // 修理対象（壊れた建築物）にカーソルが乗っていたら修理表示
-    const repairable = !!ob && (BREAKABLE_KINDS.has(ob.kind) || ob.kind === 'spike' || ob.kind === 'torch');
-    if (repairable && ob) {
-      const inRange = Math.hypot(cx - me.x, cy - me.y) <= PLAYER.buildRange * 0.7;
-      const damaged = ob.hp < ob.maxHp;
-      ctx.strokeStyle = !inRange ? 'rgba(255,255,255,0.3)' : damaged ? '#9fb4c2' : 'rgba(125,211,255,0.45)';
-      ctx.lineWidth = o.altDown ? 3 : 2;
-      ctx.strokeRect(tx * TILE + 1, ty * TILE + 1, TILE - 2, TILE - 2);
-      this.worldLabel(
-        cx,
-        ty * TILE - 10,
-        damaged ? `右クリックで修理  ${Math.ceil(ob.hp)}/${ob.maxHp}` : `耐久 ${Math.ceil(ob.hp)}/${ob.maxHp}`,
-        damaged ? '#9fdcff' : '#c3cbe0',
-      );
-      return;
+    if (me && me.status === 'alive') {
+      const ptx = Math.floor(me.x / TILE);
+      const pty = Math.floor(me.y / TILE);
+      for (let ty = pty - 4; ty <= pty + 4; ty++)
+        for (let tx = ptx - 4; tx <= ptx + 4; tx++) {
+          const ob = this.world.objAt(tx, ty);
+          if (!ob || !CONTAINER_KINDS.has(ob.kind) || !this.vision.tileVisible(tx, ty)) continue;
+          if (ob.kind === 'car' && ob.hp <= 0) continue;
+          const fresh = ob.ready === 1 || ob.kind === 'bag';
+          if (!fresh) continue;
+          const cx = (tx + 0.5) * TILE;
+          const cy = (ty + 0.5) * TILE;
+          const d = Math.hypot(cx - me.x, cy - me.y);
+          const a = Math.max(0, 1 - d / 170) * (0.55 + Math.sin(this.time * 3 + ob.id) * 0.2);
+          if (a <= 0.02) continue;
+          ctx.strokeStyle = `rgba(226,204,140,${a})`;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 4]);
+          ctx.strokeRect(tx * TILE + 3, ty * TILE + 3, TILE - 6, TILE - 6);
+          ctx.setLineDash([]);
+        }
     }
-    const cost = BUILD_COST[kind];
-    const inRange = Math.hypot(cx - me.x, cy - me.y) <= PLAYER.buildRange;
-    const solidKind = kind === 'woodWall' || kind === 'ironWall';
-    const affordable = this.lastStash.wood >= cost.wood && this.lastStash.scrap >= cost.scrap;
-    const valid =
-      inRange &&
-      affordable &&
-      this.world.inBounds(tx, ty) &&
-      this.world.terrainAt(tx, ty) !== T_WALL &&
-      !ob &&
-      (!solidKind || !circleOverlapsTile(me.x, me.y, PLAYER.radius, tx, ty));
-    const ghost: ObjSnap = { id: -1, kind, tx, ty, hp: 1, maxHp: 1, ready: 1 };
-    ctx.globalAlpha = 0.5;
-    if (!this.art.drawLowObject(ctx, ghost, this.time, () => false)) this.art.drawTallObject(ctx, ghost, this.time);
-    ctx.globalAlpha = 1;
-    const pulse = 0.15 + Math.sin(this.time * 6) * 0.05;
-    ctx.fillStyle = valid ? `rgba(90,255,140,${pulse})` : `rgba(255,70,70,${pulse + 0.08})`;
-    ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
-    ctx.strokeStyle = valid ? '#8fbf6a' : '#c0503a';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(tx * TILE + 1, ty * TILE + 1, TILE - 2, TILE - 2);
-    const costText = cost.wood ? `木材 ${cost.wood}` : `鉄 ${cost.scrap}`;
-    const why = !inRange ? '遠すぎる' : !affordable ? '資材不足' : ob || this.world.terrainAt(tx, ty) === T_WALL ? '置けない' : '';
-    this.worldLabel(cx, ty * TILE - 10, why ? `${costText}（${why}）` : costText, valid ? '#a9c79c' : '#ff9a9a');
+    for (const p of view.players) {
+      if (!p.searchId || p.status !== 'alive') continue;
+      const ob = this.world.objects.get(p.searchId);
+      if (!ob) continue;
+      const cx = p.x;
+      const cy = p.y - 46;
+      const w = 64;
+      ctx.fillStyle = 'rgba(10,10,8,0.8)';
+      ctx.fillRect(cx - w / 2 - 2, cy - 5, w + 4, 10);
+      ctx.fillStyle = '#c9b27a';
+      ctx.fillRect(cx - w / 2, cy - 3, w * Math.min(1, p.searchP), 6);
+      if (p.id === this.localId) this.worldLabel(cx, cy - 12, `${CONTAINER_NAMES[ob.kind] ?? ''}を探索中…`, '#e6dcc0');
+    }
   }
 
   private worldLabel(x: number, y: number, text: string, color: string): void {
@@ -790,7 +752,7 @@ export class Renderer {
   }
 
   private drawLighting(view: ViewState, dark: number, ox: number, oy: number): void {
-    const horde = view.phase === 'horde';
+    const horde = false;
     const { ctx } = this;
     const amb = ambientAt(view.minute);
     if (horde) {
@@ -1022,7 +984,7 @@ export class Renderer {
         const b = Math.sin(z.angle);
         const ex = z.x + a * r * 0.45;
         const ey = z.y + b * r * 0.45;
-        ctx.fillStyle = z.horde ? `rgba(255,40,40,${0.8 * dark})` : `rgba(240,230,120,${0.55 * dark})`;
+        ctx.fillStyle = z.alert === 2 ? `rgba(240,90,60,${0.8 * dark})` : `rgba(230,220,120,${0.5 * dark})`;
         for (const sgn of [-1, 1]) {
           ctx.beginPath();
           ctx.arc(ex - b * r * 0.16 * sgn, ey + a * r * 0.16 * sgn, 1.8, 0, Math.PI * 2);
@@ -1037,7 +999,8 @@ export class Renderer {
   private drawHUD(view: ViewState, o: RenderOptions, me: PlayerSnap | undefined, dark: number): void {
     const { ctx, w, h } = this;
     const fx = o.effects;
-    const horde = view.phase === 'horde';
+    // 追われているときは画面端がうっすら赤く脈打つ
+    const horde = !!me && me.status === 'alive' && view.zombies.some((z) => z.alert === 2 && Math.hypot(z.x - me.x, z.y - me.y) < 420 && this.vision.isVisible(z.x, z.y));
 
     // 大襲撃：赤い空と画面端
     if (horde) {
@@ -1056,7 +1019,7 @@ export class Renderer {
       ctx.fillRect(0, 0, w, h);
     }
 
-    this.drawClock(view);
+    this.drawClock(view, me);
     this.drawLocationToast(me, o.dt);
     this.drawAllyIndicators(view, o.localId, o.effects);
     this.drawTeam(view, o.localId);
@@ -1136,15 +1099,16 @@ export class Renderer {
     const cx = o.mouseX;
     const cy = o.mouseY;
     const alive = me && me.status === 'alive';
-    const isGun = o.localTool === Tool.Gun || o.localTool === Tool.Shotgun;
+    const held = me ? heldWeapon({ ...me, tool: o.localTool }) : null;
+    const isGun = !!held;
     const col = alive ? (PLAYER_COLORS[o.localId] ?? '#fff') : '#777';
     ctx.lineWidth = 2;
     ctx.strokeStyle = 'rgba(0,0,0,0.6)';
     const drawCross = () => {
       ctx.beginPath();
       if (isGun) {
-        const sg = o.localTool === Tool.Shotgun;
-        const g = (sg ? 12 : 5) + this.bloom * 12;
+        const sg = held?.id === 'shotgun';
+        const g = (sg ? 12 : 4) + (held ? effectiveStats(held.id, held.w).spread * 60 : 0) + this.bloom * 12;
         const len = 8;
         ctx.moveTo(cx - g - len, cy);
         ctx.lineTo(cx - g, cy);
@@ -1170,15 +1134,15 @@ export class Renderer {
     drawCross();
     ctx.fillStyle = '#fff';
     ctx.fillRect(cx - 1, cy - 1, 2, 2);
-    if (me && isGun && alive) {
-      const sg = o.localTool === Tool.Shotgun;
+    if (me && held && alive) {
       ctx.font = 'bold 11px "Segoe UI", sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      const mag = sg ? me.inv.smag : me.inv.mag;
-      const res = sg ? me.inv.shells : me.inv.ammo;
+      const st = effectiveStats(held.id, held.w);
+      const mag = held.w.mag;
+      const res = countItem(me.bag, st.ammo);
       ctx.fillStyle = mag === 0 ? '#c06050' : '#e6ebf5';
-      const txt = sg && !me.inv.shotgun ? '未所持' : me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}`;
+      const txt = me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.7)';
       ctx.strokeText(txt, cx + 16, cy + 16);
@@ -1195,7 +1159,7 @@ export class Renderer {
       if (key !== this.curLoc) {
         this.curLoc = key;
         if (loc) {
-          const danger = loc.tier >= 3 ? '危険：見張りのゾンビ多数・レア物資' : loc.tier === 2 ? 'やや危険：弾薬・火薬・鉄が見つかりやすい' : '比較的安全：食料・布・薬草';
+          const danger = loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
           this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
         }
       }
@@ -1357,19 +1321,18 @@ export class Renderer {
     }
   }
 
-  private drawClock(view: ViewState): void {
+  private drawClock(view: ViewState, me?: PlayerSnap): void {
     const { ctx, w } = this;
     const pw = 300;
     const x = w - pw - 12;
     const cxm = x + pw / 2;
-    const horde = view.phase === 'horde';
-    panel(ctx, x, 10, pw, 66, horde ? 'rgba(60,0,0,0.8)' : undefined);
+    panel(ctx, x, 10, pw, 66);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    const icon = view.phase === 'day' ? '☀' : horde ? '☠' : '☾';
-    const label = view.phase === 'day' ? '昼' : horde ? '大襲撃' : '夜';
+    const icon = view.phase === 'day' ? '☀' : '☾';
+    const label = view.phase === 'day' ? '昼' : '夜';
     ctx.font = '900 22px "Segoe UI", sans-serif';
-    ctx.fillStyle = horde ? '#c06050' : view.phase === 'night' ? '#aab4c8' : '#e0cfa8';
+    ctx.fillStyle = view.phase === 'night' ? '#aab4c8' : '#e0cfa8';
     ctx.fillText(`Day ${view.day} - ${formatClock(view.minute)}  ${icon} ${label}`, cxm, 16);
 
     // 時間バー（昼=黄 / 夜=青）
@@ -1379,25 +1342,30 @@ export class Renderer {
     const dayFrac = DAY_SECONDS / CYCLE_SECONDS;
     ctx.fillStyle = '#6b5a2a';
     ctx.fillRect(bx, by, bw * dayFrac, 4);
-    ctx.fillStyle = horde || view.day % HORDE_EVERY === 0 ? '#6b1a1a' : '#26305a';
+    ctx.fillStyle = '#26305a';
     ctx.fillRect(bx + bw * dayFrac, by, bw * (1 - dayFrac), 4);
     const m = view.minute;
     const cyc = m >= 360 && m < 1200 ? ((m - 360) / 840) * dayFrac : dayFrac + (((m - 1200 + 1440) % 1440) / 600) * (1 - dayFrac);
     ctx.fillStyle = '#fff';
     ctx.fillRect(bx + bw * clamp(cyc, 0, 1) - 1, by - 3, 3, 10);
 
+    // 現在地の危険度
     ctx.font = 'bold 12px "Segoe UI", sans-serif';
-    let sub: string;
-    if (horde) sub = `大襲撃中！ 夜明けまで生き延びろ（残り ${view.hordeLeft} 体）`;
-    else if (view.day % HORDE_EVERY === 0) {
-      const until = Math.max(0, 1200 - view.minute);
-      sub = view.phase === 'day' ? `⚠ 大襲撃まで あと ${Math.floor(until / 60)}時間${String(Math.floor(until % 60)).padStart(2, '0')}分` : '⚠ 大襲撃';
+    let sub = '野外';
+    let col = '#c3cbe0';
+    if (me) {
+      const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
+      if (loc?.kind === 'base') {
+        sub = '拠点（安全地帯）— 焚き火のそばで回復';
+        col = '#9fc48a';
+      } else if (loc) {
+        sub = `${loc.name}  ${'★'.repeat(loc.tier)}${loc.tier >= 3 ? ' 危険' : ''}`;
+        col = loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8b870' : '#c3cbe0';
+      } else if (view.phase === 'night') {
+        sub = '野外（夜は徘徊者が増える）';
+      }
     }
-    else {
-      const left = HORDE_EVERY - (view.day % HORDE_EVERY);
-      sub = `次の大襲撃まで あと ${left} 日（Day ${view.day + left} の夜）`;
-    }
-    ctx.fillStyle = horde || view.day % HORDE_EVERY === 0 ? '#c98070' : '#c3cbe0';
+    ctx.fillStyle = col;
     ctx.fillText(sub, cxm, 54);
   }
 
@@ -1423,7 +1391,7 @@ export class Renderer {
       ctx.textAlign = 'right';
       ctx.fillStyle = '#aab4c8';
       ctx.font = '11px "Segoe UI", sans-serif';
-      ctx.fillText(`☠${p.kills}  ⌂${p.builds}`, x + pw - 10, y + 3);
+      ctx.fillText(`☠${p.kills}  ▣${p.bag.filter((b) => b).length}/${p.bag.length}`, x + pw - 10, y + 3);
       const bw = pw - 36;
       ctx.fillStyle = 'rgba(255,255,255,0.1)';
       ctx.fillRect(x + 24, y + 19, bw, 5);
@@ -1481,36 +1449,47 @@ export class Renderer {
     ctx.fillRect(x + 46 + (pw - 58) * (PLAYER.dashStamina / PLAYER.maxStamina), y + 26, 1, 10);
     bar('空腹', y + 42, me.hunger / 100, me.hunger > 25 ? '#b08a50' : '#c0573e', `${Math.ceil(me.hunger)}%`);
 
-    ctx.font = '12px "Segoe UI", sans-serif';
-    const rows: [string, string, string][][] = [
-      [
-        ['弾', `${me.inv.mag}/${me.inv.ammo}`, '#c9a85a'],
-        ['シェル', `${me.inv.smag}/${me.inv.shells}`, '#c08a6a'],
-        ['火薬', String(me.inv.gunpowder), '#d0a070'],
-        ['キット', String(me.inv.kit), '#9fb4c2'],
-      ],
-      [
-        ['布', String(me.inv.cloth), '#e6d8c0'],
-        ['薬草', String(me.inv.herb), '#8fdc7a'],
-        ['パーツ', String(me.inv.parts), '#c99a68'],
-        ['木/鉄', `${view.stash.wood}/${view.stash.scrap}`, '#d9a66b'],
-      ],
-    ];
-    rows.forEach((row, ri) =>
-      row.forEach(([k, v, c], i) => {
-        const ix = x + 10 + i * 55;
-        const iy = y + 62 + ri * 28;
-        ctx.fillStyle = '#8f9bb3';
-        ctx.font = '10px "Segoe UI", sans-serif';
-        ctx.fillText(k, ix, iy);
-        ctx.fillStyle = c;
-        ctx.font = 'bold 12px "Segoe UI", sans-serif';
-        ctx.fillText(v, ix, iy + 13);
-      }),
-    );
+    // 装備と持ち物の要約
+    const held = heldWeapon({ ...me, tool: Tool.Primary }) ?? null;
+    const side = heldWeapon({ ...me, tool: Tool.Secondary }) ?? null;
+    const wtxt = (s: typeof held, label: string, iy: number) => {
+      ctx.font = '10px "Segoe UI", sans-serif';
+      ctx.fillStyle = '#8f9bb3';
+      ctx.fillText(label, x + 10, iy);
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      if (!s) {
+        ctx.fillStyle = '#6f7a90';
+        ctx.fillText('—', x + 46, iy);
+        return;
+      }
+      const st = effectiveStats(s.id, s.w);
+      const mods = (['scope', 'suppressor', 'extmag', 'grip'] as const).filter((a) => s.w[a]).length;
+      ctx.fillStyle = '#e6dcc0';
+      ctx.fillText(`${ITEMS[s.id].name}${mods ? ` +${mods}` : ''}`, x + 46, iy);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = s.w.mag === 0 ? '#c06a5a' : '#c9a85a';
+      ctx.fillText(`${s.w.mag}/${countItem(me.bag, st.ammo)}`, x + pw - 10, iy);
+      ctx.textAlign = 'left';
+    };
+    wtxt(held, 'メイン', y + 66);
+    wtxt(side, 'サブ', y + 84);
+    const used = me.bag.filter((b) => b).length;
+    ctx.font = '10px "Segoe UI", sans-serif';
+    ctx.fillStyle = '#8f9bb3';
+    ctx.fillText('バッグ', x + 10, y + 102);
+    for (let i = 0; i < me.bag.length; i++) {
+      ctx.fillStyle = me.bag[i] ? '#b8a878' : 'rgba(255,255,255,0.12)';
+      ctx.fillRect(x + 46 + i * 9, y + 98, 7, 8);
+    }
+    ctx.textAlign = 'right';
+    ctx.fillStyle = used >= me.bag.length ? '#c06a5a' : '#c3cbe0';
+    ctx.font = 'bold 10px "Segoe UI", sans-serif';
+    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 102);
+    ctx.textAlign = 'left';
     ctx.font = '9px "Segoe UI", sans-serif';
     ctx.fillStyle = '#6f7a90';
-    ctx.fillText('[F]調べる [R]リロード [C]クラフト [Q]食事 [H]救急', x + 10, y + ph - 7);
+    ctx.fillText('[F]探索/ドア [Tab]持ち物 [R]リロード [C]クラフト [Q]食事 [H]回復', x + 10, y + ph - 7);
+    void view;
   }
 
   private drawHotbar(o: RenderOptions, view: ViewState): void {
@@ -1541,40 +1520,39 @@ export class Renderer {
       let label = '';
       let warn = false;
       let locked = false;
+      const cx = x + size / 2;
+      const cy = y + size / 2 - 3;
       switch (t.id) {
         case Tool.Melee:
-          drawSlotIcon(ctx, 'axe', x + size / 2, y + size / 2 - 3);
+          drawSlotIcon(ctx, 'axe', cx, cy);
           label = '斧';
           break;
-        case Tool.Gun:
-          drawSlotIcon(ctx, me.inv.gun >= 1 ? 'rifle' : 'pistol', x + size / 2, y + size / 2 - 3);
-          label = `${me.inv.mag}/${me.inv.ammo}`;
-          warn = me.inv.mag === 0;
-          break;
-        case Tool.Shotgun:
-          locked = !me.inv.shotgun;
-          drawSlotIcon(ctx, 'shotgun', x + size / 2, y + size / 2 - 3, locked);
-          label = locked ? '未入手' : `${me.inv.smag}/${me.inv.shells}`;
-          warn = !locked && me.inv.smag === 0;
-          break;
-        case Tool.Build: {
-          const bp = BLUEPRINTS[o.localBp];
-          drawBlueprintIcon(ctx, bp.kind, x + size / 2, y + size / 2 - 3);
-          const c = BUILD_COST[bp.kind];
-          label = c.wood ? `木${c.wood}` : `鉄${c.scrap}`;
-          warn = view.stash.wood < c.wood || view.stash.scrap < c.scrap;
+        case Tool.Primary:
+        case Tool.Secondary: {
+          const s = heldWeapon({ ...me, tool: t.id });
+          locked = !s;
+          const icon = !s ? (t.id === Tool.Primary ? 'rifle' : 'pistol') : s.id === 'pistol' ? 'pistol' : s.id === 'shotgun' ? 'shotgun' : 'rifle';
+          drawSlotIcon(ctx, icon, cx, cy, locked);
+          if (s) {
+            label = `${s.w.mag}/${countItem(me.bag, effectiveStats(s.id, s.w).ammo)}`;
+            warn = s.w.mag === 0;
+          } else label = 'なし';
           break;
         }
-        case Tool.Food:
-          drawSlotIcon(ctx, 'food', x + size / 2, y + size / 2 - 3, me.inv.food <= 0);
-          label = `×${me.inv.food}`;
-          warn = me.inv.food <= 0;
+        case Tool.Meds: {
+          const n = countItem(me.bag, 'bandage') + countItem(me.bag, 'medkit');
+          drawSlotIcon(ctx, 'medkit', cx, cy, n <= 0);
+          label = `×${n}`;
+          warn = n <= 0;
           break;
-        case Tool.Medkit:
-          drawSlotIcon(ctx, 'medkit', x + size / 2, y + size / 2 - 3, me.inv.medkit <= 0);
-          label = `×${me.inv.medkit}`;
-          warn = me.inv.medkit <= 0;
+        }
+        case Tool.Food: {
+          const n = countItem(me.bag, 'can') + countItem(me.bag, 'mre');
+          drawSlotIcon(ctx, 'food', cx, cy, n <= 0);
+          label = `×${n}`;
+          warn = n <= 0;
           break;
+        }
       }
       ctx.textAlign = 'center';
       ctx.font = 'bold 9px "Segoe UI", sans-serif';
@@ -1582,49 +1560,17 @@ export class Renderer {
       ctx.fillText(label, x + size / 2, y + size - 12);
     });
 
-    // 建築ツール選択中：設計図の選択バー
-    if (o.localTool === Tool.Build) {
-      const bs = 40;
-      const bg = 6;
-      const bt = BLUEPRINTS.length * bs + (BLUEPRINTS.length - 1) * bg;
-      const bx0 = w / 2 - bt / 2;
-      const by = y - bs - 30;
-      BLUEPRINTS.forEach((bp, i) => {
-        const bx = bx0 + i * (bs + bg);
-        const sel = i === o.localBp;
-        const c = BUILD_COST[bp.kind];
-        const ok = view.stash.wood >= c.wood && view.stash.scrap >= c.scrap;
-        panel(ctx, bx, by, bs, bs, sel ? 'rgba(70,110,70,0.92)' : undefined);
-        if (sel) {
-          ctx.strokeStyle = '#a9c79c';
-          ctx.lineWidth = 2;
-          roundRectPath(ctx, bx + 1, by + 1, bs - 2, bs - 2, 7);
-          ctx.stroke();
-        }
-        drawBlueprintIcon(ctx, bp.kind, bx + bs / 2, by + bs / 2 - 4, 0.8);
-        ctx.font = 'bold 9px "Segoe UI", sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillStyle = ok ? '#dfe6f3' : '#c06a5a';
-        ctx.fillText(c.wood ? `木${c.wood}` : `鉄${c.scrap}`, bx + bs / 2, by + bs - 11);
-      });
-      ctx.font = 'bold 11px "Segoe UI", sans-serif';
+    const cur = SLOTS[o.localTool];
+    if (cur && me) {
+      ctx.font = 'bold 12px "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillStyle = '#e6ebf5';
-      ctx.fillText(`${BLUEPRINTS[o.localBp].name}  [B]設計図切替  左クリック:設置  右クリック:修理`, w / 2, by - 5);
-    } else {
-      const cur = SLOTS[o.localTool];
-      if (cur) {
-        ctx.font = 'bold 12px "Segoe UI", sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
-        ctx.fillStyle = '#e6ebf5';
-        let name: string = cur.name;
-        if (o.localTool === Tool.Gun && me) name = WEAPONS[me.inv.gun >= 1 ? 'rifle' : 'pistol'].name;
-        ctx.fillText(`${name}  （1〜6 / ホイールで切替）`, w / 2, y - 6);
-      }
+      const s = heldWeapon({ ...me, tool: o.localTool });
+      const name: string = s ? ITEMS[s.id].name : cur.name;
+      ctx.fillText(`${name}  （1〜5 / ホイールで切替）`, w / 2, y - 6);
     }
+    void view;
   }
 
   private drawMinimap(view: ViewState, localId: number): void {
@@ -1658,9 +1604,9 @@ export class Renderer {
       else if (ob.kind === 'stone') c = '#9a968f';
       else if (ob.kind === 'spike') c = '#8a6a3a';
       else if (ob.kind === 'campfire' || ob.kind === 'torch') c = '#c88a4a';
-      else if (ob.kind === 'crate' && ob.ready) c = '#d8c48a';
-      else if (ob.kind === 'mcrate' && ob.ready) c = '#ff9a4d';
-      else if (ob.kind === 'bench' || ob.kind === 'chest') c = '#c9a85a';
+      else if (ob.kind === 'bag') c = '#e0d090';
+      else if (ob.kind === 'mcrate' && ob.ready) c = '#c98a50';
+      else if (ob.kind === 'bench' || ob.kind === 'chest' || ob.kind === 'stash') c = '#c9a85a';
       else if (ob.kind === 'turret') c = '#9fb4c2';
       else if (ob.kind === 'barbed') c = '#8a8f96';
       if (!c) continue;
@@ -1669,7 +1615,7 @@ export class Renderer {
     }
     for (const z of view.zombies) {
       if (!this.vision.isVisible(z.x, z.y)) continue;
-      ctx.fillStyle = z.horde ? '#ff3030' : '#d05050';
+      ctx.fillStyle = z.alert === 2 ? '#e05a40' : z.alert === 1 ? '#c9a050' : '#a05050';
       ctx.fillRect(mx + z.x * k - 1, my + z.y * k - 1, 2, 2);
     }
     for (const p of view.players) {
@@ -1798,94 +1744,6 @@ function drawSlotIcon(ctx: CanvasRenderingContext2D, kind: 'axe' | 'pistol' | 'r
   ctx.restore();
 }
 
-function drawBlueprintIcon(ctx: CanvasRenderingContext2D, kind: BuildKind, x: number, y: number, s = 1): void {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.scale(s, s);
-  ctx.lineCap = 'round';
-  switch (kind) {
-    case 'woodWall':
-      for (let i = 0; i < 3; i++) {
-        ctx.fillStyle = i % 2 ? '#a06d3e' : '#8a5c33';
-        ctx.fillRect(-12, -11 + i * 8, 24, 7);
-      }
-      break;
-    case 'ironWall':
-      ctx.fillStyle = '#8d99a8';
-      ctx.fillRect(-12, -11, 24, 22);
-      ctx.strokeStyle = '#3d444d';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(-11, -10, 22, 20);
-      break;
-    case 'spike':
-      ctx.strokeStyle = '#c9a26b';
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      for (let i = -1; i <= 1; i++) {
-        ctx.moveTo(i * 8 - 4, 10);
-        ctx.lineTo(i * 8 + 4, -10);
-        ctx.moveTo(i * 8 + 4, 10);
-        ctx.lineTo(i * 8 - 4, -10);
-      }
-      ctx.stroke();
-      break;
-    case 'barbed':
-      ctx.strokeStyle = '#a3acb7';
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      for (let i = 0; i <= 24; i++) {
-        const px = -12 + i;
-        const py = Math.sin(i * 1.3) * 8;
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      }
-      ctx.stroke();
-      ctx.strokeStyle = '#5b4a3a';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(-12, -10);
-      ctx.lineTo(-12, 10);
-      ctx.moveTo(12, -10);
-      ctx.lineTo(12, 10);
-      ctx.stroke();
-      break;
-    case 'turret':
-      ctx.strokeStyle = '#2a2f37';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(0, 2);
-      ctx.lineTo(-9, 11);
-      ctx.moveTo(0, 2);
-      ctx.lineTo(9, 11);
-      ctx.stroke();
-      ctx.fillStyle = '#5f6b7a';
-      ctx.fillRect(-7, -6, 14, 10);
-      ctx.fillStyle = '#1b1f26';
-      ctx.fillRect(5, -3, 10, 4);
-      ctx.fillStyle = '#8fbf6a';
-      ctx.fillRect(-2, -3, 3, 3);
-      break;
-    case 'torch':
-      ctx.strokeStyle = '#7a5532';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.moveTo(0, 11);
-      ctx.lineTo(0, -3);
-      ctx.stroke();
-      ctx.fillStyle = '#c88a4a';
-      ctx.beginPath();
-      ctx.moveTo(-5, -3);
-      ctx.quadraticCurveTo(0, -18, 5, -3);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#d8c48a';
-      ctx.beginPath();
-      ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-      break;
-  }
-  ctx.restore();
-}
 
 /** マップ外の森（繰り返しパターン） */
 function makeForestPattern(ctx: CanvasRenderingContext2D): CanvasPattern {

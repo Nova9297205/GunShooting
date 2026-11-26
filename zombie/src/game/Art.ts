@@ -9,6 +9,7 @@ import type { ObjSnap, PlayerSnap, ZombieSnap } from '../types';
 import type { Corpse } from './Effects';
 import { Tool } from '../types';
 import { TILE, ZOMBIE } from './constants';
+import { heldWeapon } from './items';
 import { type BakedTerrain, bakeTerrain } from './TerrainArt';
 import type { TileWorld } from './world';
 
@@ -1154,7 +1155,7 @@ export class VectorArt implements ArtSet {
     // 目
     const ex = z.type === 'brute' ? r * 0.56 : z.type === 'runner' ? r * 0.75 : r * 0.48;
     const ey = z.type === 'brute' ? r * 0.12 : r * 0.15;
-    ctx.fillStyle = z.horde ? '#ff2a2a' : '#e8e070';
+    ctx.fillStyle = z.alert === 2 ? '#e86a4a' : '#d8d070';
     ctx.beginPath();
     ctx.arc(ex, -ey, r * 0.08 + 0.5, 0, Math.PI * 2);
     ctx.arc(ex, ey, r * 0.08 + 0.5, 0, Math.PI * 2);
@@ -1361,8 +1362,9 @@ export class VectorArt implements ArtSet {
       ctx.arc(x2, y2, 2.8, 0, Math.PI * 2);
       ctx.fill();
     };
-    const gun = p.tool === Tool.Gun ? (p.inv.gun >= 1 ? 'rifle' : 'pistol') : p.tool === Tool.Shotgun && p.inv.shotgun ? 'shotgun' : null;
-    if (gun) {
+    const held = heldWeapon(p);
+    const gun = held ? (held.id === 'pistol' ? 'pistol' : held.id === 'shotgun' ? 'shotgun' : 'rifle') : null;
+    if (gun && held) {
       const rc = anim.recoil;
       const long = gun !== 'pistol';
       arm(0, -8, (long ? 18 : 13) + rc, long ? -1 : -1);
@@ -1389,6 +1391,18 @@ export class VectorArt implements ArtSet {
         ctx.fillRect(14 + rc, 2, 5, 7); // マガジン
         ctx.fillStyle = '#4b5563';
         ctx.fillRect(10 + rc, -4.5, 9, 2); // 照準器
+        if (held.id === 'hunting') {
+          // 狩猟ライフル：長い銃身と木製ストック
+          ctx.fillStyle = '#6e4a2c';
+          roundRect(ctx, 0 + rc, -3, 16, 6, 2);
+          ctx.fill();
+          ctx.fillStyle = outline;
+          ctx.fillRect(36 + rc, -1.5, 8, 3);
+          muzzle = 44;
+        } else if (held.id === 'smg') {
+          ctx.fillStyle = '#1c1f24';
+          ctx.fillRect(16 + rc, 2, 3, 9);
+        }
       } else {
         muzzle = 36;
         ctx.fillStyle = outline;
@@ -1404,8 +1418,32 @@ export class VectorArt implements ArtSet {
         ctx.fillStyle = '#8a5c33';
         ctx.fillRect(20 + rc, 1, 7, 3.5); // ポンプ
       }
+      // アタッチメント
+      if (held.w.scope) {
+        ctx.fillStyle = outline;
+        roundRect(ctx, 8 + rc, -5.5, 13, 4, 1.5);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(150,200,220,0.7)';
+        ctx.fillRect(19 + rc, -5, 1.5, 3);
+      }
+      if (held.w.extmag && gun !== 'shotgun') {
+        ctx.fillStyle = '#1c1f24';
+        ctx.fillRect((gun === 'pistol' ? 13 : 14) + rc, 3, 5, 9);
+      }
+      if (held.w.grip && gun !== 'pistol') {
+        ctx.fillStyle = '#23262b';
+        ctx.fillRect(24 + rc, 2.5, 3, 5);
+      }
+      if (held.w.suppressor) {
+        ctx.fillStyle = outline;
+        roundRect(ctx, muzzle - 1 + rc, -2.5, 11, 5, 2);
+        ctx.fill();
+        ctx.fillStyle = '#3a3f46';
+        ctx.fillRect(muzzle + rc, -1.5, 9, 3);
+        muzzle += 10;
+      }
       if (anim.flash > 0) {
-        const s = (0.7 + anim.flashSeed * 0.6) * (gun === 'shotgun' ? 1.5 : 1);
+        const s = (0.7 + anim.flashSeed * 0.6) * (gun === 'shotgun' ? 1.5 : 1) * (held.w.suppressor ? 0.35 : 1);
         ctx.save();
         ctx.translate(muzzle + rc, 0.5);
         ctx.globalCompositeOperation = 'lighter';
@@ -1473,7 +1511,7 @@ export class VectorArt implements ArtSet {
         ctx.arc(0, 0, 36, -1.2, -1.2 + prog * 2.4);
         ctx.stroke();
       }
-    } else if (p.tool === Tool.Food || p.tool === Tool.Medkit || p.tool === Tool.Shotgun) {
+    } else if (p.tool === Tool.Food || p.tool === Tool.Meds || p.tool === Tool.Primary || p.tool === Tool.Secondary) {
       arm(0, -8, 12, -4);
       arm(0, 8, 12, 4);
       if (p.tool === Tool.Food) {
@@ -1481,7 +1519,7 @@ export class VectorArt implements ArtSet {
         ctx.fillRect(12, -4, 7, 8);
         ctx.fillStyle = '#d9534f';
         ctx.fillRect(12, -2, 7, 4);
-      } else if (p.tool === Tool.Medkit) {
+      } else if (p.tool === Tool.Meds) {
         ctx.fillStyle = '#e8edf2';
         ctx.fillRect(11, -5, 9, 10);
         ctx.fillStyle = '#d9534f';

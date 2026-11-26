@@ -7,7 +7,7 @@ import { audio } from './game/Audio';
 import { HostSimulation } from './game/Engine';
 import { GameSession } from './game/GameSession';
 import { NetworkManager, sanitizeName } from './network/NetworkManager';
-import type { BuildKind, GameMode, GameResult, LobbyPlayer, StartInfo } from './types';
+import type { GameMode, ObjKind, GameResult, LobbyPlayer, StartInfo } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const NAME_KEY = 'deadnights2d.name';
@@ -121,7 +121,7 @@ function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[]): void {
   const info: StartInfo = { players, seed, objs: sim.initialObjs() };
   if (m === 'host') net?.startGame(info);
   // 開発時のみ：コンソールから時間を進めるなどのデバッグ用
-  if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio, __place: (k: BuildKind, x: number, y: number) => sim.debugPlace(k, x, y) });
+  if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio, __place: (k: ObjKind, x: number, y: number) => sim.debugPlace(k, x, y) });
   startSession(m, info, 0, sim);
 }
 
@@ -135,7 +135,7 @@ function showResult(r: GameResult): void {
   $('result-day').textContent = String(r.day);
   const body = $('result-body');
   body.innerHTML = '';
-  for (const p of [...r.players].sort((a, b) => b.kills - a.kills)) {
+  for (const p of [...r.players].sort((a, b) => b.value - a.value)) {
     const tr = document.createElement('tr');
     const name = document.createElement('td');
     name.textContent = p.name + (p.id === (net?.localId ?? 0) ? ' (YOU)' : '');
@@ -143,9 +143,9 @@ function showResult(r: GameResult): void {
     name.style.fontWeight = '700';
     const kills = document.createElement('td');
     kills.textContent = String(p.kills);
-    const builds = document.createElement('td');
-    builds.textContent = String(p.builds);
-    tr.append(name, kills, builds);
+    const value = document.createElement('td');
+    value.textContent = String(p.value);
+    tr.append(name, kills, value);
     body.append(tr);
   }
   $('btn-result-back').textContent = mode === 'solo' ? 'タイトルへ戻る' : 'ロビーへ戻る';

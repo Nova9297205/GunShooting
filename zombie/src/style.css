@@ -501,3 +501,216 @@ details.controls summary {
   padding: 8px;
   background: #4a3a2a;
 }
+
+/* ---------------- インベントリ ---------------- */
+.craft.inv {
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  user-select: none;
+}
+#inv-body {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.inv-main,
+.inv-side {
+  flex: 0 0 auto;
+}
+.craft.inv h4,
+.craft h4 {
+  margin: 8px 0 6px;
+  font-size: 13px;
+  color: #c9bd96;
+  letter-spacing: 0.04em;
+}
+.craft h4 small {
+  color: #8a8f7a;
+  font-weight: 600;
+  margin-left: 6px;
+}
+.eqrow {
+  display: flex;
+  gap: 8px;
+}
+.eq {
+  flex: 1;
+}
+.eq small {
+  display: block;
+  font-size: 10px;
+  color: #8a8f7a;
+  margin-bottom: 2px;
+}
+.igrid {
+  display: grid;
+  gap: 5px;
+}
+.igrid.g4 {
+  grid-template-columns: repeat(4, 62px);
+}
+.igrid.g6 {
+  grid-template-columns: repeat(6, 52px);
+}
+.igrid.scroll {
+  max-height: 300px;
+  overflow: auto;
+}
+.islot {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 6px;
+  background: #23261f;
+  border: 1px solid #3a3d31;
+  cursor: pointer;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #d6d0bb;
+  transition: border-color 0.1s, background 0.1s;
+}
+.islot.wide {
+  aspect-ratio: auto;
+  height: 40px;
+  flex-direction: row;
+  gap: 6px;
+  font-size: 12px;
+}
+.islot.empty {
+  background: #191b16;
+  border-style: dashed;
+  cursor: default;
+}
+.islot:not(.empty):hover {
+  border-color: #c9b27a;
+  background: #2e3227;
+}
+.islot .ic {
+  font-size: 18px;
+  line-height: 1;
+}
+.islot.wide .ic {
+  font-size: 16px;
+}
+.islot .nm {
+  margin-top: 2px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 2px;
+}
+.islot .n {
+  position: absolute;
+  right: 3px;
+  bottom: 1px;
+  font-weight: 800;
+  font-size: 10px;
+  color: #f0e6c8;
+}
+.islot.wide .n {
+  position: static;
+}
+.islot .mod {
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  font-size: 9px;
+  color: #a8d08a;
+  font-weight: 800;
+}
+.islot.c-ammo .ic { color: #d2b05c; }
+.islot.c-med .ic { color: #c97a6c; }
+.islot.c-food .ic { color: #b9a46a; }
+.islot.c-mat .ic { color: #9aa08c; }
+.islot.c-att .ic { color: #8fb8a0; }
+.islot.c-weapon { background: #272a22; }
+.islot.c-weapon .ic { color: #c8c3ae; }
+.islot.c-misc .ic { color: #e0c870; }
+.inv-btn {
+  appearance: none;
+  border: none;
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 8px;
+  font-weight: 800;
+  background: linear-gradient(180deg, #6b6f45, #4f5232);
+  color: #fff;
+  cursor: pointer;
+}
+.inv-empty {
+  color: #8a8f7a;
+  font-size: 12px;
+  text-align: center;
+}
+.inv-desc {
+  min-height: 1.4em;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #d6d0bb;
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0 6px;
+}
+.tabs button {
+  flex: 1;
+  appearance: none;
+  border: 1px solid #3a3d31;
+  background: #1d2019;
+  color: #a8a38c;
+  padding: 5px;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.tabs button.on {
+  background: #4f5232;
+  color: #fff;
+}
+.mod-row {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #1f2219;
+  margin-bottom: 6px;
+}
+.mod-row.dim {
+  opacity: 0.55;
+  display: flex;
+  gap: 10px;
+}
+.mod-row .stat {
+  margin-left: 8px;
+  font-size: 11px;
+  color: #9a9f88;
+}
+.mod-row .atts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+.mod-row .att {
+  appearance: none;
+  border: 1px solid #3a3d31;
+  background: #2a2d23;
+  color: #d6d0bb;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.mod-row .att.on {
+  background: #46532f;
+  border-color: #8fb06a;
+  color: #fff;
+}
+.mod-row .att:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
