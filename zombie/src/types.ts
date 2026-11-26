@@ -136,6 +136,8 @@ export interface PlayerSnap extends MoveBody {
   xp: number[];
   /** 連射で溜まる反動（ばらつきに加算） */
   heat: number;
+  /** 汚染度 0..100（外縁の汚染帯・汚染地帯で上がる） */
+  tox: number;
   ack: number;
 }
 

@@ -3,8 +3,12 @@ import type { ItemId } from './items';
 
 // ---------------- ワールド / 通信 ----------------
 export const TILE = 40;
-export const MAP_W = 80; // タイル数
-export const MAP_H = 60;
+export const MAP_W = 240; // タイル数（広大なオープンワールド）
+export const MAP_H = 180;
+/** チャンク（区画）の一辺のタイル数。描画・シミュレーションはチャンク単位で動的に管理する */
+export const CHUNK = 20;
+export const CHUNKS_X = MAP_W / CHUNK;
+export const CHUNKS_Y = MAP_H / CHUNK;
 export const WORLD_W = MAP_W * TILE;
 export const WORLD_H = MAP_H * TILE;
 
@@ -21,9 +25,9 @@ export const PLAYER_COLORS = ['#7f9cb8', '#93a86a', '#c4a35c'];
 
 // ---------------- 時間（昼夜サイクル） ----------------
 /** 06:00〜20:00 の昼（実時間秒） */
-export const DAY_SECONDS = 90;
+export const DAY_SECONDS = 160;
 /** 20:00〜06:00 の夜（実時間秒） */
-export const NIGHT_SECONDS = 45;
+export const NIGHT_SECONDS = 70;
 export const CYCLE_SECONDS = DAY_SECONDS + NIGHT_SECONDS;
 /** 松明の明かりの半径(px) */
 export const TORCH_LIGHT = 200;
@@ -241,5 +245,8 @@ export const STORAGE_SHARED = 40;
 export const STORAGE_PERSONAL = 24;
 
 /** 拠点の敷地（タイル座標）：フェンスで囲まれた安全地帯（ゾンビは入ってこない） */
-export const SAFEHOUSE = { x: 31, y: 21, w: 18, h: 17 };
-export const CAMPFIRE_TILE = { x: 44, y: 33 };
+export const SAFEHOUSE = { x: 111, y: 81, w: 18, h: 17 };
+export const CAMPFIRE_TILE = { x: 124, y: 93 };
+/** 拠点（地図の中心）のタイル座標：危険度は拠点からの距離で決まる */
+export const BASE_TX = 120;
+export const BASE_TY = 90;

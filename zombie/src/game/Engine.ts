@@ -29,7 +29,12 @@ import { Tool } from '../types';
 import {
   AXE,
   BENCH_RANGE,
+  BASE_TX,
+  BASE_TY,
   BREAKABLE_KINDS,
+  CHUNK,
+  CHUNKS_X,
+  CHUNKS_Y,
   CAMPFIRE_TILE,
   CYCLE_SECONDS,
   DAY_SECONDS,
@@ -68,7 +73,7 @@ import {
 } from './items';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
 import { type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
-import { BUILD_ID_START, generateWorld, type Location, locationAt, objIsSolid, TileWorld } from './world';
+import { BUILD_ID_START, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
 
 interface SimPlayer extends PlayerSnap {
   queue: InputFrame[];
@@ -87,6 +92,10 @@ interface SimPlayer extends PlayerSnap {
   stepNoiseT: number;
   /** 興奮剤の残り時間 */
   stimT: number;
+  /** 汚染の警告を出した段階 */
+  toxWarn: number;
+  /** 汚染でせき込む（物音）タイマー */
+  coughT: number;
   /** レベルアップ表示済みのレベル */
   lv: number[];
 }
@@ -111,6 +120,8 @@ interface SimZombie extends ZombieSnap {
   /** 巡回ルート（ロケーション間を移動する群れ） */
   route: { x: number; y: number }[] | null;
   routeI: number;
+  /** チャンクが非アクティブになっても消さない（補給物資の護衛など） */
+  keep: boolean;
   dead: boolean;
 }
 
@@ -138,7 +149,9 @@ interface SimBullet {
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 const r2 = (v: number) => Math.round(v * 100) / 100;
-const MAX_ZOMBIES = 150;
+const MAX_ZOMBIES = 220;
+/** プレイヤーのいるチャンクから何チャンク先までをアクティブにするか（チェビシェフ距離） */
+const ACTIVE_R = 2;
 /** 天候ごとの効果：ゾンビの視覚距離・音の届く距離 */
 const WEATHER_FX: Record<Weather, { sight: number; noise: number; name: string; desc: string }> = {
   clear: { sight: 1, noise: 1, name: '晴れ', desc: '' },
@@ -285,6 +298,15 @@ export class HostSimulation {
   private spawnTimer = 5;
   private lastStorageSent = -1;
   private pingCd = new Map<number, number>();
+  // ---- チャンク管理 ----
+  /** アクティブなチャンク（プレイヤーの周辺）。ここだけゾンビの出現・AI・経路計算を行う */
+  chunkActive = new Uint8Array(CHUNKS_X * CHUNKS_Y);
+  /** 最後にゾンビを配置した時刻（短時間の出入りで湧き直さない） */
+  private chunkSeeded = new Float64Array(CHUNKS_X * CHUNKS_Y).fill(-1e9);
+  private chunkTimer = 0;
+  private flowCost = new Float64Array(MAP_W * MAP_H);
+  /** 統計（テスト・デバッグ用） */
+  stats = { activations: 0, deactivations: 0, despawned: 0, active: 0 };
 
   constructor(lobby: LobbyPlayer[], seed: number) {
     this.seed = seed;
@@ -293,6 +315,7 @@ export class HostSimulation {
     for (const o of gen.objs) this.world.setObj({ ...o, regrowT: 0 });
     this.world.locations = gen.locations;
     this.world.buildings = gen.buildings;
+    this.world.landmarks = gen.landmarks;
     this.cycleT = ((START_MINUTE - 360) * DAY_SECONDS) / 840;
 
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -345,6 +368,9 @@ export class HostSimulation {
         search: null,
         stepNoiseT: 0,
         stimT: 0,
+        tox: 0,
+        toxWarn: 0,
+        coughT: 0,
         xp: sanitizeProfile(lp.prof).xp,
         lv: [],
         heat: 0,
@@ -356,7 +382,7 @@ export class HostSimulation {
       this.players.push(p);
       this.storage.personal[p.id] = emptyBag(STORAGE_SIZES[0].personal);
     });
-    this.populate();
+    this.updateChunks(true);
     this.spawnPatrols(3);
     this.dropAt = 25 + Math.random() * 40;
     // 初日の天候はランダム（霧で始まることもある）
@@ -430,8 +456,14 @@ export class HostSimulation {
     return cycleToMinute(this.cycleT);
   }
 
+  /** 開始時に送るオブジェクト：ゲストはシードから同じ世界を再生成するので、生成直後から変化したものだけ（通常は空） */
   initialObjs(): ObjSnap[] {
-    return [...this.world.objects.values()].map(toObjSnap);
+    const changed: ObjSnap[] = [];
+    for (const id of this.changed) {
+      const o = this.world.objects.get(id);
+      if (o) changed.push(toObjSnap(o));
+    }
+    return changed;
   }
 
   takeObjDelta(): { objs: ObjSnap[]; removed: number[] } {
@@ -497,8 +529,9 @@ export class HostSimulation {
         stmRegen: r2(p.stmRegen ?? 1),
         xp: p.xp.map(Math.floor),
         heat: r2(p.heat),
+        tox: r1(p.tox),
       })),
-      zombies: this.zombies.map((z) => ({
+      zombies: this.zombies.filter((z) => this.zActive(z)).map((z) => ({
         id: z.id,
         type: z.type,
         x: r1(z.x),
@@ -537,7 +570,13 @@ export class HostSimulation {
       this.flowTimer = 0.4;
     }
     this.updateSpawning(dt);
-    for (const z of this.zombies) this.updateZombie(z, dt);
+    this.chunkTimer -= dt;
+    if (this.chunkTimer <= 0) {
+      this.chunkTimer = 0.5;
+      this.updateChunks(false);
+    }
+    // 非アクティブなチャンクのゾンビは休眠（計算しない）
+    for (const z of this.zombies) if (this.zActive(z)) this.updateZombie(z, dt);
     this.separateZombies();
     this.updateBullets(dt);
     this.updateContainers(dt);
@@ -679,6 +718,8 @@ export class HostSimulation {
     }
     // 拠点の焚き火のそばで休むと HP が回復
     if (resting && p.hp < p.maxHp) p.hp = Math.min(p.maxHp, p.hp + MED_REGEN[this.base.med] * dt);
+    this.updateTox(p, dt);
+    if (p.status !== 'alive') return;
 
     // 探索の進行（動いたり攻撃を受けたら中断）
     if (p.search) {
@@ -743,6 +784,40 @@ export class HostSimulation {
           p.useCd = 0.8;
         }
         break;
+    }
+  }
+
+  /** 汚染度：外縁の汚染帯・最深部・汚染地帯で上がり、離れると下がる。高いと HP が減り、せき込んでゾンビを呼ぶ */
+  private updateTox(p: SimPlayer, dt: number): void {
+    const tx = Math.floor(p.x / TILE);
+    const ty = Math.floor(p.y / TILE);
+    const ed = edgeDistance(tx, ty);
+    const band = ed < EDGE_BAND ? 1 - ed / EDGE_BAND : 0;
+    const loc = locationAt(this.world.locations, tx, ty);
+    const deep = tierAtDistance(Math.hypot(tx - BASE_TX, ty - BASE_TY)) >= 4 ? 0.8 : 0;
+    // 外縁に近づくほど急激に上がる（地図の端の手前で自然に引き返すことになる）
+    const rate = band * band * 34 + band * 4 + deep + (loc?.hot ? 3 : 0);
+    if (rate > 0.05) p.tox = Math.min(100, p.tox + rate * dt);
+    else p.tox = Math.max(0, p.tox - (inBase(p.x, p.y) ? 14 : 3) * dt);
+    // 段階ごとの警告
+    const stage = p.tox >= 80 ? 3 : p.tox >= 50 ? 2 : p.tox >= 20 ? 1 : 0;
+    if (stage > p.toxWarn) {
+      const msg = ['', '汚染度が上がっている。長居は危険', '汚染度 50% 超え：HP が減り始めた。引き返せ', '汚染度が危険域。せき込みでゾンビが寄ってくる'][stage];
+      this.events.push({ k: 'feed', cat: 'danger', t: `${p.name}：${msg}`, c: '#c0d060', id: p.id, snd: stage >= 2 ? 'alarm' : undefined });
+      this.pop(p, `汚染 ${Math.round(p.tox)}%`, '#c0d060');
+    }
+    p.toxWarn = stage === 0 && p.tox < 10 ? 0 : Math.max(p.toxWarn, stage);
+    if (p.tox > 50) {
+      p.hp -= ((p.tox - 50) / 18) * dt;
+      if (p.hp <= 0) this.downPlayer(p);
+    }
+    if (p.tox > 70) {
+      p.coughT -= dt;
+      if (p.coughT <= 0) {
+        p.coughT = 5 + Math.random() * 3;
+        this.makeNoise(p.x, p.y, 420, false);
+        this.pop(p, 'ゴホッ…', '#c0d060');
+      }
     }
   }
 
@@ -835,7 +910,9 @@ export class HostSimulation {
     removeItem(p.bag, id, 1);
     const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : 25) * skillMods(p.xp).healMul);
     p.hp = Math.min(p.maxHp, p.hp + v);
+    if (id === 'medkit') p.tox = Math.max(0, p.tox - 25);
     if (id === 'stim') {
+      p.tox = Math.max(0, p.tox - 15);
       p.stimT = 30;
       this.applySkills(p);
       p.stamina = p.stmMax ?? PLAYER.maxStamina;
@@ -1265,7 +1342,7 @@ export class HostSimulation {
   private tierAt(tx: number, ty: number): number {
     const loc = locationAt(this.world.locations, tx, ty);
     if (loc) return loc.kind === 'base' ? 0 : loc.tier;
-    return Math.hypot(tx - 40, ty - 30) > 30 ? 2 : 1;
+    return tierAtDistance(Math.hypot(tx - BASE_TX, ty - BASE_TY));
   }
 
   /** 入れ物の中身を生成（遠く危険な場所ほど多く・レアに） */
@@ -1412,7 +1489,8 @@ export class HostSimulation {
     p.viewing = 0;
     p.storage = 0;
     this.events.push({ k: 'down', id: p.id, x: p.x, y: p.y });
-    if (this.players.length > 1) this.events.push({ k: 'feed', cat: 'danger', t: `${p.name} がダウン！ 近くで [E] 長押しで救助（${PLAYER.downTime}秒以内）`, c: '#e07a60', snd: 'alarm' });
+    const where = locationAt(this.world.locations, Math.floor(p.x / TILE), Math.floor(p.y / TILE))?.name ?? `拠点の${directionName(p.x / TILE, p.y / TILE)}・${Math.round(Math.hypot(p.x / TILE - BASE_TX, p.y / TILE - BASE_TY))}m`;
+    if (this.players.length > 1) this.events.push({ k: 'feed', cat: 'danger', t: `${p.name} がダウン！（${where}）コンパスの SOS へ。[E] 長押しで救助（${PLAYER.downTime}秒以内）`, c: '#e07a60', snd: 'alarm' });
   }
 
   /** 戦闘不能：持ち物をすべてその場の袋に落とす（仲間が回収できる） */
@@ -1465,6 +1543,12 @@ export class HostSimulation {
 
   private enterCost(i: number): number {
     const t = this.world.terrain[i];
+    // 経路計算はアクティブなチャンクの中だけ（広い地図全体を毎回たどらない）
+    {
+      const x = i % MAP_W;
+      const y = (i - x) / MAP_W;
+      if (!this.chunkActive[Math.floor(y / CHUNK) * CHUNKS_X + Math.floor(x / CHUNK)]) return -1;
+    }
     if (t === T_WALL || t === T_WINDOW || t === T_FENCE) return -1;
     const x = i % MAP_W;
     const y = (i - x) / MAP_W;
@@ -1488,7 +1572,8 @@ export class HostSimulation {
       heap.push(0, i);
     }
     if (heap.size === 0) return;
-    const cost = new Float64Array(MAP_W * MAP_H).fill(-2);
+    const cost = this.flowCost;
+    cost.fill(-2);
     const getCost = (i: number) => {
       if (cost[i] === -2) cost[i] = this.enterCost(i);
       return cost[i];
@@ -1518,53 +1603,138 @@ export class HostSimulation {
   // ======================== ゾンビの配置と補充 ========================
 
   private locTarget(loc: Location): number {
-    return Math.round(((loc.w * loc.h) / 22) * (0.7 + 0.35 * loc.tier));
+    // 拠点近く（★1）は少なめ、遠いほど多い
+    return Math.round(((loc.w * loc.h) / 28) * (0.45 + 0.42 * loc.tier));
   }
 
-  /** 開始時：各ロケーションに潜ませる＋野外の徘徊者 */
-  private populate(): void {
+  // ======================== チャンク管理 ========================
+
+  private chunkOf(x: number, y: number): number {
+    const cx = Math.min(CHUNKS_X - 1, Math.max(0, Math.floor(x / TILE / CHUNK)));
+    const cy = Math.min(CHUNKS_Y - 1, Math.max(0, Math.floor(y / TILE / CHUNK)));
+    return cy * CHUNKS_X + cx;
+  }
+
+  /** ゾンビがアクティブなチャンクにいるか */
+  zActive(z: { x: number; y: number }): boolean {
+    return this.chunkActive[this.chunkOf(z.x, z.y)] === 1;
+  }
+
+  /** プレイヤーの周囲のチャンクをアクティブにし、新しく入ったチャンクにはゾンビを配置、離れたチャンクの雑魚は片付ける */
+  private updateChunks(initial: boolean): void {
+    const next = new Uint8Array(CHUNKS_X * CHUNKS_Y);
+    for (const p of this.players) {
+      if (p.status === 'dead') continue;
+      const c = this.chunkOf(p.x, p.y);
+      const pcx = c % CHUNKS_X;
+      const pcy = (c - pcx) / CHUNKS_X;
+      for (let dy = -ACTIVE_R; dy <= ACTIVE_R; dy++)
+        for (let dx = -ACTIVE_R; dx <= ACTIVE_R; dx++) {
+          const x = pcx + dx;
+          const y = pcy + dy;
+          if (x >= 0 && y >= 0 && x < CHUNKS_X && y < CHUNKS_Y) next[y * CHUNKS_X + x] = 1;
+        }
+    }
+    let active = 0;
+    for (let i = 0; i < next.length; i++) {
+      if (next[i]) active++;
+      if (next[i] && !this.chunkActive[i]) {
+        this.chunkActive[i] = 1;
+        this.stats.activations++;
+        // 長く離れていたチャンクだけ湧き直す
+        if (this.time - this.chunkSeeded[i] > 150) {
+          this.chunkSeeded[i] = this.time;
+          this.seedChunk(i, initial);
+        }
+      } else if (!next[i] && this.chunkActive[i]) {
+        this.chunkActive[i] = 0;
+        this.stats.deactivations++;
+        this.chunkSeeded[i] = this.time; // 離れた時刻から数える
+      }
+    }
+    this.stats.active = active;
+    // 非アクティブなチャンクの、追跡していない雑魚は片付ける（数を抑える）
+    let removed = 0;
+    for (const z of this.zombies) {
+      if (z.dead || z.keep || z.state === 'chase' || this.zActive(z)) continue;
+      z.dead = true;
+      removed++;
+    }
+    this.stats.despawned += removed;
+    if (initial) this.flowTimer = 0;
+  }
+
+  /** チャンクにゾンビを配置：中にあるロケーションの見張り＋野外の徘徊者（遠いほど多く強い） */
+  private seedChunk(i: number, initial: boolean): void {
+    const cx = i % CHUNKS_X;
+    const cy = (i - cx) / CHUNKS_X;
+    const x0 = cx * CHUNK;
+    const y0 = cy * CHUNK;
+    const minDist = initial ? 420 : 560;
     for (const loc of this.world.locations) {
       if (loc.kind === 'base') continue;
+      const lcx = loc.x + loc.w / 2;
+      const lcy = loc.y + loc.h / 2;
+      if (lcx < x0 || lcy < y0 || lcx >= x0 + CHUNK || lcy >= y0 + CHUNK) continue;
       const n = this.locTarget(loc);
-      for (let i = 0; i < n; i++) this.spawnIn(loc);
+      for (let k = 0; k < n && this.zombies.length < MAX_ZOMBIES; k++) this.spawnIn(loc, minDist);
     }
-    for (let i = 0; i < 22; i++) this.spawnOutdoor(700);
+    const mid = Math.hypot(x0 + CHUNK / 2 - BASE_TX, y0 + CHUNK / 2 - BASE_TY);
+    const tier = tierAtDistance(mid);
+    const edge = edgeDistance(x0 + CHUNK / 2, y0 + CHUNK / 2) < EDGE_BAND ? 2 : 0;
+    const wanderers = mid < 16 ? 0 : tier + edge + (this.phase === 'night' ? 1 : 0);
+    for (let k = 0; k < wanderers && this.zombies.length < MAX_ZOMBIES; k++) this.spawnOutdoorIn(i, minDist);
   }
+
+
 
   private typeForTier(tier: number): ZombieType {
     const r = Math.random();
+    if (tier >= 4) return r < 0.45 ? 'soldier' : r < 0.7 ? 'brute' : r < 0.92 ? 'runner' : 'walker';
     if (tier >= 3) return r < 0.5 ? 'soldier' : r < 0.68 ? 'brute' : r < 0.88 ? 'runner' : 'walker';
     if (tier === 2) return r < 0.1 ? 'brute' : r < 0.32 ? 'runner' : r < 0.4 ? 'soldier' : 'walker';
     return r < 0.18 ? 'runner' : 'walker';
   }
 
-  private spawnIn(loc: Location): void {
+  private spawnIn(loc: Location, minDist = 420): void {
     for (let t = 0; t < 20; t++) {
       const tx = loc.x + 1 + Math.floor(Math.random() * Math.max(1, loc.w - 2));
       const ty = loc.y + 1 + Math.floor(Math.random() * Math.max(1, loc.h - 2));
       if (this.world.solid(tx, ty)) continue;
       const x = (tx + 0.5) * TILE;
       const y = (ty + 0.5) * TILE;
-      if (inBase(x, y) || this.players.some((p) => Math.hypot(p.x - x, p.y - y) < 420)) continue;
+      if (inBase(x, y) || this.players.some((p) => Math.hypot(p.x - x, p.y - y) < minDist)) continue;
       this.spawnZombie(this.typeForTier(loc.tier), x, y);
       return;
     }
   }
 
+  /** アクティブなチャンクのどこかの野外に1体 */
   private spawnOutdoor(minDist: number): void {
+    const act: number[] = [];
+    for (let i = 0; i < this.chunkActive.length; i++) if (this.chunkActive[i]) act.push(i);
+    if (act.length) this.spawnOutdoorIn(act[Math.floor(Math.random() * act.length)], minDist);
+  }
+
+  private spawnOutdoorIn(chunk: number, minDist: number): void {
+    const cx = chunk % CHUNKS_X;
+    const cy = (chunk - cx) / CHUNKS_X;
     for (let t = 0; t < 25; t++) {
-      const tx = 1 + Math.floor(Math.random() * (MAP_W - 2));
-      const ty = 1 + Math.floor(Math.random() * (MAP_H - 2));
+      const tx = cx * CHUNK + Math.floor(Math.random() * CHUNK);
+      const ty = cy * CHUNK + Math.floor(Math.random() * CHUNK);
+      if (tx < 1 || ty < 1 || tx >= MAP_W - 1 || ty >= MAP_H - 1) continue;
       if (this.world.solid(tx, ty) || this.world.buildingAt(tx, ty)) continue;
-      const d = Math.hypot(tx - 40, ty - 30);
+      const d = Math.hypot(tx - BASE_TX, ty - BASE_TY);
       if (d < 15) continue;
       const x = (tx + 0.5) * TILE;
       const y = (ty + 0.5) * TILE;
       if (this.players.some((p) => Math.hypot(p.x - x, p.y - y) < minDist)) continue;
-      this.spawnZombie(this.typeForTier(d > 30 ? 2 : 1), x, y);
+      const deep = edgeDistance(tx, ty) < EDGE_BAND ? 1 : 0;
+      this.spawnZombie(this.typeForTier(Math.min(4, tierAtDistance(d) + deep)), x, y);
       return;
     }
   }
+
 
   /** 誰もいない場所には少しずつゾンビが戻ってくる。夜は野外の徘徊者が増える */
   private updateSpawning(dt: number): void {
@@ -1575,6 +1745,7 @@ export class HostSimulation {
       if (loc.kind === 'base') continue;
       const cx = (loc.x + loc.w / 2) * TILE;
       const cy = (loc.y + loc.h / 2) * TILE;
+      if (!this.chunkActive[this.chunkOf(cx, cy)]) continue;
       if (this.players.some((p) => Math.hypot(p.x - cx, p.y - cy) < 900)) continue;
       const x0 = loc.x * TILE;
       const y0 = loc.y * TILE;
@@ -1583,8 +1754,10 @@ export class HostSimulation {
       const inside = this.zombies.filter((z) => z.x > x0 && z.y > y0 && z.x < x1 && z.y < y1).length;
       if (inside < this.locTarget(loc) * 0.7 && Math.random() < 0.35) this.spawnIn(loc);
     }
-    const outdoor = this.zombies.filter((z) => !this.world.buildingAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE))).length;
-    const want = (this.phase === 'night' ? 36 : 22) + this.day * 2 + (this.weather === 'storm' ? 10 : 0);
+    const outdoor = this.zombies.filter((z) => this.zActive(z) && !this.world.buildingAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE))).length;
+    // アクティブな範囲の広さに比例（仲間と離れて探索していると、それぞれの周りに湧く）
+    const per = (this.phase === 'night' ? 1.4 : 0.9) + this.day * 0.05 + (this.weather === 'storm' ? 0.4 : 0);
+    const want = Math.round(this.stats.active * per);
     if (outdoor < want) this.spawnOutdoor(650);
   }
 
@@ -1620,6 +1793,7 @@ export class HostSimulation {
       stuckT: 0,
       route: null,
       routeI: 0,
+      keep: false,
       dead: false,
     });
     return this.zombies[this.zombies.length - 1];
@@ -1627,7 +1801,8 @@ export class HostSimulation {
 
   /** 巡回する群れを出す：いくつかのロケーションを順に回る */
   private spawnPatrols(groups: number): void {
-    const locs = this.world.locations.filter((l) => l.kind !== 'base');
+    // 巡回はアクティブな範囲（プレイヤーの周辺チャンク）のロケーション間で
+    const locs = this.world.locations.filter((l) => l.kind !== 'base' && this.chunkActive[this.chunkOf((l.x + l.w / 2) * TILE, (l.y + l.h / 2) * TILE)]);
     for (let g = 0; g < groups && locs.length >= 2; g++) {
       const pts: { x: number; y: number }[] = [];
       const n = 2 + Math.floor(Math.random() * 2);
@@ -1694,10 +1869,16 @@ export class HostSimulation {
     if (this.dropAt < 0 || this.phase !== 'day' || this.cycleT < this.dropAt) return;
     this.dropAt = -1;
     if (this.dropObj !== null && this.world.objects.has(this.dropObj)) return;
-    for (let t = 0; t < 200; t++) {
-      const tx = 3 + Math.floor(Math.random() * (MAP_W - 6));
-      const ty = 3 + Math.floor(Math.random() * (MAP_H - 6));
-      if (Math.hypot(tx - 40, ty - 30) < 24) continue;
+    const alive = this.players.filter((p) => p.status === 'alive');
+    for (let t = 0; t < 300 && alive.length; t++) {
+      // 誰かから 30〜60 タイルほど離れた、拠点から遠めの野外（外縁の汚染帯は避ける）
+      const who = alive[Math.floor(Math.random() * alive.length)];
+      const a = Math.random() * Math.PI * 2;
+      const r = 30 + Math.random() * 30;
+      const tx = Math.floor(who.x / TILE + Math.cos(a) * r);
+      const ty = Math.floor(who.y / TILE + Math.sin(a) * r);
+      if (tx < 3 || ty < 3 || tx >= MAP_W - 3 || ty >= MAP_H - 3 || edgeDistance(tx, ty) < EDGE_BAND) continue;
+      if (Math.hypot(tx - BASE_TX, ty - BASE_TY) < 30) continue;
       if (this.world.solid(tx, ty) || this.world.objAt(tx, ty) || this.world.buildingAt(tx, ty)) continue;
       const x = (tx + 0.5) * TILE;
       const y = (ty + 0.5) * TILE;
@@ -1711,6 +1892,7 @@ export class HostSimulation {
         const a = (i / guards) * Math.PI * 2;
         const z = this.spawnZombie(Math.random() < 0.6 ? 'soldier' : Math.random() < 0.5 ? 'brute' : 'runner', x + Math.cos(a) * 90, y + Math.sin(a) * 90);
         moveCircle(z, 0, 0, ZOMBIE[z.type].radius, this.world);
+        z.keep = true;
         z.homeX = x;
         z.homeY = y;
       }

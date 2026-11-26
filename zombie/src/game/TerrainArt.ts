@@ -6,7 +6,7 @@
 //   3) 廃墟の壁：ぼかした落ち影＋南側の側面（2.5D）＋レンガの天面
 //   ★ スプライト化する場合はこのファイルの代わりにタイル画像を並べる処理を書けばOK
 // ============================================================
-import { MAP_H, MAP_W, T_DIRT, T_FENCE, T_FLOOR, T_GRASS, T_ROAD, T_TILE, T_WALL, T_WINDOW, T_WOOD, TILE, WORLD_H, WORLD_W } from './constants';
+import { CHUNK, MAP_H, MAP_W, T_DIRT, T_FENCE, T_FLOOR, T_GRASS, T_ROAD, T_TILE, T_WALL, T_WINDOW, T_WOOD, TILE } from './constants';
 
 const wallLike = (t: number) => t === T_WALL || t === T_WINDOW;
 import type { TileWorld } from './world';
@@ -52,17 +52,40 @@ function fbm(x: number, y: number, s: number, oct = 3): number {
 const mix = (a: number, b: number, t: number) => a + (b - a) * t;
 
 export interface BakedTerrain {
-  canvas: HTMLCanvasElement;
+  /** チャンク単位で焼き込むキャッシュ */
+  cache: TerrainCache;
   mini: HTMLCanvasElement;
 }
 
-export function bakeTerrain(world: TileWorld): BakedTerrain {
-  const terrainAt = (tx: number, ty: number) => world.terrainAt(tx, ty);
+/** 地図の外：道路はそのまま続き、それ以外は荒れ地・草地（描画専用。地図の外へは出られない） */
+export function sceneryAt(world: TileWorld, tx: number, ty: number): number {
+  if (world.inBounds(tx, ty)) return world.terrainAt(tx, ty);
+  const ex = Math.min(MAP_W - 1, Math.max(0, tx));
+  const ey = Math.min(MAP_H - 1, Math.max(0, ty));
+  const e = world.terrainAt(ex, ey);
+  // 外縁の道路が外向きに続いているなら、その先も道路
+  const outX = tx < 0 || tx >= MAP_W;
+  const outY = ty < 0 || ty >= MAP_H;
+  // （幹線は地図の端まで通っているので、端のタイルが道路ならその道は外へ続いている）
+  if (e === T_ROAD && outX !== outY) return T_ROAD;
+  return fbm(tx / 9, ty / 9, 77, 2) > 0.56 ? T_DIRT : T_GRASS;
+}
+
+/** 1チャンク分の地形を、何回かに分けて焼き込む（1フレームで固まらないように yield する） */
+export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out: { canvas?: HTMLCanvasElement }): Generator<void> {
+  const terrainAt = (tx: number, ty: number) => sceneryAt(world, tx, ty);
+  const tx0 = ccx * CHUNK;
+  const ty0 = ccy * CHUNK;
+  const tx1 = tx0 + CHUNK;
+  const ty1 = ty0 + CHUNK;
+  const X0 = tx0 * TILE;
+  const Y0 = ty0 * TILE;
+  const CW = CHUNK * TILE;
 
   // ---------- 1) 半解像度のベースカラー ----------
   const S = 2; // 縮小率
-  const bw = WORLD_W / S;
-  const bh = WORLD_H / S;
+  const bw = CW / S;
+  const bh = CW / S;
   const base = document.createElement('canvas');
   base.width = bw;
   base.height = bh;
@@ -70,9 +93,10 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
   const img = bctx.createImageData(bw, bh);
   const d = img.data;
   for (let py = 0; py < bh; py++) {
+    if (py % 50 === 49) yield;
     for (let px = 0; px < bw; px++) {
-      const wx = px * S;
-      const wy = py * S;
+      const wx = X0 + px * S;
+      const wy = Y0 + py * S;
       let t = terrainAt(Math.floor(wx / TILE), Math.floor(wy / TILE));
       // 自然地形の境界をノイズで歪ませる
       if (t === T_GRASS || t === T_DIRT) {
@@ -170,13 +194,15 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
   }
   bctx.putImageData(img, 0, 0);
 
-  // ---------- 2) 全解像度キャンバス ----------
+  yield;
+  // ---------- 2) 全解像度キャンバス（ワールド座標で描けるよう平行移動） ----------
   const c = document.createElement('canvas');
-  c.width = WORLD_W;
-  c.height = WORLD_H;
+  c.width = CW;
+  c.height = CW;
   const ctx = c.getContext('2d')!;
+  ctx.translate(-X0, -Y0);
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(base, 0, 0, WORLD_W, WORLD_H);
+  ctx.drawImage(base, X0, Y0, CW, CW);
 
   // 細かい粒状感（全面にうっすら）
   const grainTile = document.createElement('canvas');
@@ -196,11 +222,12 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
   ctx.globalAlpha = 0.07;
   ctx.globalCompositeOperation = 'overlay';
   ctx.fillStyle = ctx.createPattern(grainTile, 'repeat')!;
-  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  ctx.fillRect(X0, Y0, CW, CW);
   ctx.restore();
+  yield;
 
-  for (let ty = 0; ty < MAP_H; ty++)
-    for (let tx = 0; tx < MAP_W; tx++) {
+  for (let ty = ty0 - 1; ty <= ty1; ty++)
+    for (let tx = tx0 - 1; tx <= tx1; tx++) {
       const t = terrainAt(tx, ty);
       const x = tx * TILE;
       const y = ty * TILE;
@@ -314,53 +341,222 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
       }
     }
 
-  detailPass(ctx, world);
+  yield;
+  detailPass(ctx, world, terrainAt, tx0 - 1, ty0 - 1, tx1 + 1, ty1 + 1);
+  yield;
 
   // ---------- 3) 壁の落ち影（ぼかし） ----------
   const shadow = document.createElement('canvas');
-  shadow.width = WORLD_W;
-  shadow.height = WORLD_H;
+  shadow.width = CW;
+  shadow.height = CW;
   const sctx = shadow.getContext('2d')!;
+  sctx.translate(-X0, -Y0);
   sctx.fillStyle = '#000';
-  for (let ty = 0; ty < MAP_H; ty++)
-    for (let tx = 0; tx < MAP_W; tx++) {
+  for (let ty = ty0 - 1; ty <= ty1; ty++)
+    for (let tx = tx0 - 1; tx <= tx1; tx++) {
       if (!wallLike(terrainAt(tx, ty))) continue;
       sctx.fillRect(tx * TILE + 8, ty * TILE + 12, TILE, TILE);
     }
   ctx.save();
   ctx.globalAlpha = 0.42;
   ctx.filter = 'blur(5px)';
-  ctx.drawImage(shadow, 0, 0);
+  ctx.drawImage(shadow, X0, Y0);
   ctx.restore();
+  yield;
 
   // ---------- 4) 廃墟の壁（側面＋天面） ----------
-  for (let ty = 0; ty < MAP_H; ty++)
-    for (let tx = 0; tx < MAP_W; tx++) {
+  for (let ty = ty0 - 1; ty <= ty1; ty++)
+    for (let tx = tx0 - 1; tx <= tx1; tx++) {
       const t = terrainAt(tx, ty);
       if (t === T_WALL) drawRuinWall(ctx, tx, ty, terrainAt);
       else if (t === T_WINDOW) drawWindow(ctx, tx, ty, terrainAt);
     }
-  wallWear(ctx, world);
+  wallWear(ctx, terrainAt, tx0 - 1, ty0 - 1, tx1 + 1, ty1 + 1);
   // ---------- 5) 金網フェンス ----------
-  for (let ty = 0; ty < MAP_H; ty++)
-    for (let tx = 0; tx < MAP_W; tx++) if (terrainAt(tx, ty) === T_FENCE) drawFence(ctx, tx, ty, terrainAt);
+  for (let ty = ty0 - 1; ty <= ty1; ty++)
+    for (let tx = tx0 - 1; tx <= tx1; tx++) if (terrainAt(tx, ty) === T_FENCE) drawFence(ctx, tx, ty, terrainAt);
 
-  // ---------- ミニマップ ----------
+  // ---------- 6) 地図の外：雑木林と廃墟のシルエット、汚染された霞 ----------
+  if (!world.inBounds(tx0, ty0) || !world.inBounds(tx1 - 1, ty1 - 1)) {
+    yield;
+    outskirts(ctx, world, tx0, ty0, tx1, ty1);
+  }
+  out.canvas = c;
+}
+
+/** 地図の外側の遠景：木の茂み・崩れた建物の影・道路の先の放置車両。外へ行くほど汚染の霞が濃い */
+function outskirts(ctx: CanvasRenderingContext2D, world: TileWorld, tx0: number, ty0: number, tx1: number, ty1: number): void {
+  for (let ty = ty0; ty < ty1; ty++)
+    for (let tx = tx0; tx < tx1; tx++) {
+      if (world.inBounds(tx, ty)) continue;
+      const x = tx * TILE;
+      const y = ty * TILE;
+      const h = hash(tx, ty, 901);
+      const t = sceneryAt(world, tx, ty);
+      if (t === T_ROAD) {
+        if (h < 0.04) {
+          ctx.fillStyle = '#3a3630';
+          ctx.save();
+          ctx.translate(x + 20, y + 20);
+          ctx.rotate(h * 40);
+          ctx.fillRect(-18, -10, 36, 20);
+          ctx.fillStyle = 'rgba(0,0,0,0.35)';
+          ctx.fillRect(-8, -8, 16, 16);
+          ctx.restore();
+        }
+        continue;
+      }
+      // 雑木林（地図の外の森はやや濃い）
+      const f = fbm(tx / 7, ty / 7, 313, 2);
+      if (f > 0.5 && h < 0.55) {
+        const r = 12 + hash(tx, ty, 902) * 10;
+        ctx.fillStyle = 'rgba(10,16,8,0.35)';
+        ctx.beginPath();
+        ctx.arc(x + 26, y + 28, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = f > 0.62 ? '#24321c' : '#2e3a20';
+        ctx.beginPath();
+        ctx.arc(x + 20 + (hash(tx, ty, 903) - 0.5) * 10, y + 20 + (hash(tx, ty, 904) - 0.5) * 10, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(120,140,80,0.18)';
+        ctx.beginPath();
+        ctx.arc(x + 15, y + 15, r * 0.45, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  // 崩れた建物のシルエット（チャンクに1〜2棟）
+  for (let k = 0; k < 2; k++) {
+    const bx = tx0 + 2 + Math.floor(hash(tx0, ty0, 910 + k) * (CHUNK - 10));
+    const by = ty0 + 2 + Math.floor(hash(tx0, ty0, 920 + k) * (CHUNK - 9));
+    if (world.inBounds(bx, by) || hash(tx0, ty0, 930 + k) < 0.4 || sceneryAt(world, bx, by) === T_ROAD) continue;
+    const w = 5 + Math.floor(hash(tx0, ty0, 940 + k) * 5);
+    const h = 4 + Math.floor(hash(tx0, ty0, 950 + k) * 4);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(bx * TILE + 10, by * TILE + 14, w * TILE, h * TILE);
+    ctx.fillStyle = '#3a3834';
+    ctx.fillRect(bx * TILE, by * TILE, w * TILE, h * TILE);
+    ctx.fillStyle = '#2a2926';
+    ctx.fillRect(bx * TILE + 10, by * TILE + 10, w * TILE - 20, h * TILE - 20);
+    // 崩れた角
+    ctx.fillStyle = '#5a564c';
+    ctx.beginPath();
+    ctx.moveTo(bx * TILE + w * TILE, by * TILE);
+    ctx.lineTo(bx * TILE + w * TILE - 60, by * TILE);
+    ctx.lineTo(bx * TILE + w * TILE, by * TILE + 50);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // 汚染の霞：地図の端から離れるほど濃く、黄緑がかった灰色
+  for (let ty = ty0; ty < ty1; ty++)
+    for (let tx = tx0; tx < tx1; tx++) {
+      if (world.inBounds(tx, ty)) continue;
+      const ox = tx < 0 ? -tx : tx >= MAP_W ? tx - MAP_W + 1 : 0;
+      const oy = ty < 0 ? -ty : ty >= MAP_H ? ty - MAP_H + 1 : 0;
+      const d = Math.max(ox, oy);
+      const a = Math.min(0.85, 0.25 + d * 0.06);
+      ctx.fillStyle = `rgba(48,52,30,${a})`;
+      ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
+    }
+}
+
+/** ミニマップ・全体地図用の小さな地形画像（1タイル = 2px） */
+export function bakeMini(world: TileWorld): HTMLCanvasElement {
   const mini = document.createElement('canvas');
   mini.width = MAP_W * 2;
   mini.height = MAP_H * 2;
   const mg = mini.getContext('2d')!;
-  mg.imageSmoothingEnabled = true;
-  mg.drawImage(base, 0, 0, MAP_W * 2, MAP_H * 2);
-  mg.fillStyle = 'rgba(0,0,0,0.25)';
-  mg.fillRect(0, 0, MAP_W * 2, MAP_H * 2);
+  const img = mg.createImageData(MAP_W * 2, MAP_H * 2);
+  const col: Record<number, [number, number, number]> = {
+    [T_GRASS]: [64, 72, 46],
+    [T_DIRT]: [84, 76, 60],
+    [T_ROAD]: [52, 52, 50],
+    [T_FLOOR]: [80, 78, 72],
+    [T_WOOD]: [86, 70, 54],
+    [T_TILE]: [92, 90, 84],
+    [T_WALL]: [150, 142, 130],
+    [T_WINDOW]: [140, 150, 150],
+    [T_FENCE]: [120, 120, 110],
+  };
   for (let ty = 0; ty < MAP_H; ty++)
     for (let tx = 0; tx < MAP_W; tx++) {
-      if (terrainAt(tx, ty) !== T_WALL) continue;
-      mg.fillStyle = '#9a8f84';
-      mg.fillRect(tx * 2, ty * 2, 2, 2);
+      const c = col[world.terrainAt(tx, ty)] ?? [60, 60, 60];
+      const n = (hash(tx, ty, 5) - 0.5) * 8;
+      for (let k = 0; k < 4; k++) {
+        const i = ((ty * 2 + (k >> 1)) * MAP_W * 2 + tx * 2 + (k & 1)) * 4;
+        img.data[i] = c[0] + n;
+        img.data[i + 1] = c[1] + n;
+        img.data[i + 2] = c[2] + n;
+        img.data[i + 3] = 255;
+      }
     }
-  return { canvas: c, mini };
+  mg.putImageData(img, 0, 0);
+  return mini;
+}
+
+/** チャンクごとの焼き込みキャッシュ。近いチャンクから少しずつ焼き、遠いものは捨てる */
+export class TerrainCache {
+  private done = new Map<string, HTMLCanvasElement>();
+  private job: { key: string; it: Generator<void>; out: { canvas?: HTMLCanvasElement } } | null = null;
+  private wanted: { cx: number; cy: number; pri: number }[] = [];
+  /** 統計（テスト用） */
+  stats = { baked: 0, evicted: 0 };
+  constructor(
+    private world: TileWorld,
+    private max = 24,
+  ) {}
+
+  get(cx: number, cy: number): HTMLCanvasElement | undefined {
+    const k = `${cx},${cy}`;
+    const c = this.done.get(k);
+    if (c) {
+      // 最近使ったものを末尾へ（LRU）
+      this.done.delete(k);
+      this.done.set(k, c);
+    }
+    return c;
+  }
+
+  /** 欲しいチャンク（pri が小さいほど優先）を登録 */
+  want(list: { cx: number; cy: number; pri: number }[]): void {
+    this.wanted = list.filter((w) => !this.done.has(`${w.cx},${w.cy}`)).sort((a, b) => a.pri - b.pri);
+  }
+
+  get size(): number {
+    return this.done.size;
+  }
+
+  /** 時間予算内で焼き込みを進める */
+  pump(budgetMs: number): void {
+    const t0 = performance.now();
+    while (performance.now() - t0 < budgetMs) {
+      if (!this.job) {
+        const w = this.wanted.shift();
+        if (!w) return;
+        const key = `${w.cx},${w.cy}`;
+        if (this.done.has(key)) continue;
+        const out: { canvas?: HTMLCanvasElement } = {};
+        this.job = { key, it: bakeChunkSteps(this.world, w.cx, w.cy, out), out };
+      }
+      const r = this.job.it.next();
+      if (r.done) {
+        if (this.job.out.canvas) {
+          this.done.set(this.job.key, this.job.out.canvas);
+          this.stats.baked++;
+          while (this.done.size > this.max) {
+            const oldest = this.done.keys().next().value as string;
+            this.done.delete(oldest);
+            this.stats.evicted++;
+          }
+        }
+        this.job = null;
+      }
+    }
+  }
+}
+
+/** 互換用：キャッシュとミニマップを作る（実際の焼き込みは表示に合わせて少しずつ） */
+export function bakeTerrain(world: TileWorld): BakedTerrain {
+  return { cache: new TerrainCache(world), mini: bakeMini(world) };
 }
 
 function drawRoadDetails(ctx: CanvasRenderingContext2D, tx: number, ty: number, at: (x: number, y: number) => number): void {
@@ -574,11 +770,10 @@ function drawFence(ctx: CanvasRenderingContext2D, tx: number, ty: number, at: (x
 //   床：木目と節・板の段差／タイルの面取りと目地の汚れ・欠け／コンクリートのヘアクラック
 //   壁際の床に環境遮蔽（暗がり）、壁の天面にひびと欠け、汚染地帯の染み
 // ======================================================================
-export function detailPass(ctx: CanvasRenderingContext2D, world: TileWorld): void {
-  const at = (x: number, y: number) => world.terrainAt(x, y);
+export function detailPass(ctx: CanvasRenderingContext2D, world: TileWorld, at: (x: number, y: number) => number, rx0: number, ry0: number, rx1: number, ry1: number): void {
   const indoor = (t: number) => t === T_WOOD || t === T_TILE || t === T_FLOOR;
-  for (let ty = 0; ty < MAP_H; ty++)
-    for (let tx = 0; tx < MAP_W; tx++) {
+  for (let ty = ry0; ty < ry1; ty++)
+    for (let tx = rx0; tx < rx1; tx++) {
       const t = at(tx, ty);
       const x = tx * TILE;
       const y = ty * TILE;
@@ -865,6 +1060,7 @@ export function detailPass(ctx: CanvasRenderingContext2D, world: TileWorld): voi
   // 汚染地帯：黄緑色の染み・水たまり・枯れた地面
   for (const loc of world.locations ?? []) {
     if (!loc.hot) continue;
+    if (loc.x + loc.w + 4 < rx0 || loc.y + loc.h + 4 < ry0 || loc.x - 4 > rx1 || loc.y - 4 > ry1) continue;
     const x0 = (loc.x - 3) * TILE;
     const y0 = (loc.y - 3) * TILE;
     const w = (loc.w + 6) * TILE;
@@ -893,10 +1089,10 @@ export function detailPass(ctx: CanvasRenderingContext2D, world: TileWorld): voi
 }
 
 /** 壁の天面のひび・欠け・すす（壁を描いたあとに重ねる） */
-export function wallWear(ctx: CanvasRenderingContext2D, world: TileWorld): void {
-  for (let ty = 0; ty < MAP_H; ty++)
-    for (let tx = 0; tx < MAP_W; tx++) {
-      if (world.terrainAt(tx, ty) !== T_WALL) continue;
+export function wallWear(ctx: CanvasRenderingContext2D, at: (x: number, y: number) => number, rx0: number, ry0: number, rx1: number, ry1: number): void {
+  for (let ty = ry0; ty < ry1; ty++)
+    for (let tx = rx0; tx < rx1; tx++) {
+      if (at(tx, ty) !== T_WALL) continue;
       const x = tx * TILE;
       const y = ty * TILE;
       const r = hash(tx, ty, 611);

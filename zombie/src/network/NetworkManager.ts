@@ -204,6 +204,11 @@ export class NetworkManager {
     this.broadcast({ type: 'snap', s });
   }
 
+  /** 受け取り手ごとに内容を変えて送る（広い地図では、各自の周りのゾンビ・弾だけを送って通信量を抑える） */
+  sendSnapshotEach(make: (slot: number) => Snapshot): void {
+    for (const [slot, { conn }] of this.conns) if (conn.open) sendBig(conn, { type: 'snap', s: make(slot) } satisfies HostMessage);
+  }
+
   sendGameOver(result: GameResult): void {
     this.broadcast({ type: 'gameover', result });
   }

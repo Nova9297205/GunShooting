@@ -1518,3 +1518,7 @@ input[type='range'] {
   z-index: 4;
   pointer-events: none;
 }
+#fx-tox {
+  opacity: 0;
+  background: radial-gradient(ellipse 72% 72% at 50% 50%, rgba(150, 170, 50, 0) 40%, rgba(130, 150, 40, 0.85) 100%);
+}

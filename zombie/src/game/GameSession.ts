@@ -98,6 +98,7 @@ export class GameSession {
   private lastStorageOpen = 0;
   private lastPrim = '';
   private lastSave = 0;
+  private mapOpen = false;
   private lastSec = '';
   /** ゲスト：最後に受け取った倉庫の状態（変化したときだけ届く） */
   private storage: StorageState | null = null;
@@ -109,10 +110,13 @@ export class GameSession {
     if (this.sim) {
       this.world = this.sim.world;
     } else {
+      // ゲストもシードから同じ世界（地形・建物・オブジェクト）を再生成し、ホストからは変化分だけ受け取る
       const gen = generateTerrain(o.info.seed);
       this.world = new TileWorld(gen.terrain);
       this.world.locations = gen.locations;
       this.world.buildings = gen.buildings;
+      this.world.landmarks = gen.landmarks;
+      for (const ob of gen.objs) this.world.setObj({ ...ob });
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
     }
     this.renderer = new Renderer(o.canvas, this.world);
@@ -170,6 +174,10 @@ export class GameSession {
     this.hudButtons.classList.remove('hidden');
     document.getElementById('btn-craft')!.onclick = () => this.craftMenu.toggle();
     document.getElementById('btn-inv')!.onclick = () => this.invPanel.toggle();
+    document.getElementById('btn-map')!.onclick = () => {
+      this.mapOpen = !this.mapOpen;
+      audio.click();
+    };
     this.muteBtn.onclick = () => {
       audio.toggleMute();
       audio.click();
@@ -247,7 +255,15 @@ export class GameSession {
       if (this.o.mode === 'host' && this.o.net) {
         this.pendingEvents.push(...evs);
         if (sim.tick % SNAPSHOT_EVERY === 0 || sim.gameOver) {
-          this.o.net.sendSnapshot(sim.snapshot(this.pendingEvents));
+          // 各ゲストには、その人の周り（視界の届く範囲）のゾンビと弾だけを送る
+          const snap = sim.snapshot(this.pendingEvents);
+          const R = 1100;
+          this.o.net.sendSnapshotEach((slot) => {
+            const pl = snap.players.find((q) => q.id === slot);
+            if (!pl) return snap;
+            const near = (o: { x: number; y: number }) => Math.abs(o.x - pl.x) < R && Math.abs(o.y - pl.y) < R;
+            return { ...snap, zombies: snap.zombies.filter(near), bullets: snap.bullets.filter(near) };
+          });
           this.pendingEvents = [];
         }
       } else {
@@ -462,6 +478,12 @@ export class GameSession {
     if (this.input.consume('Escape')) {
       this.craftMenu.toggle(false);
       this.invPanel.toggle(false);
+      this.mapOpen = false;
+    }
+    // B：全体地図
+    if (this.input.consume('KeyB')) {
+      this.mapOpen = !this.mapOpen;
+      audio.click();
     }
     if (this.input.consume('KeyC')) {
       this.invPanel.toggle(false);
@@ -561,6 +583,7 @@ export class GameSession {
       mouseY: this.input.mouseY,
       skipAnimDetectId: this.o.mode === 'guest' ? localId : null,
       localTool: this.localTool,
+      mapOpen: this.mapOpen,
       reviveHint,
       interactHint: me && me.status === 'alive' ? this.interactHint(me) : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,

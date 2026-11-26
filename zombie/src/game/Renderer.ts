@@ -6,6 +6,11 @@ import type { GameMode, ObjSnap, PlayerSnap, ViewState, WeaponId, ZombieSnap } f
 import { Tool } from '../types';
 import { type ArtSet, type PlayerAnim, type TallQuery, VectorArt, type ZombieAnim } from './Art';
 import {
+  CHUNK,
+  CHUNKS_X,
+  CHUNKS_Y,
+  BASE_TX,
+  BASE_TY,
   CYCLE_SECONDS,
   DAY_SECONDS,
   MAP_H,
@@ -27,6 +32,8 @@ import { clamp } from './physics';
 import { type Viewer, Vision } from './vision';
 import { locationAt, type TileWorld } from './world';
 import { roofCanvas } from './RoofArt';
+import type { TerrainCache } from './TerrainArt';
+import { directionName, EDGE_BAND, edgeDistance, tierAtDistance } from './world';
 import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -44,6 +51,8 @@ export interface RenderOptions {
   /** ゲスト自機は射撃/近接アニメをローカルで発生させるので、カウンタ検出をしない */
   skipAnimDetectId: number | null;
   localTool: number;
+  /** 全体地図を開いているか（B キー） */
+  mapOpen?: boolean;
   reviveHint: boolean;
   interactHint: string | null;
   syncMs?: number;
@@ -114,7 +123,7 @@ export class Renderer {
   cam = { x: WORLD_W / 2, y: WORLD_H / 2 };
   private camInit = false;
   private time = 0;
-  private terrainCanvas: HTMLCanvasElement | null = null;
+  private terrain: TerrainCache | null = null;
   private miniCanvas: HTMLCanvasElement | null = null;
   private vision = new Vision();
   private lightCanvas = document.createElement('canvas');
@@ -145,7 +154,7 @@ export class Renderer {
   /** 描画解像度の倍率（重いPCでは自動で下げる） */
   renderScale = 1;
   /** CSS の重ね合わせ（色温度の乗算・周辺減光・追跡時の赤・被弾の赤） */
-  private ov: Record<'tint' | 'vig' | 'alert' | 'hurt', HTMLDivElement>;
+  private ov: Record<'tint' | 'vig' | 'alert' | 'hurt' | 'tox', HTMLDivElement>;
   private ovCache: Record<string, string> = {};
   private baseDpr = 1;
   private fpsAvg = 60;
@@ -184,7 +193,7 @@ export class Renderer {
       }
       return el;
     };
-    this.ov = { tint: mk('fx-tint'), vig: mk('fx-vig'), alert: mk('fx-alert'), hurt: mk('fx-hurt') };
+    this.ov = { tint: mk('fx-tint'), vig: mk('fx-vig'), alert: mk('fx-alert'), hurt: mk('fx-hurt'), tox: mk('fx-tox') };
     this.setActive(true);
     this.resize();
     this.bakeTerrain();
@@ -206,7 +215,7 @@ export class Renderer {
   }
 
   /** CSS の重ね合わせのスタイルを（変わったときだけ）更新 */
-  private setOv(k: 'tint' | 'vig' | 'alert' | 'hurt', prop: 'opacity' | 'backgroundColor', v: string): void {
+  private setOv(k: 'tint' | 'vig' | 'alert' | 'hurt' | 'tox', prop: 'opacity' | 'backgroundColor', v: string): void {
     const key = k + prop;
     if (this.ovCache[key] === v) return;
     this.ovCache[key] = v;
@@ -253,7 +262,7 @@ export class Renderer {
   /** 地形をオフスクリーンキャンバスに一度だけ描き込む */
   private bakeTerrain(): void {
     const baked = this.art.bakeTerrain(this.world);
-    this.terrainCanvas = baked.canvas;
+    this.terrain = baked.cache;
     this.miniCanvas = baked.mini;
   }
 
@@ -352,26 +361,12 @@ export class Renderer {
     const vy0 = this.cam.y - this.h / 2 - TILE * 2;
     const vx1 = vx0 + this.w + TILE * 4;
     const vy1 = vy0 + this.h + TILE * 4;
-    if (this.terrainCanvas) {
-      const sx = clamp(Math.floor(vx0), 0, WORLD_W);
-      const sy = clamp(Math.floor(vy0), 0, WORLD_H);
-      const sw = clamp(Math.ceil(vx1), 0, WORLD_W) - sx;
-      const sh = clamp(Math.ceil(vy1), 0, WORLD_H) - sy;
-      if (sw > 0 && sh > 0) ctx.drawImage(this.terrainCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
-    }
+    this.drawTerrainChunks(vx0, vy0, vx1, vy1);
 
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
-    // 森との境界（柵と影）
-    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-    ctx.lineWidth = 10;
-    ctx.strokeRect(-5, -5, WORLD_W + 10, WORLD_H + 10);
-    ctx.strokeStyle = '#5a4630';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([14, 6]);
-    ctx.strokeRect(-1, -1, WORLD_W + 2, WORLD_H + 2);
-    ctx.setLineDash([]);
+    // （地図の端は柵で塞がず、外側の遠景と汚染の霞につなげる）
     const visible: ObjSnap[] = [];
     for (const ob of this.world.objects.values()) {
       const x = ob.tx * TILE;
@@ -406,6 +401,7 @@ export class Renderer {
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
     this.drawCloudShadows(view.minute, vx0, vy0, vx1, vy1);
+    this.drawEdgeHaze(vx0, vy0, vx1, vy1);
     this.drawStructureBars(visible);
     // ---- 屋根と霧（見えていない場所を隠す） ----
     // 外壁が見えている建物の屋根は霧の上に（外から屋根として見える）、それ以外は記憶として霧の下に
@@ -436,6 +432,7 @@ export class Renderer {
     this.drawZombieOverlays(zombiesSeen, dark, me);
     this.drawPingMarkers(fx);
     this.drawDropBeacon(view);
+    this.drawLandmarks(vx0, vy0, vx1, vy1);
     this.drawPopups(fx);
     ctx.restore();
 
@@ -976,6 +973,73 @@ export class Renderer {
   }
 
   /** 暗闇の上に重ねる光の色（焚き火・松明の暖色、懐中電灯の白色） */
+  // ---------------- 地形（チャンク） ----------------
+
+  /** 画面に映るチャンクの焼き込み済み地形を描く。少し先のチャンクも予約して、少しずつ焼き込む */
+  private drawTerrainChunks(vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const cache = this.terrain;
+    if (!cache) return;
+    const CW = CHUNK * TILE;
+    const cx0 = Math.floor(vx0 / CW);
+    const cy0 = Math.floor(vy0 / CW);
+    const cx1 = Math.floor(vx1 / CW);
+    const cy1 = Math.floor(vy1 / CW);
+    const ccx = this.cam.x / CW;
+    const ccy = this.cam.y / CW;
+    const wants: { cx: number; cy: number; pri: number }[] = [];
+    // 画面の外側1チャンク分まで先読み（見えているものを最優先）
+    for (let cy = cy0 - 1; cy <= cy1 + 1; cy++)
+      for (let cx = cx0 - 1; cx <= cx1 + 1; cx++) {
+        const vis = cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1;
+        wants.push({ cx, cy, pri: (vis ? 0 : 100) + Math.hypot(cx + 0.5 - ccx, cy + 0.5 - ccy) });
+      }
+    cache.want(wants);
+    // 見えているのに未完成のチャンクがあれば多めに時間を使う
+    let missing = 0;
+    for (let cy = cy0; cy <= cy1; cy++)
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const c = cache.get(cx, cy);
+        if (c) this.ctx.drawImage(c, cx * CW, cy * CW, CW, CW);
+        else {
+          missing++;
+          this.drawChunkPlaceholder(cx, cy);
+        }
+      }
+    cache.pump(missing ? 10 : 4);
+  }
+
+  /** 焼き込み前のチャンク：ミニマップの色を拡大して仮に描く */
+  private drawChunkPlaceholder(cx: number, cy: number): void {
+    const CW = CHUNK * TILE;
+    const ctx = this.ctx;
+    if (this.miniCanvas && cx >= 0 && cy >= 0 && cx < CHUNKS_X && cy < CHUNKS_Y) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(this.miniCanvas, cx * CHUNK * 2, cy * CHUNK * 2, CHUNK * 2, CHUNK * 2, cx * CW, cy * CW, CW, CW);
+    } else {
+      ctx.fillStyle = '#2a2e20';
+      ctx.fillRect(cx * CW, cy * CW, CW, CW);
+    }
+  }
+
+  /** 外縁の汚染帯：地図の端に近いほど黄緑がかった霞を重ねる（地図の外の遠景につながる） */
+  private drawEdgeHaze(vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const B = EDGE_BAND * TILE;
+    const ctx = this.ctx;
+    const band = (x: number, y: number, w: number, h: number, gx0: number, gy0: number, gx1: number, gy1: number) => {
+      if (x > vx1 || y > vy1 || x + w < vx0 || y + h < vy0) return;
+      const g = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
+      g.addColorStop(0, 'rgba(70,78,40,0.55)');
+      g.addColorStop(0.5, 'rgba(70,78,40,0.2)');
+      g.addColorStop(1, 'rgba(70,78,40,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(x, y, w, h);
+    };
+    band(0, 0, B, WORLD_H, 0, 0, B, 0);
+    band(WORLD_W - B, 0, B, WORLD_H, WORLD_W, 0, WORLD_W - B, 0);
+    band(0, 0, WORLD_W, B, 0, 0, 0, B);
+    band(0, WORLD_H - B, WORLD_W, B, 0, WORLD_H, 0, WORLD_H - B);
+  }
+
   // ---------------- 天候 ----------------
 
   private rain: { x: number; y: number; s: number }[] = [];
@@ -1320,7 +1384,12 @@ export class Renderer {
     // 追われているときの赤い縁・被弾の赤：CSS の重ね合わせ（不透明度だけ毎フレーム変える）
     this.setOv('alert', 'opacity', horde ? (0.38 * (0.55 + Math.sin(this.time * 2.4) * 0.15)).toFixed(2) : '0');
     this.setOv('hurt', 'opacity', fx.hurt > 0 ? (0.35 * fx.hurt).toFixed(2) : '0');
+    // 汚染度が高いと視界の縁が黄緑にかすむ
+    const tx2 = me && me.status === 'alive' ? me.tox ?? 0 : 0;
+    this.setOv('tox', 'opacity', tx2 > 10 ? Math.min(0.75, (tx2 - 10) / 90).toFixed(2) : '0');
 
+    this.updateExplored(o.dt);
+    this.drawCompass(view, me, o.localId);
     this.drawLocationToast(me, o.dt, !!fx.banner);
     this.drawAllyIndicators(view, o.localId, o.effects);
     this.drawDropIndicator(view, me);
@@ -1377,6 +1446,8 @@ export class Renderer {
       ctx.restore();
       ctx.globalAlpha = 1;
     }
+
+    if (o.mapOpen) this.drawWorldMap(view, o.localId);
 
     // ---- クロスヘア（連射で広がる） ----
     const cx = o.mouseX;
@@ -1478,8 +1549,8 @@ export class Renderer {
       if (key !== this.curLoc) {
         this.curLoc = key;
         if (loc) {
-          const danger = loc.hot ? '汚染地帯：手強い個体が多いが、レア物資が眠っている' : loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
-          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.hot ? '#d090c8' : loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
+          const danger = loc.hot ? '汚染地帯：手強い個体が多いが、レア物資が眠っている' : loc.tier >= 4 ? '最深部：重装の感染兵士が群れる。最高級の物資と、帰り道の危険' : loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
+          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.hot ? '#d090c8' : loc.tier >= 4 ? '#e05a40' : loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
         } else this.locToast = null; // その場所を出たら古い表示は出さない
       }
     }
@@ -1705,21 +1776,28 @@ export class Renderer {
     ctx.closePath();
     ctx.fill();
 
-    // 現在地と危険度
+    // 現在地と危険度、拠点までの距離と方角（帰還の判断用）
     let sub = '野外';
     let col = '#bdb79e';
     let tag = '';
     if (me) {
-      const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
+      const tx = Math.floor(me.x / TILE);
+      const ty = Math.floor(me.y / TILE);
+      const loc = locationAt(this.world.locations, tx, ty);
+      const d = Math.hypot(tx - BASE_TX, ty - BASE_TY);
+      const tier = loc && loc.kind !== 'base' ? loc.tier : tierAtDistance(d);
+      const edge = edgeDistance(tx, ty) < EDGE_BAND;
       if (loc?.kind === 'base') {
         sub = '拠点 — 安全地帯';
         col = '#93b77c';
         tag = 'SAFE';
-      } else if (loc) {
-        sub = loc.name;
-        col = loc.hot ? '#d68ac8' : loc.tier >= 3 ? '#e07a5e' : loc.tier === 2 ? '#e0b862' : '#bdb79e';
-        tag = loc.hot ? '☣ 汚染' : '★'.repeat(loc.tier);
-      } else if (view.phase === 'night') sub = '野外 — 夜は徘徊者が多い';
+      } else {
+        sub = loc ? loc.name : edge ? '外縁の汚染帯' : `野外 ${'★'.repeat(tier)}`;
+        col = edge || loc?.hot ? '#c8d070' : tier >= 4 ? '#e05a40' : tier >= 3 ? '#e07a5e' : tier === 2 ? '#e0b862' : '#bdb79e';
+        // 拠点はどっち？（拠点から見た自分の方角の逆）
+        const back = directionName(BASE_TX * 2 - tx, BASE_TY * 2 - ty);
+        tag = `⌂ ${Math.round(d)}m ${back}`;
+      }
     }
     ctx.font = `bold 11px ${UI}`;
     ctx.fillStyle = col;
@@ -1793,7 +1871,7 @@ export class Renderer {
     const { ctx, h } = this;
     const x = 12;
     const pw = 262;
-    const ph = 150;
+    const ph = 166;
     const y = h - ph - 30;
     const low = me.hp / me.maxHp < 0.3;
     const hungry = me.hunger < 25;
@@ -1822,6 +1900,7 @@ export class Renderer {
     if (low) warn('出血・HP低下', '#d0583e');
     if (hungry) warn('空腹', '#e0a33a');
     if (tired) warn('息切れ', '#7fa2bf');
+    if ((me.tox ?? 0) > 50) warn('汚染', '#c8d050');
 
     const bar = (label: string, by: number, ratio: number, color: string, val: string, flash: boolean) => {
       ctx.font = `bold 10px ${UI}`;
@@ -1842,10 +1921,12 @@ export class Renderer {
     ctx.fillStyle = 'rgba(255,255,255,0.6)';
     ctx.fillRect(x + 50 + (pw - 112) * (PLAYER.dashStamina / smax), y + 39, 1, 12);
     bar('空腹', y + 56, me.hunger / 100, me.hunger > 25 ? '#b08a50' : '#d0583e', `${Math.ceil(me.hunger)}%`, hungry);
+    const tox = me.tox ?? 0;
+    bar('汚染', y + 72, tox / 100, tox > 50 ? '#c8d050' : '#8a9a50', `${Math.round(tox)}%`, tox > 50);
 
     // 区切り
     ctx.fillStyle = 'rgba(190,180,130,0.18)';
-    ctx.fillRect(x + 10, y + 72, pw - 20, 1);
+    ctx.fillRect(x + 10, y + 88, pw - 20, 1);
     // 装備
     const wline = (key: 'prim' | 'sec', label: string, iy: number) => {
       const s = heldWeapon({ ...me, tool: key === 'prim' ? Tool.Primary : Tool.Secondary });
@@ -1877,23 +1958,23 @@ export class Renderer {
       ctx.fillStyle = s.w.mag === 0 ? '#ef8a70' : '#e0b862';
       ctx.fillText(`${String(s.w.mag).padStart(2, '0')}/${countItem(me.bag, st.ammo)}`, x + pw - 10, iy);
     };
-    wline('prim', 'PRI', y + 86);
-    wline('sec', 'SEC', y + 104);
+    wline('prim', 'PRI', y + 102);
+    wline('sec', 'SEC', y + 120);
     // バッグの使用状況
     const used = me.bag.filter((b) => b).length;
     ctx.textAlign = 'left';
     ctx.font = `9px ${MONO}`;
     ctx.fillStyle = '#8c8872';
-    ctx.fillText('BAG', x + 10, y + 122);
+    ctx.fillText('BAG', x + 10, y + 138);
     const cw = (pw - 112) / me.bag.length;
     for (let i = 0; i < me.bag.length; i++) {
       ctx.fillStyle = me.bag[i] ? '#b8a878' : 'rgba(255,255,255,0.1)';
-      ctx.fillRect(x + 50 + i * cw, y + 118, cw - 2, 8);
+      ctx.fillRect(x + 50 + i * cw, y + 134, cw - 2, 8);
     }
     ctx.textAlign = 'right';
     ctx.font = `12px ${MONO}`;
     ctx.fillStyle = used >= me.bag.length ? '#ef8a70' : '#e6e1cc';
-    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 122);
+    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 138);
     ctx.textAlign = 'left';
     ctx.font = `9px ${UI}`;
     ctx.fillStyle = '#6f6c5a';
@@ -2007,14 +2088,55 @@ export class Renderer {
     }
   }
 
+  // ---------------- 地図まわり（探索済みのマスク・ミニマップ・全体地図・コンパス） ----------------
+
+  private exploredCanvas = document.createElement('canvas');
+  private exploredT = 0;
+
+  /** 一度見た場所だけ地図に出す（未探索は暗く）。0.5秒ごとに更新 */
+  private updateExplored(dt: number): void {
+    this.exploredT -= dt;
+    if (this.exploredT > 0 && this.exploredCanvas.width) return;
+    this.exploredT = 0.5;
+    const c = this.exploredCanvas;
+    if (c.width !== MAP_W) {
+      c.width = MAP_W;
+      c.height = MAP_H;
+    }
+    const g = c.getContext('2d')!;
+    const img = g.createImageData(MAP_W, MAP_H);
+    const ex = this.vision.explored;
+    for (let i = 0; i < ex.length; i++) {
+      const k = i * 4;
+      img.data[k] = 10;
+      img.data[k + 1] = 11;
+      img.data[k + 2] = 8;
+      img.data[k + 3] = ex[i] ? 0 : 205;
+    }
+    g.putImageData(img, 0, 0);
+  }
+
+  private locExplored(l: { x: number; y: number; w: number; h: number }): boolean {
+    const cx = Math.floor(l.x + l.w / 2);
+    const cy = Math.floor(l.y + l.h / 2);
+    return this.vision.explored[cy * MAP_W + cx] === 1 || this.vision.explored[l.y * MAP_W + l.x] === 1;
+  }
+
+  /** ミニマップ：自分の周り（約 96×72 マス）だけを追従表示。地図の外は霞 */
   private drawMinimap(view: ViewState, localId: number): void {
     const { ctx } = this;
     if (!this.miniCanvas) return;
-    const s = 2.2;
-    const mw = MAP_W * s;
-    const mh = MAP_H * s;
+    const me = view.players.find((p) => p.id === localId);
+    const s = 2;
+    const RW = 48;
+    const RH = 36;
+    const mw = RW * 2 * s;
+    const mh = RH * 2 * s;
     const mx = this.w - mw - 16;
     const my = 98;
+    const ctr = me ?? { x: this.cam.x, y: this.cam.y };
+    const ctx0 = ctr.x / TILE - RW;
+    const cty0 = ctr.y / TILE - RH;
     panel(ctx, mx - 4, my - 18, mw + 8, mh + 22);
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = 'left';
@@ -2023,76 +2145,419 @@ export class Renderer {
     ctx.fillText('// TAC-MAP', mx, my - 10);
     ctx.textAlign = 'right';
     ctx.fillStyle = '#8c8872';
-    ctx.fillText('N▲', mx + mw, my - 10);
-    ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
-    // ロケーション（★の数で危険度）
+    ctx.fillText('[B] 地図  N▲', mx + mw, my - 10);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(mx, my, mw, mh);
+    ctx.clip();
+    ctx.fillStyle = '#2c3020';
+    ctx.fillRect(mx, my, mw, mh);
+    // 地形（miniCanvas は 1マス = 2px）と未探索のマスク
+    const X = (tx: number) => mx + (tx - ctx0) * s;
+    const Y = (ty: number) => my + (ty - cty0) * s;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.miniCanvas, X(0), Y(0), MAP_W * s, MAP_H * s);
+    ctx.drawImage(this.exploredCanvas, X(0), Y(0), MAP_W * s, MAP_H * s);
+    ctx.imageSmoothingEnabled = true;
+    // 地図の外縁（汚染帯）
+    ctx.strokeStyle = 'rgba(170,190,80,0.55)';
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(X(EDGE_BAND), Y(EDGE_BAND), (MAP_W - EDGE_BAND * 2) * s, (MAP_H - EDGE_BAND * 2) * s);
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(70,78,40,0.45)';
+    ctx.fillRect(X(-200), Y(-200), (MAP_W + 400) * s, 200 * s);
+    ctx.fillRect(X(-200), Y(MAP_H), (MAP_W + 400) * s, 200 * s);
+    ctx.fillRect(X(-200), Y(0), 200 * s, MAP_H * s);
+    ctx.fillRect(X(MAP_W), Y(0), 200 * s, MAP_H * s);
+    // ロケーション（探索済みのみ）
     for (const loc of this.world.locations) {
-      if (loc.kind === 'ruin') continue;
-      const col = loc.hot ? '#d070c0' : loc.tier >= 3 ? '#c06050' : loc.tier === 2 ? '#c9a85a' : '#9fe08a';
+      if (loc.kind === 'ruin' || !this.locExplored(loc)) continue;
+      if (loc.x + loc.w < ctx0 || loc.y + loc.h < cty0 || loc.x > ctx0 + RW * 2 || loc.y > cty0 + RH * 2) continue;
+      const col = loc.hot ? '#d070c0' : loc.tier >= 4 ? '#e05a40' : loc.tier >= 3 ? '#c06050' : loc.tier === 2 ? '#c9a85a' : loc.kind === 'base' ? '#93b77c' : '#9fe08a';
       ctx.strokeStyle = col;
       ctx.lineWidth = 1;
-      ctx.strokeRect(mx + loc.x * s - 1, my + loc.y * s - 1, loc.w * s + 2, loc.h * s + 2);
-      ctx.font = 'bold 8px "Noto Sans JP", "Segoe UI", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillStyle = col;
-      ctx.fillText(loc.hot ? '☣' : '★'.repeat(loc.tier), mx + (loc.x + loc.w / 2) * s, my + loc.y * s - 1);
+      ctx.strokeRect(X(loc.x) - 0.5, Y(loc.y) - 0.5, loc.w * s + 1, loc.h * s + 1);
+      if (loc.kind !== 'base') {
+        ctx.font = `bold 8px ${UI}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = col;
+        ctx.fillText(loc.hot ? '☣' : '★'.repeat(loc.tier), X(loc.x + loc.w / 2), Y(loc.y) - 1);
+      }
     }
+    // 目印・拠点・補給物資
+    for (const lm of this.world.landmarks) this.landmarkIcon(ctx, X(lm.x), Y(lm.y), lm.kind, 1);
+    this.baseIcon(ctx, X(BASE_TX), Y(BASE_TY));
     const k = s / TILE;
-    for (const ob of this.world.objects.values()) {
-      let c: string | null = null;
-      if (ob.kind === 'woodWall') c = '#c08a50';
-      else if (ob.kind === 'ironWall') c = '#b8c4d4';
-      else if (ob.kind === 'stone') c = '#9a968f';
-      else if (ob.kind === 'spike') c = '#8a6a3a';
-      else if (ob.kind === 'campfire' || ob.kind === 'torch') c = '#c88a4a';
-      else if (ob.kind === 'bag') c = '#e0d090';
-      else if (ob.kind === 'mcrate' && ob.ready) c = '#c98a50';
-      else if (ob.kind === 'bench' || ob.kind === 'chest' || ob.kind === 'stash') c = '#c9a85a';
-      else if (ob.kind === 'turret') c = '#9fb4c2';
-      else if (ob.kind === 'barbed') c = '#8a8f96';
-      if (!c) continue;
-      ctx.fillStyle = c;
-      ctx.fillRect(mx + ob.tx * s, my + ob.ty * s, s, s);
-    }
     if (view.drop && Math.sin(this.time * 8) > -0.3) {
       ctx.fillStyle = '#e05a3a';
       ctx.beginPath();
-      ctx.arc(mx + view.drop.x * k, my + view.drop.y * k, 3.5, 0, Math.PI * 2);
+      ctx.arc(X(0) + view.drop.x * k, Y(0) + view.drop.y * k, 3.5, 0, Math.PI * 2);
       ctx.fill();
     }
     for (const z of view.zombies) {
       if (!this.vision.isVisible(z.x, z.y)) continue;
       ctx.fillStyle = z.alert === 2 ? '#e05a40' : z.alert === 1 ? '#c9a050' : '#a05050';
-      ctx.fillRect(mx + z.x * k - 1, my + z.y * k - 1, 2, 2);
-    }
-    for (const p of view.players) {
-      if (p.status === 'dead') continue;
-      ctx.fillStyle = PLAYER_COLORS[p.id];
-      ctx.beginPath();
-      ctx.arc(mx + p.x * k, my + p.y * k, p.id === localId ? 3.5 : 2.5, 0, Math.PI * 2);
-      ctx.fill();
-      if (p.status === 'down') {
-        ctx.strokeStyle = '#b4483a';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(mx + p.x * k, my + p.y * k, 6 + Math.sin(this.time * 8) * 1.5, 0, Math.PI * 2);
-        ctx.stroke();
-      }
+      ctx.fillRect(X(0) + z.x * k - 1, Y(0) + z.y * k - 1, 2, 2);
     }
     if (this.fx) {
       for (const p of this.fx.pings) {
         ctx.strokeStyle = p.t === 'enemy' ? '#c0573e' : p.t === 'loot' ? '#c9a85a' : '#ffffff';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.arc(mx + p.x * k, my + p.y * k, 4 + Math.sin(this.time * 6) * 1.5, 0, Math.PI * 2);
+        ctx.arc(X(0) + p.x * k, Y(0) + p.y * k, 4 + Math.sin(this.time * 6) * 1.5, 0, Math.PI * 2);
         ctx.stroke();
       }
     }
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(mx + (this.cam.x - this.w / 2) * k, my + (this.cam.y - this.h / 2) * k, this.w * k, this.h * k);
+    ctx.restore();
+    // 仲間：枠の外なら縁に矢印
+    for (const p of view.players) {
+      if (p.status === 'dead') continue;
+      let px = X(0) + p.x * k;
+      let py = Y(0) + p.y * k;
+      const out = px < mx || py < my || px > mx + mw || py > my + mh;
+      px = clamp(px, mx + 3, mx + mw - 3);
+      py = clamp(py, my + 3, my + mh - 3);
+      ctx.fillStyle = PLAYER_COLORS[p.id];
+      ctx.beginPath();
+      if (out) {
+        ctx.moveTo(px, py - 4);
+        ctx.lineTo(px + 4, py + 3);
+        ctx.lineTo(px - 4, py + 3);
+        ctx.closePath();
+      } else ctx.arc(px, py, p.id === localId ? 3.5 : 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      if (p.status === 'down') {
+        ctx.strokeStyle = '#d0583e';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(px, py, 6 + Math.sin(this.time * 8) * 1.5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    if (me) {
+      // 自分の向き
+      ctx.strokeStyle = '#efe6c4';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(mx + mw / 2, my + mh / 2);
+      ctx.lineTo(mx + mw / 2 + Math.cos(me.aim) * 9, my + mh / 2 + Math.sin(me.aim) * 9);
+      ctx.stroke();
+    }
   }
+
+  private baseIcon(ctx: CanvasRenderingContext2D, x: number, y: number, sc = 1): void {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(sc, sc);
+    ctx.fillStyle = '#93b77c';
+    ctx.strokeStyle = '#15170f';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(6, 0);
+    ctx.lineTo(4, 0);
+    ctx.lineTo(4, 5);
+    ctx.lineTo(-4, 5);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-6, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private landmarkIcon(ctx: CanvasRenderingContext2D, x: number, y: number, kind: string, sc: number): void {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(sc, sc);
+    if (kind === 'tower') {
+      ctx.strokeStyle = '#b8b4a0';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(-3, 4);
+      ctx.lineTo(0, -5);
+      ctx.lineTo(3, 4);
+      ctx.moveTo(-2, 1);
+      ctx.lineTo(2, 1);
+      ctx.stroke();
+      ctx.fillStyle = Math.sin(this.time * 4) > 0 ? '#ff5a3c' : '#7a2a20';
+      ctx.fillRect(-1, -6, 2, 2);
+    } else if (kind === 'water') {
+      ctx.fillStyle = '#9aa4a8';
+      ctx.fillRect(-3.5, -4, 7, 4);
+      ctx.fillRect(-0.5, 0, 1, 4);
+    } else {
+      ctx.fillStyle = kind === 'fire' ? '#e07a3a' : '#8a8a80';
+      ctx.beginPath();
+      ctx.arc(-1, 1, 2.5, 0, Math.PI * 2);
+      ctx.arc(1.5, -2, 2, 0, Math.PI * 2);
+      ctx.arc(-0.5, -4.5, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /** コンパス：照準方向を中心に方位を表示。拠点・仲間・補給物資・ピン・目印の方角と距離 */
+  private drawCompass(view: ViewState, me: PlayerSnap | undefined, localId: number): void {
+    if (!me) return;
+    const { ctx, w } = this;
+    const cw = Math.max(260, Math.min(460, w - 640));
+    const x0 = Math.round(w / 2 - cw / 2);
+    const y0 = 8;
+    const hh = 30;
+    const FOV = Math.PI * 0.62; // 片側の表示角
+    ctx.fillStyle = 'rgba(14,15,11,0.72)';
+    ctx.fillRect(x0, y0, cw, hh);
+    brackets(ctx, x0, y0, cw, hh, 'rgba(224,163,58,0.7)', 6, 1.5);
+    const head = me.aim;
+    const toX = (ang: number) => {
+      const d = Math.atan2(Math.sin(ang - head), Math.cos(ang - head));
+      return { x: x0 + cw / 2 + (d / FOV) * (cw / 2), d };
+    };
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, y0, cw, hh);
+    ctx.clip();
+    // 目盛り（15°ごと）と方位
+    const names: Record<number, string> = { 0: 'E', 45: 'SE', 90: 'S', 135: 'SW', 180: 'W', 225: 'NW', 270: 'N', 315: 'NE' };
+    for (let deg = 0; deg < 360; deg += 15) {
+      const { x, d } = toX((deg * Math.PI) / 180);
+      if (Math.abs(d) > FOV) continue;
+      const nm = names[deg];
+      ctx.fillStyle = nm ? 'rgba(230,225,204,0.7)' : 'rgba(230,225,204,0.3)';
+      ctx.fillRect(Math.round(x), y0 + hh - (nm ? 8 : 5), 1, nm ? 8 : 5);
+      if (nm) {
+        ctx.font = `${nm.length === 1 ? 'bold 12px' : '10px'} ${MONO}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = nm === 'N' ? '#e0a33a' : '#d8d2b8';
+        ctx.fillText(nm, x, y0 + 10);
+      }
+    }
+    // 目標の方角
+    const marker = (wx: number, wy: number, color: string, label: string, kind: 'base' | 'dot' | 'drop' | 'lm', lmKind = '') => {
+      const dx = wx - me.x;
+      const dy = wy - me.y;
+      const dist = Math.round(Math.hypot(dx, dy) / TILE);
+      const { x, d } = toX(Math.atan2(dy, dx));
+      const px = clamp(x, x0 + 8, x0 + cw - 8);
+      const edge = Math.abs(d) > FOV;
+      ctx.globalAlpha = edge ? 0.6 : 1;
+      if (kind === 'base') this.baseIcon(ctx, px, y0 + 21, 0.85);
+      else if (kind === 'lm') this.landmarkIcon(ctx, px, y0 + 21, lmKind, 1);
+      else {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        if (kind === 'drop') ctx.rect(px - 3, y0 + 18, 6, 6);
+        else ctx.arc(px, y0 + 21, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (label && !edge) {
+        ctx.font = `9px ${MONO}`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = color;
+        ctx.fillText(`${label}${dist}m`, px, y0 + hh + 8);
+      }
+      ctx.globalAlpha = 1;
+    };
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0 - 2, y0, cw + 4, hh + 16);
+    ctx.clip();
+    for (const lm of this.world.landmarks) if (Math.hypot(lm.x * TILE - me.x, lm.y * TILE - me.y) < 110 * TILE) marker(lm.x * TILE, lm.y * TILE, '#a8a490', '', 'lm', lm.kind);
+    marker((BASE_TX + 0.5) * TILE, (BASE_TY + 0.5) * TILE, '#93b77c', '⌂', 'base');
+    if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
+    if (this.fx) for (const p of this.fx.pings) marker(p.x, p.y, p.t === 'enemy' ? '#d0583e' : p.t === 'loot' ? '#e0a33a' : (PLAYER_COLORS[p.id] ?? '#fff'), '', 'dot');
+    for (const p of view.players) if (p.id !== localId && p.status !== 'dead') marker(p.x, p.y, p.status === 'down' ? '#ff6a50' : (PLAYER_COLORS[p.id] ?? '#fff'), p.status === 'down' ? 'SOS ' : '', 'dot');
+    ctx.restore();
+    // 中心の照準マーク
+    ctx.fillStyle = '#e0a33a';
+    ctx.beginPath();
+    ctx.moveTo(x0 + cw / 2, y0 + hh - 1);
+    ctx.lineTo(x0 + cw / 2 - 4, y0 + hh + 5);
+    ctx.lineTo(x0 + cw / 2 + 4, y0 + hh + 5);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /** 全体地図（B）：探索済みの地形・施設、危険度の輪、目印、仲間 */
+  private drawWorldMap(view: ViewState, localId: number): void {
+    const { ctx, w, h } = this;
+    if (!this.miniCanvas) return;
+    const s = Math.min((w - 120) / MAP_W, (h - 150) / MAP_H);
+    const mw = MAP_W * s;
+    const mh = MAP_H * s;
+    const mx = Math.round(w / 2 - mw / 2);
+    const my = Math.round(h / 2 - mh / 2 + 10);
+    ctx.fillStyle = 'rgba(8,9,7,0.72)';
+    ctx.fillRect(0, 0, w, h);
+    panel(ctx, mx - 10, my - 34, mw + 20, mh + 58);
+    ctx.font = `10px ${MONO}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// AREA MAP', mx, my - 20);
+    ctx.font = `bold 14px ${UI}`;
+    ctx.fillStyle = '#e6e1cc';
+    ctx.fillText('地図', mx + 90, my - 20);
+    ctx.font = `11px ${UI}`;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText('[B] / [Esc] で閉じる ・ 拠点から離れるほど危険（★）・ 外縁は汚染帯', mx + mw, my - 20);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
+    ctx.drawImage(this.exploredCanvas, mx, my, mw, mh);
+    ctx.imageSmoothingEnabled = true;
+    const X = (tx: number) => mx + tx * s;
+    const Y = (ty: number) => my + ty * s;
+    // 危険度の輪
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(mx, my, mw, mh);
+    ctx.clip();
+    const rings: [number, string][] = [
+      [34, '★★'],
+      [62, '★★★'],
+      [90, '★★★★'],
+    ];
+    for (const [r, label] of rings) {
+      ctx.strokeStyle = 'rgba(224,163,58,0.35)';
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.arc(X(BASE_TX), Y(BASE_TY), r * s, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = `bold 10px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(224,163,58,0.7)';
+      ctx.fillText(label, X(BASE_TX), Y(BASE_TY) - r * s - 6);
+    }
+    // 外縁の汚染帯
+    ctx.fillStyle = 'rgba(150,170,60,0.22)';
+    const B = EDGE_BAND * s;
+    ctx.fillRect(mx, my, mw, B);
+    ctx.fillRect(mx, my + mh - B, mw, B);
+    ctx.fillRect(mx, my + B, B, mh - 2 * B);
+    ctx.fillRect(mx + mw - B, my + B, B, mh - 2 * B);
+    ctx.restore();
+    // 施設（探索済みは名前つき）
+    for (const loc of this.world.locations) {
+      if (loc.kind === 'base') continue;
+      const ex = this.locExplored(loc);
+      if (!ex) continue;
+      const col = loc.hot ? '#d070c0' : loc.tier >= 4 ? '#e05a40' : loc.tier >= 3 ? '#d07a5e' : loc.tier === 2 ? '#d8b862' : '#9fc48a';
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(X(loc.x), Y(loc.y), loc.w * s, loc.h * s);
+      if (loc.kind !== 'ruin' && s >= 2.5) {
+        ctx.font = `bold 9px ${UI}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = col;
+        ctx.fillText(`${loc.hot ? '☣' : '★'.repeat(loc.tier)} ${loc.name.replace(/^.*?の/, '')}`, X(loc.x + loc.w / 2), Y(loc.y) - 1);
+      }
+    }
+    for (const lm of this.world.landmarks) this.landmarkIcon(ctx, X(lm.x), Y(lm.y), lm.kind, 1.6);
+    this.baseIcon(ctx, X(BASE_TX), Y(BASE_TY), 1.6);
+    const k = s / TILE;
+    if (view.drop) {
+      ctx.fillStyle = '#e05a3a';
+      ctx.fillRect(mx + view.drop.x * k - 4, my + view.drop.y * k - 4, 8, 8);
+    }
+    for (const p of view.players) {
+      if (p.status === 'dead') continue;
+      const px = mx + p.x * k;
+      const py = my + p.y * k;
+      ctx.fillStyle = PLAYER_COLORS[p.id];
+      ctx.beginPath();
+      ctx.arc(px, py, p.id === localId ? 5 : 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#15170f';
+      ctx.stroke();
+      ctx.font = `bold 11px ${UI}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = p.status === 'down' ? '#ff7a60' : '#e6e1cc';
+      ctx.fillText(p.name + (p.status === 'down' ? ' SOS' : ''), px + 8, py);
+    }
+    // 凡例
+    ctx.font = `10px ${UI}`;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#bdb79e';
+    ctx.fillText('⌂ 拠点　▲ 通信塔　● 煙・炎　■ 補給物資　点線の輪＝危険度の境目', mx, my + mh + 14);
+  }
+
+  /** 遠くから見える目印（霧の上に描く）：煙の柱・炎・通信塔の赤いランプ・給水塔 */
+  private drawLandmarks(vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const { ctx } = this;
+    for (const lm of this.world.landmarks) {
+      const x = lm.x * TILE;
+      const y = lm.y * TILE;
+      if (x < vx0 - 300 || x > vx1 + 300 || y < vy0 - 100 || y > vy1 + 500) continue;
+      if (lm.kind === 'smoke' || lm.kind === 'fire') {
+        for (let i = 0; i < 12; i++) {
+          const ph = (this.time * 0.18 + i / 12) % 1;
+          const r = 14 + ph * 60;
+          const dark = lm.kind === 'smoke' ? 30 : 55;
+          ctx.fillStyle = `rgba(${dark},${dark},${dark - 4},${0.3 * (1 - ph)})`;
+          ctx.beginPath();
+          ctx.arc(x + Math.sin(i * 1.7 + this.time * 0.6) * 18 * ph + ph * 70, y - ph * 320, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        if (lm.kind === 'fire') {
+          const f = 0.6 + Math.sin(this.time * 11 + lm.x) * 0.25;
+          const g = ctx.createRadialGradient(x, y, 0, x, y, 70);
+          g.addColorStop(0, `rgba(255,170,70,${0.55 * f})`);
+          g.addColorStop(1, 'rgba(255,120,40,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x - 70, y - 70, 140, 140);
+        }
+      } else if (lm.kind === 'tower') {
+        // 格子の通信塔（上から見ると細長い影）と赤いランプ
+        ctx.strokeStyle = 'rgba(40,40,36,0.8)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x - 10, y + 10);
+        ctx.lineTo(x + 10, y - 10);
+        ctx.moveTo(x - 10, y - 10);
+        ctx.lineTo(x + 10, y + 10);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + 140, y + 160);
+        ctx.stroke();
+        const on = Math.sin(this.time * 3.5) > 0.2;
+        if (on) {
+          const g = ctx.createRadialGradient(x, y, 0, x, y, 26);
+          g.addColorStop(0, 'rgba(255,70,50,0.9)');
+          g.addColorStop(1, 'rgba(255,70,50,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x - 26, y - 26, 52, 52);
+        }
+      } else {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(x + 40, y + 50, 34, 26, 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#7a7c74';
+        ctx.beginPath();
+        ctx.arc(x, y, 26, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#4a4c46';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.12)';
+        ctx.beginPath();
+        ctx.arc(x - 8, y - 8, 10, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
 }
 
 // ---------------- ヘルパー ----------------

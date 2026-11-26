@@ -3,8 +3,8 @@
 //   実際のゲームと同じ生成器で作った荒廃フィールドをゆっくり流し、
 //   座標グリッド・レーダースキャン・感染体の反応（赤い点）を重ねる
 // ============================================================
-import { MAP_H, MAP_W, TILE, WORLD_H, WORLD_W } from '../game/constants';
-import { bakeTerrain } from '../game/TerrainArt';
+import { CHUNK, MAP_H, MAP_W, TILE, WORLD_H, WORLD_W } from '../game/constants';
+import { bakeTerrain, type TerrainCache } from '../game/TerrainArt';
 import { generateWorld, TileWorld } from '../game/world';
 
 interface Blip {
@@ -15,7 +15,7 @@ interface Blip {
 
 export class TitleBackdrop {
   private ctx: CanvasRenderingContext2D;
-  private terrain: HTMLCanvasElement | null = null;
+  private terrain: TerrainCache | null = null;
   private raf = 0;
   private running = false;
   private t0 = performance.now();
@@ -34,7 +34,8 @@ export class TitleBackdrop {
     const gen = generateWorld((Math.random() * 1e9) | 0);
     const world = new TileWorld(gen.terrain);
     for (const o of gen.objs) world.setObj(o);
-    this.terrain = bakeTerrain(world).canvas;
+    world.locations = gen.locations;
+    this.terrain = bakeTerrain(world).cache;
     // カメラの巡回ルート（ロケーションを順に見て回る）
     this.path = gen.locations.map((l) => ({ x: (l.x + l.w / 2) * TILE, y: (l.y + l.h / 2) * TILE }));
     for (let i = 0; i < 46; i++) this.blips.push({ x: Math.random() * WORLD_W, y: Math.random() * WORLD_H, seen: -9 });
@@ -98,11 +99,29 @@ export class TitleBackdrop {
     ctx.fillStyle = '#0b0c09';
     ctx.fillRect(0, 0, w, h);
     if (this.terrain) {
+      // 見えている範囲のチャンクだけ焼き込み（少しずつ）
+      const CW = CHUNK * TILE;
+      const wx0 = -ox / zoom;
+      const wy0 = -oy / zoom;
+      const cx0 = Math.floor(wx0 / CW);
+      const cy0 = Math.floor(wy0 / CW);
+      const cx1 = Math.floor((wx0 + w / zoom) / CW);
+      const cy1 = Math.floor((wy0 + h / zoom) / CW);
+      const wants: { cx: number; cy: number; pri: number }[] = [];
       ctx.save();
       ctx.filter = 'saturate(0.55) brightness(0.55) contrast(1.1)';
-      ctx.drawImage(this.terrain, ox, oy, WORLD_W * zoom, WORLD_H * zoom);
+      for (let cy = cy0 - 1; cy <= cy1 + 1; cy++)
+        for (let cx = cx0 - 1; cx <= cx1 + 1; cx++) {
+          const vis = cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1;
+          wants.push({ cx, cy, pri: vis ? 0 : 10 });
+          if (!vis) continue;
+          const c = this.terrain.get(cx, cy);
+          if (c) ctx.drawImage(c, ox + cx * CW * zoom, oy + cy * CW * zoom, CW * zoom + 1, CW * zoom + 1);
+        }
       ctx.filter = 'none';
       ctx.restore();
+      this.terrain.want(wants);
+      this.terrain.pump(5);
     }
     // オリーブの色かぶり
     ctx.fillStyle = 'rgba(40,46,22,0.35)';
