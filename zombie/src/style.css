@@ -1455,3 +1455,58 @@ input[type='range'] {
 .mod-card .note {
   margin: 0;
 }
+
+/* ---------------- 軽量化：HUDレイヤーと CSS の色調・グレイン ---------------- */
+#hud {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 3;
+  pointer-events: none;
+}
+/* 画面全体をくすんだ色調に（以前はキャンバス上で毎フレーム合成していた） */
+#game.fx {
+  filter: saturate(0.68) sepia(0.06);
+}
+#fx-grain {
+  position: fixed;
+  inset: -160px;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.07;
+  mix-blend-mode: overlay;
+  background-repeat: repeat;
+  animation: grain 0.6s steps(6) infinite;
+}
+@keyframes grain {
+  0% { transform: translate(0, 0); }
+  17% { transform: translate(-37px, 23px); }
+  33% { transform: translate(53px, -41px); }
+  50% { transform: translate(-71px, -13px); }
+  67% { transform: translate(19px, 67px); }
+  83% { transform: translate(-29px, -59px); }
+  100% { transform: translate(0, 0); }
+}
+.fx-ov {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+#fx-tint {
+  mix-blend-mode: multiply;
+  background: #fff;
+}
+#fx-vig {
+  opacity: 0.3;
+  background: radial-gradient(ellipse 78% 78% at 50% 50%, rgba(0, 0, 0, 0) 55%, rgba(0, 0, 0, 1) 100%);
+}
+#fx-alert {
+  opacity: 0;
+  background: radial-gradient(ellipse 75% 75% at 50% 50%, rgba(180, 0, 0, 0) 45%, rgba(200, 0, 0, 1) 100%);
+}
+#fx-hurt {
+  opacity: 0;
+  background: radial-gradient(ellipse 70% 70% at 50% 50%, rgba(255, 0, 40, 0) 50%, rgba(255, 0, 40, 1) 100%);
+}

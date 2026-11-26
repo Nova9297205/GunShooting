@@ -177,6 +177,7 @@ export class GameSession {
   }
 
   stop(): void {
+    this.renderer.destroy();
     this.hudButtons.classList.add('hidden');
     this.craftMenu.destroy();
     this.invPanel.destroy();

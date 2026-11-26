@@ -117,7 +117,6 @@ export class Renderer {
   private terrainCanvas: HTMLCanvasElement | null = null;
   private miniCanvas: HTMLCanvasElement | null = null;
   private vision = new Vision();
-  private grain: CanvasPattern | null = null;
   private lightCanvas = document.createElement('canvas');
   private lightCtx = this.lightCanvas.getContext('2d')!;
   private pAnim = new Map<number, PlayerAnim>();
@@ -132,21 +131,104 @@ export class Renderer {
   private curLoc: string | null = null;
   private locToast: { text: string; sub: string; color: string; life: number } | null = null;
 
+  // ---- 軽量化 ----
+  /** HUD のパネル類（時計・チーム・ステータス・ホットバー・ミニマップ）は別キャンバスに描き、約15Hzで更新 */
+  private hudCanvas: HTMLCanvasElement;
+  private hudCtx: CanvasRenderingContext2D;
+  private hudT = 0;
+  private hudKey = '';
+  /** 画面の色調とフィルムグレインは CSS（GPUで合成）で行う */
+  private grainEl: HTMLDivElement;
+  /** 描画解像度の倍率（重いPCでは自動で下げる） */
+  renderScale = 1;
+  /** CSS の重ね合わせ（色温度の乗算・周辺減光・追跡時の赤・被弾の赤） */
+  private ov: Record<'tint' | 'vig' | 'alert' | 'hurt', HTMLDivElement>;
+  private ovCache: Record<string, string> = {};
+  private baseDpr = 1;
+  private fpsAvg = 60;
+  private qTimer = 0;
+
   constructor(
     private canvas: HTMLCanvasElement,
     private world: TileWorld,
   ) {
     this.ctx = canvas.getContext('2d')!;
+    this.hudCanvas = (document.getElementById('hud') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    if (!this.hudCanvas.id) {
+      this.hudCanvas.id = 'hud';
+      document.body.insertBefore(this.hudCanvas, canvas.nextSibling);
+    }
+    this.hudCtx = this.hudCanvas.getContext('2d')!;
+    this.grainEl = (document.getElementById('fx-grain') as HTMLDivElement | null) ?? document.createElement('div');
+    if (!this.grainEl.id) {
+      this.grainEl.id = 'fx-grain';
+      document.body.insertBefore(this.grainEl, this.hudCanvas);
+    }
+    this.grainEl.style.backgroundImage = `url(${makeGrainURL()})`;
+    const mk = (id: string) => {
+      let el = document.getElementById(id) as HTMLDivElement | null;
+      if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        el.className = 'fx-ov';
+        document.body.insertBefore(el, this.grainEl);
+      }
+      return el;
+    };
+    this.ov = { tint: mk('fx-tint'), vig: mk('fx-vig'), alert: mk('fx-alert'), hurt: mk('fx-hurt') };
+    this.setActive(true);
     this.resize();
     this.bakeTerrain();
   }
 
+  /** ゲーム中だけ HUD キャンバス・色調フィルター・グレインを有効にする */
+  setActive(on: boolean): void {
+    for (const el of Object.values(this.ov ?? {})) el.classList.toggle('hidden', !on);
+    this.hudCanvas.classList.toggle('hidden', !on);
+    this.grainEl.classList.toggle('hidden', !on);
+    this.canvas.classList.toggle('fx', on);
+  }
+
+  destroy(): void {
+    this.setActive(false);
+    this.hudCtx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+  }
+
+  /** CSS の重ね合わせのスタイルを（変わったときだけ）更新 */
+  private setOv(k: 'tint' | 'vig' | 'alert' | 'hurt', prop: 'opacity' | 'backgroundColor', v: string): void {
+    const key = k + prop;
+    if (this.ovCache[key] === v) return;
+    this.ovCache[key] = v;
+    this.ov[k].style[prop] = v;
+  }
+
+  /** フレームレートを見て描画解像度を自動調整（落ち続けたら下げ、余裕が続けば戻す） */
+  private autoQuality(dt: number): void {
+    if (dt <= 0 || dt > 0.5) return;
+    this.fpsAvg += (1 / dt - this.fpsAvg) * Math.min(1, dt * 2);
+    this.qTimer += dt;
+    if (this.fpsAvg < 45 && this.qTimer > 2.5 && this.renderScale > 0.6) {
+      this.renderScale = Math.max(0.6, this.renderScale - 0.15);
+      this.qTimer = 0;
+      this.resize();
+    } else if (this.fpsAvg > 57 && this.qTimer > 6 && this.renderScale < 1) {
+      this.renderScale = Math.min(1, this.renderScale + 0.15);
+      this.qTimer = 0;
+      this.resize();
+    } else if (this.qTimer > 6) this.qTimer = 0;
+  }
+
   resize(): void {
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+    // ゲーム画面は最大1.5倍（高解像度ディスプレイで描くピクセル数を抑える）。HUD は baseDpr のままくっきり
+    this.dpr = Math.min(this.baseDpr, 1.5) * this.renderScale;
     this.w = window.innerWidth;
     this.h = window.innerHeight;
     this.canvas.width = Math.floor(this.w * this.dpr);
     this.canvas.height = Math.floor(this.h * this.dpr);
+    this.hudCanvas.width = Math.floor(this.w * this.baseDpr);
+    this.hudCanvas.height = Math.floor(this.h * this.baseDpr);
+    this.hudKey = '';
     this.canvas.style.width = `${this.w}px`;
     this.canvas.style.height = `${this.h}px`;
     // ライトマップは半解像度で十分（ぼかし効果も兼ねる）
@@ -239,12 +321,16 @@ export class Renderer {
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     // マップの外側は深い森
-    if (!this.forest) this.forest = makeForestPattern(ctx);
-    ctx.save();
-    ctx.translate(Math.round(this.w / 2 - this.cam.x), Math.round(this.h / 2 - this.cam.y));
-    ctx.fillStyle = this.forest;
-    ctx.fillRect(this.cam.x - this.w / 2 - 20, this.cam.y - this.h / 2 - 20, this.w + 40, this.h + 40);
-    ctx.restore();
+    // （画面がマップの外にはみ出しているときだけ塗る）
+    const outside = this.cam.x - this.w / 2 < 0 || this.cam.y - this.h / 2 < 0 || this.cam.x + this.w / 2 > WORLD_W || this.cam.y + this.h / 2 > WORLD_H;
+    if (outside) {
+      if (!this.forest) this.forest = makeForestPattern(ctx);
+      ctx.save();
+      ctx.translate(Math.round(this.w / 2 - this.cam.x), Math.round(this.h / 2 - this.cam.y));
+      ctx.fillStyle = this.forest;
+      ctx.fillRect(this.cam.x - this.w / 2 - 20, this.cam.y - this.h / 2 - 20, this.w + 40, this.h + 40);
+      ctx.restore();
+    }
 
     // ---- ワールド ----
     ctx.save();
@@ -312,7 +398,15 @@ export class Renderer {
     // 外壁が見えている建物の屋根は霧の上に（外から屋根として見える）、それ以外は記憶として霧の下に
     this.drawRoofs(me, vx0, vy0, vx1, vy1, false);
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(vis.fog, 0, 0, WORLD_W, WORLD_H);
+    {
+      // 霧は画面に映る範囲だけ切り出して描く（ワールド全体を毎フレーム拡大しない）
+      const k = vis.fog.width / WORLD_W;
+      const fx0 = clamp(Math.floor(vx0 / TILE) * TILE, 0, WORLD_W);
+      const fy0 = clamp(Math.floor(vy0 / TILE) * TILE, 0, WORLD_H);
+      const fx1 = clamp(Math.ceil(vx1 / TILE) * TILE, 0, WORLD_W);
+      const fy1 = clamp(Math.ceil(vy1 / TILE) * TILE, 0, WORLD_H);
+      if (fx1 > fx0 && fy1 > fy0) ctx.drawImage(vis.fog, fx0 * k, fy0 * k, (fx1 - fx0) * k, (fy1 - fy0) * k, fx0, fy0, fx1 - fx0, fy1 - fy0);
+    }
     this.drawRoofs(me, vx0, vy0, vx1, vy1, true);
     ctx.restore();
 
@@ -332,7 +426,7 @@ export class Renderer {
     this.drawPopups(fx);
     ctx.restore();
 
-    this.drawPostFx();
+    // 色調・グレインは CSS（#game.fx / #fx-grain）で行う
     this.drawHUD(view, o, me, dark);
   }
 
@@ -382,40 +476,32 @@ export class Renderer {
         ctx.drawImage(roof, b.x * TILE, b.y * TILE);
         continue;
       }
-      for (let ty = b.y; ty < b.y + b.h; ty++)
-        for (let tx = b.x; tx < b.x + b.w; tx++) {
-          if (this.vision.tileVisible(tx, ty)) continue;
-          const sx = (tx - b.x) * TILE;
-          const sy = (ty - b.y) * TILE;
-          ctx.drawImage(roof, sx, sy, TILE, TILE, tx * TILE, ty * TILE, TILE, TILE);
+      // 見えていないタイルを横方向の帯にまとめてクリップし、屋根は1回で描く（drawImage の回数を減らす）
+      ctx.save();
+      ctx.beginPath();
+      let any = false;
+      for (let ty = b.y; ty < b.y + b.h; ty++) {
+        let run = -1;
+        for (let tx = b.x; tx <= b.x + b.w; tx++) {
+          const hidden = tx < b.x + b.w && !this.vision.tileVisible(tx, ty);
+          if (hidden && run < 0) run = tx;
+          else if (!hidden && run >= 0) {
+            ctx.rect(run * TILE, ty * TILE, (tx - run) * TILE, TILE);
+            run = -1;
+            any = true;
+          }
         }
+      }
+      if (any) {
+        ctx.clip();
+        ctx.drawImage(roof, b.x * TILE, b.y * TILE);
+      }
+      ctx.restore();
     }
   }
 
   /** フィルムグレイン＋彩度を落とす色調補正 */
-  private drawPostFx(): void {
-    const { ctx, w, h } = this;
-    ctx.save();
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    // 彩度ダウン（全体をくすんだ色調に）
-    ctx.globalCompositeOperation = 'saturation';
-    ctx.globalAlpha = 0.32;
-    ctx.fillStyle = 'hsl(0,0%,50%)';
-    ctx.fillRect(0, 0, w, h);
-    // ほんのり暖色の色かぶり
-    ctx.globalCompositeOperation = 'soft-light';
-    ctx.globalAlpha = 0.12;
-    ctx.fillStyle = '#8a7a5a';
-    ctx.fillRect(0, 0, w, h);
-    // フィルムグレイン
-    if (!this.grain) this.grain = makeGrain(ctx);
-    ctx.globalCompositeOperation = 'overlay';
-    ctx.globalAlpha = 0.09;
-    ctx.translate(-Math.floor(Math.random() * 128), -Math.floor(Math.random() * 128));
-    ctx.fillStyle = this.grain;
-    ctx.fillRect(0, 0, w + 128, h + 128);
-    ctx.restore();
-  }
+
 
   /** 隣のタイルに高い壁（廃墟の壁・建築壁）があるか */
   private tallQuery(tx: number, ty: number): TallQuery {
@@ -430,27 +516,46 @@ export class Renderer {
   }
 
   /** 昼間にゆっくり流れる雲の影 */
+  private cloudCanvas = document.createElement('canvas');
+
+  /** 流れる雲の影：1/4解像度の小さなキャンバスに描いて、1回だけ拡大して重ねる（全画面の大きなグラデーションを何枚も塗らない） */
   private drawCloudShadows(minute: number, x0: number, y0: number, x1: number, y1: number): void {
     const amb = ambientAt(minute);
     const k = 1 - Math.min(1, amb.dark * 2.5);
     if (k <= 0.02) return;
-    const { ctx } = this;
+    const Q = 4;
+    const cw = Math.ceil((x1 - x0) / Q);
+    const ch = Math.ceil((y1 - y0) / Q);
+    const cc = this.cloudCanvas;
+    if (cc.width !== cw || cc.height !== ch) {
+      cc.width = cw;
+      cc.height = ch;
+    }
+    const g2 = cc.getContext('2d')!;
+    g2.clearRect(0, 0, cw, ch);
     const span = WORLD_W + 1200;
+    let any = false;
     for (let i = 0; i < 7; i++) {
       const cx = ((i * 977 + this.time * (10 + i * 2)) % span) - 600;
       const cy = (i * 541) % WORLD_H;
       const r = 260 + (i % 3) * 120;
-      if (cx + r < x0 || cx - r > x1 || cy + r < y0 || cy - r > y1) continue;
-      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      if (cx + r * 1.4 < x0 || cx - r * 1.4 > x1 || cy + r < y0 || cy - r > y1) continue;
+      any = true;
+      const lx = (cx - x0) / Q;
+      const ly = (cy - y0) / Q;
+      const lr = r / Q;
+      const g = g2.createRadialGradient(lx, ly, 0, lx, ly, lr);
       g.addColorStop(0, `rgba(10,20,30,${0.14 * k})`);
       g.addColorStop(0.6, `rgba(10,20,30,${0.08 * k})`);
       g.addColorStop(1, 'rgba(10,20,30,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, r * 1.4, r, 0.3, 0, Math.PI * 2);
-      ctx.fill();
+      g2.fillStyle = g;
+      g2.beginPath();
+      g2.ellipse(lx, ly, lr * 1.4, lr, 0.3, 0, Math.PI * 2);
+      g2.fill();
     }
+    if (any) this.ctx.drawImage(cc, x0, y0, cw * Q, ch * Q);
   }
+
 
   private getZAnim(z: ZombieSnap): ZombieAnim {
     let a = this.zAnim.get(z.id);
@@ -777,14 +882,9 @@ export class Renderer {
       amb.a = 0.16;
     }
     // ---- 色温度（乗算で全体に色味をつける） ----
-    if (amb.a > 0.005) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'multiply';
-      const mix = (c: number) => Math.round(255 + (c - 255) * amb.a * 2.2);
-      ctx.fillStyle = `rgb(${mix(amb.r)},${mix(amb.g)},${mix(amb.b)})`;
-      ctx.fillRect(0, 0, this.w, this.h);
-      ctx.restore();
-    }
+    // （CSS の multiply 重ね合わせで行う：キャンバスに全画面の乗算をしない）
+    const mix = (c: number) => Math.round(255 + (c - 255) * Math.min(1, amb.a * 2.2));
+    this.setOv('tint', 'backgroundColor', amb.a > 0.005 ? `rgb(${mix(amb.r)},${mix(amb.g)},${mix(amb.b)})` : 'rgb(255,255,255)');
     if (dark > 0.01) {
       const l = this.lightCtx;
       const s = 0.5; // ライトマップの縮尺
@@ -844,12 +944,8 @@ export class Renderer {
       ctx.drawImage(this.lightCanvas, 0, 0, this.w, this.h);
       ctx.restore();
     }
-    // ---- 周辺減光（常時うっすら＋夜は強め） ----
-    const v = ctx.createRadialGradient(this.w / 2, this.h / 2, Math.min(this.w, this.h) * 0.42, this.w / 2, this.h / 2, Math.max(this.w, this.h) * 0.78);
-    v.addColorStop(0, 'rgba(0,0,0,0)');
-    v.addColorStop(1, `rgba(0,0,0,${0.28 + dark * 0.25})`);
-    ctx.fillStyle = v;
-    ctx.fillRect(0, 0, this.w, this.h);
+    // ---- 周辺減光（常時うっすら＋夜は強め）：CSS の重ね合わせ ----
+    this.setOv('vig', 'opacity', (0.28 + dark * 0.25).toFixed(2));
   }
 
   /** 暗闇の上に重ねる光の色（焚き火・松明の暖色、懐中電灯の白色） */
@@ -1194,43 +1290,16 @@ export class Renderer {
     const horde = !!me && me.status === 'alive' && view.zombies.some((z) => z.alert === 2 && Math.hypot(z.x - me.x, z.y - me.y) < 420 && this.vision.isVisible(z.x, z.y));
 
     // 大襲撃：赤い空と画面端
-    if (horde) {
-      const pulse = 0.55 + Math.sin(this.time * 2.4) * 0.15;
-      const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
-      g.addColorStop(0, 'rgba(180,0,0,0)');
-      g.addColorStop(1, `rgba(200,0,0,${0.38 * pulse})`);
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-    }
-    if (fx.hurt > 0) {
-      const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.7);
-      g.addColorStop(0, 'rgba(255,0,40,0)');
-      g.addColorStop(1, `rgba(255,0,40,${0.35 * fx.hurt})`);
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-    }
+    // 追われているときの赤い縁・被弾の赤：CSS の重ね合わせ（不透明度だけ毎フレーム変える）
+    this.setOv('alert', 'opacity', horde ? (0.38 * (0.55 + Math.sin(this.time * 2.4) * 0.15)).toFixed(2) : '0');
+    this.setOv('hurt', 'opacity', fx.hurt > 0 ? (0.35 * fx.hurt).toFixed(2) : '0');
 
-    this.drawClock(view, me);
     this.drawLocationToast(me, o.dt, !!fx.banner);
     this.drawAllyIndicators(view, o.localId, o.effects);
     this.drawDropIndicator(view, me);
     this.drawFeed(fx, view.players.length);
-    this.drawTeam(view, o.localId);
-    if (me) this.drawSelfPanel(view, me);
-    this.drawHotbar(o, view);
-    this.drawMinimap(view, o.localId);
-
-    // モード表示
-    ctx.font = `10px ${MONO}`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(189,183,158,0.6)';
-    const modeLabel = o.mode === 'solo' ? 'SOLO OPS' : `${o.mode.toUpperCase()} / ROOM ${o.roomCode ?? ''}`;
-    ctx.fillText(
-      `● ${modeLabel}` + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : '') + (o.muted ? '  SND OFF [M]' : '  SND ON [M]') + '  PING [G]',
-      14,
-      h - 14,
-    );
+    this.drawHudLayer(view, o, me);
+    this.autoQuality(o.dt);
 
     // ---- 中央メッセージ ----
     ctx.textAlign = 'center';
@@ -1336,6 +1405,42 @@ export class Renderer {
       ctx.fillText(txt, cx + 16, cy + 16);
     }
     void dark;
+  }
+
+  /** HUD のパネル類を別キャンバスに描く。約15Hz、または持ち替え・状態変化のときだけ描き直す */
+  private drawHudLayer(view: ViewState, o: RenderOptions, me: PlayerSnap | undefined): void {
+    this.hudT -= o.dt;
+    const key = `${o.localTool}|${me?.status}|${this.w}x${this.h}|${view.players.length}`;
+    if (this.hudT > 0 && key === this.hudKey) return;
+    this.hudT = 1 / 15;
+    this.hudKey = key;
+    const main = this.ctx;
+    const ctx = this.hudCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+    ctx.setTransform(this.baseDpr, 0, 0, this.baseDpr, 0, 0);
+    this.ctx = ctx;
+    try {
+      this.drawClock(view, me);
+      this.drawTeam(view, o.localId);
+      if (me) this.drawSelfPanel(view, me);
+      this.drawHotbar(o, view);
+      this.drawMinimap(view, o.localId);
+      // モード表示
+      ctx.font = `10px ${MONO}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(189,183,158,0.6)';
+      const modeLabel = o.mode === 'solo' ? 'SOLO OPS' : `${o.mode.toUpperCase()} / ROOM ${o.roomCode ?? ''}`;
+      const q = this.renderScale < 1 ? `  RES ${Math.round(this.renderScale * 100)}%` : '';
+      ctx.fillText(
+        `● ${modeLabel}` + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : '') + (o.muted ? '  SND OFF [M]' : '  SND ON [M]') + '  PING [G]' + q,
+        14,
+        this.h - 14,
+      );
+    } finally {
+      this.ctx = main;
+    }
   }
 
   /** ロケーションに入ったときの表示（例：「警察署 ★★★ 危険」） */
@@ -2206,19 +2311,18 @@ function makeForestPattern(ctx: CanvasRenderingContext2D): CanvasPattern {
 }
 
 /** フィルムグレイン用のノイズパターン */
-function makeGrain(ctx: CanvasRenderingContext2D): CanvasPattern {
+/** CSS 用のフィルムグレイン画像（data URL） */
+function makeGrainURL(): string {
   const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 256;
+  c.width = c.height = 160;
   const g = c.getContext('2d')!;
-  const img = g.createImageData(256, 256);
-  for (let i = 0; i < 256 * 256; i++) {
-    const v = Math.floor(Math.random() * 255);
-    img.data[i * 4] = v;
-    img.data[i * 4 + 1] = v;
-    img.data[i * 4 + 2] = v;
-    img.data[i * 4 + 3] = 255;
+  const img = g.createImageData(160, 160);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = Math.random() * 255;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+    img.data[i + 3] = 255;
   }
   g.putImageData(img, 0, 0);
-  return ctx.createPattern(c, 'repeat')!;
+  return c.toDataURL('image/png');
 }
+
