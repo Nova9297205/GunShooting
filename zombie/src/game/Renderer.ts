@@ -1033,7 +1033,7 @@ export class Renderer {
     }
 
     this.drawClock(view, me);
-    this.drawLocationToast(me, o.dt);
+    this.drawLocationToast(me, o.dt, !!fx.banner);
     this.drawAllyIndicators(view, o.localId, o.effects);
     this.drawTeam(view, o.localId);
     if (me) this.drawSelfPanel(view, me);
@@ -1165,7 +1165,7 @@ export class Renderer {
   }
 
   /** ロケーションに入ったときの表示（例：「警察署 ★★★ 危険」） */
-  private drawLocationToast(me: PlayerSnap | undefined, dt: number): void {
+  private drawLocationToast(me: PlayerSnap | undefined, dt: number, bannerShown: boolean): void {
     if (me) {
       const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
       const key = loc ? `${loc.name}${loc.x},${loc.y}` : null;
@@ -1178,6 +1178,8 @@ export class Renderer {
       }
     }
     if (!this.locToast) return;
+    // 「DAY 1」などの大きな表示と重ならないよう、それが消えるまで待ってから出す
+    if (bannerShown) return;
     const t = this.locToast;
     t.life -= dt;
     if (t.life <= 0) {
