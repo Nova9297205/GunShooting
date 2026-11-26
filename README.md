@@ -73,6 +73,17 @@ npm run dev
 `npm run dev` は `--host` 付きで起動するので、同一 LAN 内の別 PC から `http://<ホストPCのIP>:5173` でアクセスできます。
 （ローカル PeerServer を使う場合は `VITE_PEER_HOST` をホスト PC の IP にしてください。）
 
+## Web に公開する（GitHub Pages）
+
+`.github/workflows/deploy-pages.yml` により、`main` ブランチへ push すると自動でビルドされ GitHub Pages に公開されます
+（Actions タブの「Deploy to GitHub Pages」から手動実行も可能）。
+
+1. リポジトリの **Settings → Pages → Build and deployment → Source** を「**GitHub Actions**」にする
+2. このブランチを `main` にマージする
+3. 公開 URL: `https://nova9297205.github.io/GunShooting/`
+
+> 非公開（Private）リポジトリで Pages を使うには GitHub Pro 以上が必要です。無料プランの場合はリポジトリを Public にしてください。
+
 ## ディレクトリ構成
 
 ```
