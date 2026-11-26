@@ -19,7 +19,7 @@ import type {
 } from '../types';
 import { Tool } from '../types';
 import { audio } from './Audio';
-import { AXE, GUN, INTERP_DELAY, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, TOOLS, ZOMBIE } from './constants';
+import { AXE, BLUEPRINTS, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, WEAPONS, ZOMBIE } from './constants';
 import { Effects } from './Effects';
 import type { HostSimulation } from './Engine';
 import { InputController } from './Input';
@@ -60,6 +60,7 @@ export class GameSession {
   private lastFrame = 0;
   private seq = 0;
   private localTool: number = Tool.Gun;
+  private localBp = 0;
   private localAim = 0;
 
   // host / solo
@@ -95,7 +96,7 @@ export class GameSession {
     this.input = new InputController(o.canvas);
     // 効果音：射撃・斧・リロードは描画側のカウンタ検出から鳴らす
     this.renderer.hooks = {
-      shot: (p) => audio.shot(p.x, p.y, p.id === o.localId),
+      shot: (p, w) => audio.shot(p.x, p.y, p.id === o.localId, w),
       swing: (p) => audio.swing(p.x, p.y, p.id === o.localId),
       reload: (p) => audio.reload(p.x, p.y, p.id === o.localId),
     };
@@ -344,15 +345,14 @@ export class GameSession {
   // ---------------- メインフレーム ----------------
 
   private handleToolKeys(): void {
-    for (let i = 0; i < TOOLS.length; i++) if (this.input.consume(`Digit${i + 1}`)) this.localTool = i;
+    for (let i = 0; i < 9; i++) if (this.input.consume(`Digit${i + 1}`) && i < USABLE_SLOTS) this.localTool = i;
     if (this.input.consume('KeyB')) {
-      // 建築ツール（木の壁→鉄の壁→スパイク→松明→修理）を順に切り替え
-      const cycle: number[] = [Tool.WoodWall, Tool.IronWall, Tool.Spike, Tool.Torch, Tool.Repair];
-      const i = cycle.indexOf(this.localTool);
-      this.localTool = cycle[(i + 1) % cycle.length];
+      // 建築ツールの設計図を切替（建築ツール以外なら建築ツールに持ち替え）
+      if (this.localTool === Tool.Build) this.localBp = (this.localBp + 1) % BLUEPRINTS.length;
+      else this.localTool = Tool.Build;
     }
     const wheel = this.input.consumeWheel();
-    if (wheel) this.localTool = (this.localTool + (wheel > 0 ? 1 : -1) + TOOLS.length) % TOOLS.length;
+    if (wheel) this.localTool = (this.localTool + (wheel > 0 ? 1 : -1) + USABLE_SLOTS) % USABLE_SLOTS;
   }
 
   private frame = (nowMs: number): void => {
@@ -399,6 +399,8 @@ export class GameSession {
       eat: this.input.consume('KeyQ'),
       heal: this.input.consume('KeyH'),
       tool: this.localTool,
+      bp: this.localBp,
+      alt: this.input.altDown,
       tx: Math.floor(mw.x / TILE),
       ty: Math.floor(mw.y / TILE),
     };
@@ -430,7 +432,14 @@ export class GameSession {
 
     const me = view.players.find((p) => p.id === localId);
     // 弾切れのカチッという音
-    if (me && me.status === 'alive' && frame.fire && this.localTool === Tool.Gun && me.inv.mag <= 0 && me.reloadT <= 0) audio.emptyClick();
+    if (
+      me &&
+      me.status === 'alive' &&
+      frame.fire &&
+      me.reloadT <= 0 &&
+      ((this.localTool === Tool.Gun && me.inv.mag <= 0) || (this.localTool === Tool.Shotgun && me.inv.shotgun && me.inv.smag <= 0))
+    )
+      audio.emptyClick();
     const reviveHint =
       !!me &&
       me.status === 'alive' &&
@@ -446,6 +455,8 @@ export class GameSession {
       mouseY: this.input.mouseY,
       skipAnimDetectId: this.o.mode === 'guest' ? localId : null,
       localTool: this.localTool,
+      localBp: this.localBp,
+      altDown: this.input.altDown,
       reviveHint,
       interactHint: me && me.status === 'alive' ? this.interactHint(me) : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
@@ -465,31 +476,35 @@ export class GameSession {
       if (this.localFireCd < 0) this.localFireCd = 0;
       return;
     }
-    if (this.localTool === Tool.Gun) {
-      const mag = me.inv.mag - this.localShotSeqs.length;
-      if (me.reloadT > 0 || mag <= 0) {
+    const wid = this.localTool === Tool.Gun ? (me.inv.gun >= 1 ? 'rifle' : 'pistol') : this.localTool === Tool.Shotgun && me.inv.shotgun ? 'shotgun' : null;
+    if (wid) {
+      const w = WEAPONS[wid];
+      const mag = (wid === 'shotgun' ? me.inv.smag : me.inv.mag) - this.localShotSeqs.length;
+      if (me.reloadT > 0 || mag <= 0 || me.tool !== this.localTool) {
         if (this.localFireCd < 0) this.localFireCd = 0;
         return;
       }
       if (this.localFireCd <= 0) {
-        this.localFireCd += GUN.fireInterval;
-        const a = this.localAim + (Math.random() - 0.5) * 2 * GUN.spread;
+        this.localFireCd += w.fireInterval;
         const px = this.pred.x + this.predErr.x;
         const py = this.pred.y + this.predErr.y;
-        this.localBullets.push({
-          id: this.localBulletId--,
-          owner: this.o.localId,
-          x: px + Math.cos(this.localAim) * GUN.muzzle,
-          y: py + Math.sin(this.localAim) * GUN.muzzle,
-          vx: Math.cos(a) * GUN.bulletSpeed,
-          vy: Math.sin(a) * GUN.bulletSpeed,
-          life: GUN.bulletLife,
-        });
+        for (let i = 0; i < w.pellets; i++) {
+          const a = this.localAim + (Math.random() - 0.5) * 2 * w.spread;
+          this.localBullets.push({
+            id: this.localBulletId--,
+            owner: this.o.localId,
+            x: px + Math.cos(this.localAim) * MUZZLE,
+            y: py + Math.sin(this.localAim) * MUZZLE,
+            vx: Math.cos(a) * w.bulletSpeed,
+            vy: Math.sin(a) * w.bulletSpeed,
+            life: w.bulletLife,
+          });
+        }
         this.localShotSeqs.push(frame.seq);
-        this.renderer.triggerShot(this.o.localId);
-        audio.shot(px, py, true);
+        this.renderer.triggerShot(this.o.localId, wid, px, py, this.localAim);
+        audio.shot(px, py, true, wid);
       }
-    } else if (this.localTool === Tool.Axe && this.localSwingCd <= 0) {
+    } else if (this.localTool === Tool.Melee && this.localSwingCd <= 0) {
       this.localSwingCd = AXE.interval;
       this.renderer.triggerSwing(this.o.localId);
       audio.swing(this.pred.x, this.pred.y, true);
@@ -512,14 +527,14 @@ export class GameSession {
         }
       }
     if (best) return best;
-    if (this.localTool !== Tool.Axe) {
+    if (this.localTool !== Tool.Melee) {
       for (const dist of [30, 52]) {
         const ob = this.world.objAt(
           Math.floor((me.x + Math.cos(this.localAim) * dist) / TILE),
           Math.floor((me.y + Math.sin(this.localAim) * dist) / TILE),
         );
         if (ob && (ob.kind === 'tree' || ob.kind === 'car') && ob.hp > 0) {
-          return ob.kind === 'tree' ? '[2] 斧に持ち替えて木を伐採（木材）' : '[2] 斧に持ち替えて廃車を解体（鉄スクラップ）';
+          return ob.kind === 'tree' ? '[1] 斧に持ち替えて木を伐採（木材）' : '[1] 斧に持ち替えて廃車を解体（鉄スクラップ）';
         }
       }
     }

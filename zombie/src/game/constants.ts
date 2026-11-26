@@ -1,4 +1,4 @@
-import type { BuildKind, ObjKind, ZombieType } from '../types';
+import type { BuildKind, ObjKind, WeaponId, ZombieType } from '../types';
 
 // ---------------- ワールド / 通信 ----------------
 export const TILE = 40;
@@ -53,17 +53,33 @@ export const PLAYER = {
   medkitValue: 55,
 };
 
-export const GUN = {
-  magSize: 12,
-  fireInterval: 0.17,
-  reloadTime: 1.4,
-  bulletSpeed: 1000,
-  bulletLife: 0.65,
-  damage: 22,
-  spread: 0.04,
-  muzzle: 26,
-  noiseRadius: 700,
+export interface WeaponStats {
+  name: string;
+  magSize: number;
+  fireInterval: number;
+  reloadTime: number;
+  bulletSpeed: number;
+  bulletLife: number;
+  damage: number;
+  spread: number;
+  pellets: number;
+  knock: number;
+  auto: boolean;
+  noiseRadius: number;
+  /** 撃ったときのカメラの揺れ */
+  kick: number;
+}
+
+export const WEAPONS: Record<WeaponId, WeaponStats> = {
+  pistol: { name: 'ハンドガン', magSize: 12, fireInterval: 0.2, reloadTime: 1.3, bulletSpeed: 1000, bulletLife: 0.65, damage: 24, spread: 0.035, pellets: 1, knock: 110, auto: false, noiseRadius: 650, kick: 2.5 },
+  rifle: { name: 'アサルトライフル', magSize: 30, fireInterval: 0.095, reloadTime: 1.7, bulletSpeed: 1150, bulletLife: 0.7, damage: 20, spread: 0.06, pellets: 1, knock: 80, auto: true, noiseRadius: 800, kick: 2 },
+  shotgun: { name: 'ショットガン', magSize: 6, fireInterval: 0.6, reloadTime: 2.0, bulletSpeed: 900, bulletLife: 0.32, damage: 15, spread: 0.32, pellets: 7, knock: 170, auto: false, noiseRadius: 900, kick: 7 },
 };
+
+/** 銃口までの距離 */
+export const MUZZLE = 26;
+/** 互換用（旧コード参照） */
+export const GUN = { muzzle: MUZZLE, reloadTime: WEAPONS.pistol.reloadTime, magSize: WEAPONS.pistol.magSize };
 
 export const AXE = {
   interval: 0.45,
@@ -158,22 +174,28 @@ export const REGROW = {
   box: 0, // 収納箱は毎朝補充
 };
 
-export const TOOLS = [
-  { id: 0, key: '1', name: '拳銃', short: 'GUN' },
-  { id: 1, key: '2', name: '斧（近接/解体）', short: 'AXE' },
-  { id: 2, key: '3', name: '木の壁', short: 'WOOD' },
-  { id: 3, key: '4', name: '鉄の壁', short: 'IRON' },
-  { id: 4, key: '5', name: 'ウッドスパイク', short: 'SPIKE' },
-  { id: 5, key: '6', name: '修理', short: 'FIX' },
-  { id: 6, key: '7', name: '松明（明かり）', short: 'TORCH' },
+/** ホットバー（9スロット） */
+export const SLOTS = [
+  { id: 0, key: '1', name: '斧（近接・解体）', short: 'MELEE' },
+  { id: 1, key: '2', name: '銃', short: 'GUN' },
+  { id: 2, key: '3', name: 'ショットガン', short: 'SHOTGUN' },
+  { id: 3, key: '4', name: '建築・修理', short: 'BUILD' },
+  { id: 4, key: '5', name: '食料', short: 'FOOD' },
+  { id: 5, key: '6', name: '救急キット', short: 'MED' },
+  { id: 6, key: '7', name: '', short: '' },
+  { id: 7, key: '8', name: '', short: '' },
+  { id: 8, key: '9', name: '', short: '' },
 ] as const;
+/** 中身のある（選択できる）スロット数 */
+export const USABLE_SLOTS = 6;
 
-export const TOOL_BUILD: Record<number, BuildKind | undefined> = {
-  2: 'woodWall',
-  3: 'ironWall',
-  4: 'spike',
-  6: 'torch',
-};
+/** 建築ツールの設計図（B キーで切替） */
+export const BLUEPRINTS: { kind: BuildKind; name: string }[] = [
+  { kind: 'woodWall', name: '木の壁' },
+  { kind: 'ironWall', name: '鉄の壁' },
+  { kind: 'spike', name: 'ウッドスパイク' },
+  { kind: 'torch', name: '松明' },
+];
 
 // ---------------- 地形 ----------------
 export const T_GRASS = 0;

@@ -18,6 +18,7 @@ import type {
   SoundKey,
   Stash,
   TimePhase,
+  WeaponId,
   ViewState,
   ZombieSnap,
   ZombieType,
@@ -31,7 +32,6 @@ import {
   CRAFT,
   CYCLE_SECONDS,
   DAY_SECONDS,
-  GUN,
   HORDE_EVERY,
   MAP_H,
   MAP_W,
@@ -45,8 +45,10 @@ import {
   START_MINUTE,
   T_WALL,
   TILE,
-  TOOL_BUILD,
-  TOOLS,
+  USABLE_SLOTS,
+  WEAPONS,
+  MUZZLE,
+  BLUEPRINTS,
   WORLD_H,
   WORLD_W,
   ZOMBIE,
@@ -66,6 +68,10 @@ interface SimPlayer extends PlayerSnap {
   buildCd: number;
   repairCd: number;
   warnCd: number;
+  bp: number;
+  alt: boolean;
+  useCd: number;
+  reloadW: WeaponId | '';
   /** 最後に入力が届いてからの秒数（タブが裏に回った等で入力が止まったら押しっぱなしを解除） */
   idle: number;
 }
@@ -91,6 +97,8 @@ interface SimObj extends ObjSnap {
 
 interface SimBullet {
   id: number;
+  dmg: number;
+  knock: number;
   owner: number;
   x: number;
   y: number;
@@ -224,7 +232,7 @@ export class HostSimulation {
         downTimer: 0,
         reviveProgress: 0,
         tool: Tool.Gun,
-        inv: { ammo: 48, mag: GUN.magSize, gunpowder: 2, food: 2, medkit: 1 },
+        inv: { ammo: 48, mag: WEAPONS.pistol.magSize, shells: 0, smag: 0, gun: 0, shotgun: 0, gunpowder: 2, food: 2, medkit: 1 },
         reloadT: 0,
         shots: 0,
         swings: 0,
@@ -246,6 +254,10 @@ export class HostSimulation {
         repairCd: 0,
         warnCd: 0,
         idle: 0,
+        bp: 0,
+        alt: false,
+        useCd: 0,
+        reloadW: '',
       });
     });
     this.events.push({ k: 'banner', t: 'DAY 1', s: '物資を集めて拠点を強化しよう。5日目の夜に大襲撃が来る…', c: '#ffe2a8', snd: 'day' });
@@ -472,10 +484,12 @@ export class HostSimulation {
       p.revive = f.revive;
       p.tx = f.tx;
       p.ty = f.ty;
-      if (f.tool >= 0 && f.tool < TOOLS.length && f.tool !== p.tool) {
+      if (f.tool >= 0 && f.tool < USABLE_SLOTS && f.tool !== p.tool) {
         p.tool = f.tool;
-        if (p.tool !== Tool.Gun) p.reloadT = 0;
+        p.reloadT = 0; // 持ち替えたらリロード中断
       }
+      p.bp = Math.max(0, Math.min(BLUEPRINTS.length - 1, f.bp | 0));
+      p.alt = !!f.alt;
       if (p.status !== 'alive') continue;
       if (f.interact) this.interact(p);
       if (f.reload) this.startReload(p);
@@ -486,6 +500,7 @@ export class HostSimulation {
     if (p.queue.length > 0) p.idle = 0;
     else if ((p.idle += dt) > 0.3) {
       p.fire = false;
+      p.alt = false;
       p.revive = false;
     }
     p.queue.length = 0;
@@ -521,10 +536,15 @@ export class HostSimulation {
       p.reloadT -= dt;
       if (p.reloadT <= 0) {
         p.reloadT = 0;
-        const need = GUN.magSize - p.inv.mag;
-        const take = Math.min(need, p.inv.ammo);
-        p.inv.mag += take;
-        p.inv.ammo -= take;
+        if (p.reloadW === 'shotgun') {
+          const take = Math.min(WEAPONS.shotgun.magSize - p.inv.smag, p.inv.shells);
+          p.inv.smag += take;
+          p.inv.shells -= take;
+        } else if (p.reloadW) {
+          const take = Math.min(WEAPONS[p.reloadW].magSize - p.inv.mag, p.inv.ammo);
+          p.inv.mag += Math.max(0, take);
+          p.inv.ammo -= Math.max(0, take);
+        }
       }
     }
 
@@ -532,35 +552,63 @@ export class HostSimulation {
     p.swingCd = Math.max(0, p.swingCd - dt);
     p.buildCd = Math.max(0, p.buildCd - dt);
     p.repairCd = Math.max(0, p.repairCd - dt);
+    p.useCd = Math.max(0, p.useCd - dt);
 
+    // 建築ツールの右クリック＝修理
+    if (p.tool === Tool.Build && p.alt) {
+      if (p.repairCd <= 0) {
+        this.repair(p);
+        p.repairCd = REPAIR.interval;
+      }
+      return;
+    }
     if (!p.fire) {
       if (p.fireCd < 0) p.fireCd = 0;
       return;
     }
     switch (p.tool) {
-      case Tool.Gun:
-        this.fireGun(p);
-        break;
-      case Tool.Axe:
+      case Tool.Melee:
         if (p.swingCd <= 0) {
           this.swingAxe(p);
           p.swingCd = AXE.interval;
         }
         break;
-      case Tool.Repair:
-        if (p.repairCd <= 0) {
-          this.repair(p);
-          p.repairCd = REPAIR.interval;
+      case Tool.Gun:
+      case Tool.Shotgun: {
+        const w = this.weaponOf(p);
+        if (w) this.fireWeapon(p, w);
+        else if (p.warnCd <= 0) {
+          this.pop(p, 'ショットガンを持っていない（物資から入手）', '#ff8080');
+          p.warnCd = 1.5;
         }
         break;
-      default: {
-        const kind = TOOL_BUILD[p.tool];
-        if (kind && p.buildCd <= 0) {
-          this.build(p, kind);
+      }
+      case Tool.Build:
+        if (p.buildCd <= 0) {
+          this.build(p, BLUEPRINTS[p.bp].kind);
           p.buildCd = 0.22;
         }
-      }
+        break;
+      case Tool.Food:
+        if (p.useCd <= 0) {
+          this.useFood(p, true);
+          p.useCd = 0.7;
+        }
+        break;
+      case Tool.Medkit:
+        if (p.useCd <= 0) {
+          this.useMedkit(p, true);
+          p.useCd = 0.7;
+        }
+        break;
     }
+  }
+
+  /** 選択中のスロットの射撃武器 */
+  private weaponOf(p: SimPlayer): WeaponId | null {
+    if (p.tool === Tool.Gun) return p.inv.gun >= 1 ? 'rifle' : 'pistol';
+    if (p.tool === Tool.Shotgun && p.inv.shotgun) return 'shotgun';
+    return null;
   }
 
   private pop(p: SimPlayer, t: string, c: string, s?: SoundKey): void {
@@ -568,46 +616,60 @@ export class HostSimulation {
     this.events.push({ k: 'pop', x: p.x, y: p.y - 30, t, c, id: p.id, s: s ?? (c === '#ff8080' ? 'error' : undefined) });
   }
 
-  private fireGun(p: SimPlayer): void {
+  private fireWeapon(p: SimPlayer, wid: WeaponId): void {
     if (p.reloadT > 0) return;
-    if (p.inv.mag <= 0) {
-      if (p.inv.ammo > 0) this.startReload(p);
+    const w = WEAPONS[wid];
+    const sg = wid === 'shotgun';
+    const mag = () => (sg ? p.inv.smag : p.inv.mag);
+    const reserve = () => (sg ? p.inv.shells : p.inv.ammo);
+    if (mag() <= 0) {
+      if (reserve() > 0) this.startReload(p);
       else if (p.warnCd <= 0) {
-        this.pop(p, '弾切れ！ 火薬で[C]クラフト', '#ff8080');
+        this.pop(p, sg ? 'シェルがない！ [C]で作成（火薬2）' : '弾切れ！ [C]で弾薬を作成（火薬2）', '#ff8080');
         p.warnCd = 1.5;
       }
       return;
     }
-    while (p.fireCd <= 0 && p.inv.mag > 0) {
-      const a = p.aim + (Math.random() - 0.5) * 2 * GUN.spread;
-      this.bullets.push({
-        id: this.nextId++,
-        owner: p.id,
-        x: p.x + Math.cos(p.aim) * GUN.muzzle,
-        y: p.y + Math.sin(p.aim) * GUN.muzzle,
-        vx: Math.cos(a) * GUN.bulletSpeed,
-        vy: Math.sin(a) * GUN.bulletSpeed,
-        life: GUN.bulletLife,
-        dead: false,
-      });
-      p.inv.mag--;
+    while (p.fireCd <= 0 && mag() > 0) {
+      for (let i = 0; i < w.pellets; i++) {
+        const a = p.aim + (Math.random() - 0.5) * 2 * w.spread;
+        const sp = w.bulletSpeed * (sg ? 0.85 + Math.random() * 0.3 : 1);
+        this.bullets.push({
+          id: this.nextId++,
+          owner: p.id,
+          dmg: w.damage,
+          knock: w.knock,
+          x: p.x + Math.cos(p.aim) * MUZZLE,
+          y: p.y + Math.sin(p.aim) * MUZZLE,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp,
+          life: w.bulletLife * (sg ? 0.8 + Math.random() * 0.4 : 1),
+          dead: false,
+        });
+      }
+      if (sg) p.inv.smag--;
+      else p.inv.mag--;
       p.shots++;
-      p.fireCd += GUN.fireInterval;
-      this.makeNoise(p.x, p.y, GUN.noiseRadius);
+      p.fireCd += w.fireInterval;
+      this.makeNoise(p.x, p.y, w.noiseRadius);
     }
-    if (p.inv.mag <= 0 && p.inv.ammo > 0) this.startReload(p);
+    if (mag() <= 0 && reserve() > 0) this.startReload(p);
   }
 
   private startReload(p: SimPlayer): void {
-    if (p.tool !== Tool.Gun || p.reloadT > 0 || p.inv.mag >= GUN.magSize) return;
-    if (p.inv.ammo <= 0) {
+    const wid = this.weaponOf(p);
+    if (!wid || p.reloadT > 0) return;
+    const sg = wid === 'shotgun';
+    if ((sg ? p.inv.smag : p.inv.mag) >= WEAPONS[wid].magSize) return;
+    if ((sg ? p.inv.shells : p.inv.ammo) <= 0) {
       if (p.warnCd <= 0) {
-        this.pop(p, '予備弾薬がない', '#ff8080');
+        this.pop(p, sg ? '予備のシェルがない' : '予備弾薬がない', '#ff8080');
         p.warnCd = 1.5;
       }
       return;
     }
-    p.reloadT = GUN.reloadTime;
+    p.reloadT = WEAPONS[wid].reloadTime;
+    p.reloadW = wid;
   }
 
   private craftAmmo(p: SimPlayer): void {
@@ -616,8 +678,13 @@ export class HostSimulation {
       return;
     }
     p.inv.gunpowder -= CRAFT.gunpowder;
-    p.inv.ammo += CRAFT.ammo;
-    this.pop(p, `弾薬 +${CRAFT.ammo}`, '#ffd84d', 'craft');
+    if (p.tool === Tool.Shotgun && p.inv.shotgun) {
+      p.inv.shells += 6;
+      this.pop(p, 'シェル +6', '#ffd84d', 'craft');
+    } else {
+      p.inv.ammo += CRAFT.ammo;
+      this.pop(p, `弾薬 +${CRAFT.ammo}`, '#ffd84d', 'craft');
+    }
   }
 
   private useFood(p: SimPlayer, explicit: boolean): boolean {
@@ -696,6 +763,13 @@ export class HostSimulation {
     const wood = R() < 0.6 ? 3 + Math.floor(R() * 6) : 0;
     const scrap = R() < 0.5 ? 2 + Math.floor(R() * 4) : 0;
     add('弾薬', ammo, () => (p.inv.ammo += ammo));
+    const shells = R() < 0.3 ? 2 + Math.floor(R() * 5) : 0;
+    add('シェル', shells, () => (p.inv.shells += shells));
+    if (!p.inv.shotgun && R() < (o.kind === 'box' ? 0.08 : 0.05)) {
+      p.inv.shotgun = 1;
+      p.inv.smag = WEAPONS.shotgun.magSize;
+      parts.unshift('★ショットガン入手！ [3]');
+    }
     add('火薬', gp, () => (p.inv.gunpowder += gp));
     add('食料', food, () => (p.inv.food += food));
     add('救急', med, () => (p.inv.medkit += med));
@@ -721,6 +795,7 @@ export class HostSimulation {
       const d = Math.hypot(dx, dy);
       if (d > AXE.range + r) continue;
       if (Math.abs(angleDiff(p.aim, Math.atan2(dy, dx))) > AXE.arc / 2 && d > r + PLAYER.radius) continue;
+      this.events.push({ k: 'hit', x: z.x - (dx / (d || 1)) * r * 0.6, y: z.y - (dy / (d || 1)) * r * 0.6, o: p.id, a: Math.atan2(dy, dx), m: 1 });
       this.damageZombie(z, AXE.damage, p.id, dx, dy, 260);
       hits++;
     }
@@ -1242,19 +1317,21 @@ export class HostSimulation {
     z.ky += (dirY / l) * knock * resist;
     if (!z.horde) z.aggroT = ZOMBIE_SENSE.aggroMemory;
     this.events.push({ k: 'dmg', x: z.x, y: z.y - ZOMBIE[z.type].radius, v: Math.round(dmg), p: false });
-    if (z.hp <= 0) this.killZombie(z, owner);
+    if (z.hp <= 0) this.killZombie(z, owner, dirX / l, dirY / l);
   }
 
-  private killZombie(z: SimZombie, owner: number): void {
+  private killZombie(z: SimZombie, owner: number, dx = 0, dy = 0): void {
     z.dead = true;
     const killer = this.players.find((p) => p.id === owner);
     if (killer) killer.kills++;
-    this.events.push({ k: 'kill', x: z.x, y: z.y, r: ZOMBIE[z.type].radius });
+    this.events.push({ k: 'kill', x: z.x, y: z.y, r: ZOMBIE[z.type].radius, o: owner, t: z.type, id: z.id, a: z.angle, dx: Math.round(dx * 100) / 100, dy: Math.round(dy * 100) / 100 });
     // まれに物資をドロップ（拾う手間を省き直接付与）
     if (killer && Math.random() < 0.12) {
-      const ammo = 4 + Math.floor(Math.random() * 6);
-      killer.inv.ammo += ammo;
-      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: `弾薬+${ammo}`, c: '#ffe08a', id: killer.id, s: 'loot' });
+      const sg = killer.inv.shotgun && Math.random() < 0.35;
+      const n = sg ? 2 + Math.floor(Math.random() * 3) : 4 + Math.floor(Math.random() * 6);
+      if (sg) killer.inv.shells += n;
+      else killer.inv.ammo += n;
+      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: sg ? `シェル+${n}` : `弾薬+${n}`, c: '#ffe08a', id: killer.id, s: 'loot' });
     }
   }
 
@@ -1280,8 +1357,8 @@ export class HostSimulation {
           const r = ZOMBIE[z.type].radius + 3;
           if ((z.x - b.x) ** 2 + (z.y - b.y) ** 2 < r * r) {
             b.dead = true;
-            this.events.push({ k: 'hit', x: b.x, y: b.y, o: b.owner });
-            this.damageZombie(z, GUN.damage, b.owner, b.vx, b.vy, 90);
+            this.events.push({ k: 'hit', x: b.x, y: b.y, o: b.owner, a: Math.atan2(b.vy, b.vx) });
+            this.damageZombie(z, b.dmg, b.owner, b.vx, b.vy, b.knock);
             break;
           }
         }

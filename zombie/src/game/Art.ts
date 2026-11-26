@@ -6,6 +6,7 @@
 //   光源は左上。影は右下へ落ちる。
 // ============================================================
 import type { ObjSnap, PlayerSnap, ZombieSnap } from '../types';
+import type { Corpse } from './Effects';
 import { Tool } from '../types';
 import { TILE, ZOMBIE } from './constants';
 import { type BakedTerrain, bakeTerrain } from './TerrainArt';
@@ -47,6 +48,8 @@ export interface ArtSet {
   drawTallObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number): void;
   drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: ZombieAnim, t: number): void;
   drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerSnap, color: string, anim: PlayerAnim, t: number): void;
+  /** 倒れたゾンビの亡骸 */
+  drawCorpse(ctx: CanvasRenderingContext2D, c: Corpse): void;
 }
 
 // ---------------- ヘルパー ----------------
@@ -766,6 +769,45 @@ export class VectorArt implements ArtSet {
     ctx.restore();
   }
 
+  drawCorpse(ctx: CanvasRenderingContext2D, c: Corpse): void {
+    const st = ZOMBIE[c.type];
+    const r = st.radius;
+    const a = Math.min(1, c.life / 3);
+    const shirt = c.type === 'brute' ? '#3d4630' : SHIRTS[c.id % SHIRTS.length];
+    const skin = shade(st.skin, -0.25);
+    ctx.save();
+    ctx.globalAlpha = a * 0.9;
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.angle);
+    ctx.lineCap = 'round';
+    // 投げ出された手足
+    ctx.strokeStyle = skin;
+    ctx.lineWidth = r * 0.3;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 0.5);
+    ctx.lineTo(r * 0.7, -r * 1.1);
+    ctx.moveTo(0, r * 0.5);
+    ctx.lineTo(-r * 0.2, r * 1.2);
+    ctx.stroke();
+    ctx.strokeStyle = PANTS[(c.id >> 2) % PANTS.length];
+    ctx.lineWidth = r * 0.36;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.4, -r * 0.2);
+    ctx.lineTo(-r * 1.3, -r * 0.5);
+    ctx.moveTo(-r * 0.4, r * 0.2);
+    ctx.lineTo(-r * 1.2, r * 0.6);
+    ctx.stroke();
+    ctx.fillStyle = shade(shirt.startsWith('#') ? shirt : '#555555', -0.35);
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.1, 0, r * 0.75, r * 0.85, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = skin;
+    ctx.beginPath();
+    ctx.arc(r * 0.65, 0, r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   // ---------------- プレイヤー ----------------
 
   drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerSnap, color: string, anim: PlayerAnim, t: number): void {
@@ -871,22 +913,53 @@ export class VectorArt implements ArtSet {
       ctx.arc(x2, y2, 2.8, 0, Math.PI * 2);
       ctx.fill();
     };
-    if (p.tool === Tool.Gun) {
+    const gun = p.tool === Tool.Gun ? (p.inv.gun >= 1 ? 'rifle' : 'pistol') : p.tool === Tool.Shotgun && p.inv.shotgun ? 'shotgun' : null;
+    if (gun) {
       const rc = anim.recoil;
-      arm(0, -8, 13 + rc, -1);
+      const long = gun !== 'pistol';
+      arm(0, -8, (long ? 18 : 13) + rc, long ? -1 : -1);
       arm(0, 8, 11 + rc, 2);
-      ctx.fillStyle = outline;
-      roundRect(ctx, 9 + rc, -3, 20, 7, 2);
-      ctx.fill();
-      ctx.fillStyle = '#2b2f37';
-      roundRect(ctx, 10 + rc, -2, 18, 5, 1.5);
-      ctx.fill();
-      ctx.fillStyle = '#55606e';
-      ctx.fillRect(12 + rc, -2, 12, 1.5);
+      let muzzle = 30;
+      if (gun === 'pistol') {
+        ctx.fillStyle = outline;
+        roundRect(ctx, 9 + rc, -3, 20, 7, 2);
+        ctx.fill();
+        ctx.fillStyle = '#2b2f37';
+        roundRect(ctx, 10 + rc, -2, 18, 5, 1.5);
+        ctx.fill();
+        ctx.fillStyle = '#55606e';
+        ctx.fillRect(12 + rc, -2, 12, 1.5);
+      } else if (gun === 'rifle') {
+        muzzle = 38;
+        ctx.fillStyle = outline;
+        roundRect(ctx, 0 + rc, -3.5, 38, 7, 2);
+        ctx.fill();
+        ctx.fillStyle = '#2a2e35';
+        roundRect(ctx, 1 + rc, -2.5, 36, 5, 1.5);
+        ctx.fill();
+        ctx.fillStyle = '#1c1f24';
+        ctx.fillRect(14 + rc, 2, 5, 7); // マガジン
+        ctx.fillStyle = '#4b5563';
+        ctx.fillRect(10 + rc, -4.5, 9, 2); // 照準器
+      } else {
+        muzzle = 36;
+        ctx.fillStyle = outline;
+        roundRect(ctx, -2 + rc, -4, 38, 8, 2);
+        ctx.fill();
+        ctx.fillStyle = '#7a5232';
+        roundRect(ctx, -1 + rc, -3, 14, 6, 2); // 木製ストック
+        ctx.fill();
+        ctx.fillStyle = '#6b7380';
+        ctx.fillRect(12 + rc, -3, 23, 2.5);
+        ctx.fillStyle = '#4b5260';
+        ctx.fillRect(12 + rc, 0, 20, 2.5);
+        ctx.fillStyle = '#8a5c33';
+        ctx.fillRect(20 + rc, 1, 7, 3.5); // ポンプ
+      }
       if (anim.flash > 0) {
-        const s = 0.7 + anim.flashSeed * 0.6;
+        const s = (0.7 + anim.flashSeed * 0.6) * (gun === 'shotgun' ? 1.5 : 1);
         ctx.save();
-        ctx.translate(30 + rc, 0.5);
+        ctx.translate(muzzle + rc, 0.5);
         ctx.globalCompositeOperation = 'lighter';
         ctx.fillStyle = 'rgba(255,210,120,0.95)';
         ctx.beginPath();
@@ -896,13 +969,22 @@ export class VectorArt implements ArtSet {
         ctx.lineTo(5 * s, 0);
         ctx.closePath();
         ctx.fill();
+        if (gun === 'shotgun') {
+          ctx.beginPath();
+          ctx.moveTo(2, -2);
+          ctx.lineTo(12 * s, -9 * s);
+          ctx.lineTo(6, 0);
+          ctx.lineTo(12 * s, 9 * s);
+          ctx.lineTo(2, 2);
+          ctx.fill();
+        }
         ctx.fillStyle = 'rgba(255,255,255,0.95)';
         ctx.beginPath();
         ctx.arc(2, 0, 3.5 * s, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
-    } else if (p.tool === Tool.Axe) {
+    } else if (p.tool === Tool.Melee) {
       const prog = anim.swing > 0 ? 1 - anim.swing : -1;
       const ang = prog >= 0 ? -1.2 + prog * 2.4 : 0.6;
       ctx.save();
@@ -942,6 +1024,21 @@ export class VectorArt implements ArtSet {
         ctx.beginPath();
         ctx.arc(0, 0, 36, -1.2, -1.2 + prog * 2.4);
         ctx.stroke();
+      }
+    } else if (p.tool === Tool.Food || p.tool === Tool.Medkit || p.tool === Tool.Shotgun) {
+      arm(0, -8, 12, -4);
+      arm(0, 8, 12, 4);
+      if (p.tool === Tool.Food) {
+        ctx.fillStyle = '#b8c2cc';
+        ctx.fillRect(12, -4, 7, 8);
+        ctx.fillStyle = '#d9534f';
+        ctx.fillRect(12, -2, 7, 4);
+      } else if (p.tool === Tool.Medkit) {
+        ctx.fillStyle = '#e8edf2';
+        ctx.fillRect(11, -5, 9, 10);
+        ctx.fillStyle = '#d9534f';
+        ctx.fillRect(14.5, -3.5, 2, 7);
+        ctx.fillRect(12.5, -1, 6, 2);
       }
     } else {
       // ハンマー（建築・修理）

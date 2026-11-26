@@ -11,6 +11,8 @@ export class InputController {
   mouseX = 0;
   mouseY = 0;
   mouseDown = false;
+  /** 右ボタン押しっぱなし */
+  altDown = false;
   private dashQueued = false;
   /** フレーム間で押して離した短いクリックも取りこぼさない */
   private clickQueued = false;
@@ -105,6 +107,7 @@ export class InputController {
   private onBlur = () => {
     this.keys.clear();
     this.mouseDown = false;
+    this.altDown = false;
   };
 
   private onMouseMove = (e: MouseEvent) => {
@@ -118,11 +121,13 @@ export class InputController {
       this.mouseDown = true;
       this.clickQueued = true;
     }
+    if (e.button === 2) this.altDown = true;
     this.onMouseMove(e);
   };
 
   private onMouseUp = (e: MouseEvent) => {
     if (e.button === 0) this.mouseDown = false;
+    if (e.button === 2) this.altDown = false;
   };
 
   private onWheel = (e: WheelEvent) => {

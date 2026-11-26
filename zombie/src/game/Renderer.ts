@@ -2,7 +2,7 @@
 // Renderer: カメラ・マップ・夜の暗闇＆懐中電灯ライティング・建築グリッド・HUD・ミニマップ
 //   見た目（キャラ・オブジェクト）の描画は Art.ts の ArtSet に委譲している
 // ============================================================
-import type { GameMode, ObjSnap, PlayerSnap, ViewState, ZombieSnap } from '../types';
+import type { BuildKind, GameMode, ObjSnap, PlayerSnap, ViewState, WeaponId, ZombieSnap } from '../types';
 import { Tool } from '../types';
 import { type ArtSet, type PlayerAnim, type TallQuery, VectorArt, type ZombieAnim } from './Art';
 import {
@@ -10,7 +10,6 @@ import {
   BUILD_COST,
   CYCLE_SECONDS,
   DAY_SECONDS,
-  GUN,
   HORDE_EVERY,
   MAP_H,
   MAP_W,
@@ -19,13 +18,15 @@ import {
   T_WALL,
   TILE,
   TORCH_LIGHT,
-  TOOL_BUILD,
-  TOOLS,
+  BLUEPRINTS,
+  SLOTS,
+  USABLE_SLOTS,
+  WEAPONS,
   WORLD_H,
   WORLD_W,
   ZOMBIE,
 } from './constants';
-import type { Effects } from './Effects';
+import type { Decal, Effects } from './Effects';
 import { circleOverlapsTile, clamp } from './physics';
 import type { TileWorld } from './world';
 
@@ -43,6 +44,8 @@ export interface RenderOptions {
   /** ゲスト自機は射撃/近接アニメをローカルで発生させるので、カウンタ検出をしない */
   skipAnimDetectId: number | null;
   localTool: number;
+  localBp: number;
+  altDown: boolean;
   reviveHint: boolean;
   interactHint: string | null;
   syncMs?: number;
@@ -50,8 +53,14 @@ export interface RenderOptions {
 }
 
 /** 射撃・近接・リロードを検出したときに呼ばれるフック（効果音用） */
+/** プレイヤーが手に持っている射撃武器 */
+export function weaponOfSnap(p: PlayerSnap): WeaponId {
+  if (p.tool === Tool.Shotgun && p.inv.shotgun) return 'shotgun';
+  return p.inv.gun >= 1 ? 'rifle' : 'pistol';
+}
+
 export interface AnimHooks {
-  shot(p: PlayerSnap): void;
+  shot(p: PlayerSnap, w: WeaponId): void;
   swing(p: PlayerSnap): void;
   reload(p: PlayerSnap): void;
 }
@@ -116,6 +125,11 @@ export class Renderer {
   private zAnim = new Map<number, ZombieAnim>();
   private lastReload = new Map<number, number>();
   hooks: AnimHooks | null = null;
+  private fx: Effects | null = null;
+  private localId = -1;
+  /** 照準の広がり（連射で広がる） */
+  private bloom = 0;
+  private lastStash = { wood: 0, scrap: 0 };
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -160,12 +174,20 @@ export class Renderer {
     return a;
   }
 
-  triggerShot(id: number): void {
+  triggerShot(id: number, w: WeaponId = 'pistol', x?: number, y?: number, aim?: number): void {
     const a = this.getPAnim(id);
-    a.recoil = -6;
+    a.recoil = w === 'shotgun' ? -10 : w === 'rifle' ? -5 : -6;
     a.recoilV = 0;
-    a.flash = 0.06;
+    a.flash = w === 'shotgun' ? 0.08 : 0.06;
     a.flashSeed = Math.random();
+    if (this.fx && x !== undefined && y !== undefined && aim !== undefined) {
+      this.fx.casing(x, y, aim, w);
+      if (id === this.localId) {
+        this.fx.kick(aim, WEAPONS[w].kick);
+        this.bloom = Math.min(1, this.bloom + (w === 'shotgun' ? 0.8 : 0.28));
+        if (w === 'shotgun') this.fx.shake(0.18);
+      }
+    }
   }
 
   triggerSwing(id: number): void {
@@ -179,8 +201,14 @@ export class Renderer {
     this.time += dt;
     const fx = o.effects;
 
-    this.updateAnims(view, o);
-    fx.update(dt);
+    this.fx = fx;
+    this.localId = o.localId;
+    // ヒットストップ中は世界の動き（アニメ・パーティクル）をほぼ止める
+    const wdt = fx.hitstop > 0 ? dt * 0.06 : dt;
+    fx.hitstop = Math.max(0, fx.hitstop - dt);
+    this.bloom = Math.max(0, this.bloom - dt * 2.2);
+    this.updateAnims(view, { ...o, dt: wdt });
+    fx.update(wdt);
 
     // ---- カメラ ----
     const me = view.players.find((p) => p.id === o.localId);
@@ -203,6 +231,8 @@ export class Renderer {
       this.cam.y += (ty - this.cam.y) * k;
     }
     const shake = fx.shakeOffset();
+    shake.x += fx.kickX;
+    shake.y += fx.kickY;
     const ox = Math.round(this.w / 2 - this.cam.x + shake.x);
     const oy = Math.round(this.h / 2 - this.cam.y + shake.y);
 
@@ -225,6 +255,9 @@ export class Renderer {
       if (sw > 0 && sh > 0) ctx.drawImage(this.terrainCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
     }
 
+    this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
+    for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
+    this.drawParticles(fx, false, true);
     const visible: ObjSnap[] = [];
     for (const ob of this.world.objects.values()) {
       const x = ob.tx * TILE;
@@ -235,6 +268,7 @@ export class Renderer {
     // 壁の落ち影（重なっても濃くならないよう1つのパスでまとめて塗る）
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
+    this.lastStash = view.stash;
     for (const ob of visible) if (WALL_KINDS.has(ob.kind)) ctx.rect(ob.tx * TILE + 7, ob.ty * TILE + 10, TILE, TILE);
     ctx.fill();
     const tall: ObjSnap[] = [];
@@ -324,8 +358,9 @@ export class Renderer {
       if (a.lastSwings < 0) a.lastSwings = p.swings;
       if (p.id !== o.skipAnimDetectId) {
         if (p.shots !== a.lastShots) {
-          this.triggerShot(p.id);
-          this.hooks?.shot(p);
+          const w = weaponOfSnap(p);
+          this.triggerShot(p.id, w, p.x, p.y, p.aim);
+          this.hooks?.shot(p, w);
         }
         if (p.swings !== a.lastSwings) {
           this.triggerSwing(p.id);
@@ -373,62 +408,85 @@ export class Renderer {
   // ---------------- 建築グリッド・ゴースト ----------------
 
   private drawBuildGhost(o: RenderOptions, me: PlayerSnap | undefined): void {
-    if (!me || me.status !== 'alive') return;
-    const kind = TOOL_BUILD[o.localTool];
-    const isRepair = o.localTool === Tool.Repair;
-    if (!kind && !isRepair) return;
+    if (!me || me.status !== 'alive' || o.localTool !== Tool.Build) return;
+    const kind: BuildKind = BLUEPRINTS[o.localBp]?.kind ?? 'woodWall';
     const { ctx } = this;
     const mw = this.screenToWorld(o.mouseX, o.mouseY);
     const tx = Math.floor(mw.x / TILE);
     const ty = Math.floor(mw.y / TILE);
 
-    // 周囲のグリッド線
-    ctx.strokeStyle = 'rgba(180,220,255,0.10)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let gx = tx - 5; gx <= tx + 6; gx++) {
-      ctx.moveTo(gx * TILE + 0.5, (ty - 5) * TILE);
-      ctx.lineTo(gx * TILE + 0.5, (ty + 6) * TILE);
-    }
-    for (let gy = ty - 5; gy <= ty + 6; gy++) {
-      ctx.moveTo((tx - 5) * TILE, gy * TILE + 0.5);
-      ctx.lineTo((tx + 6) * TILE, gy * TILE + 0.5);
-    }
-    ctx.stroke();
+    // 周囲のグリッド線（カーソルから離れるほど薄く）
+    for (let gy = ty - 5; gy <= ty + 5; gy++)
+      for (let gx = tx - 5; gx <= tx + 5; gx++) {
+        const d = Math.hypot(gx - tx, gy - ty);
+        if (d > 5) continue;
+        ctx.strokeStyle = `rgba(180,220,255,${0.16 * (1 - d / 5.5)})`;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(gx * TILE + 0.5, gy * TILE + 0.5, TILE - 1, TILE - 1);
+      }
     // 設置範囲
     ctx.setLineDash([6, 8]);
     ctx.strokeStyle = 'rgba(180,220,255,0.25)';
     ctx.beginPath();
-    ctx.arc(me.x, me.y, isRepair ? PLAYER.buildRange * 0.7 : PLAYER.buildRange, 0, Math.PI * 2);
+    ctx.arc(me.x, me.y, PLAYER.buildRange, 0, Math.PI * 2);
     ctx.stroke();
     ctx.setLineDash([]);
 
     const cx = (tx + 0.5) * TILE;
     const cy = (ty + 0.5) * TILE;
-    const inRange = Math.hypot(cx - me.x, cy - me.y) <= (isRepair ? PLAYER.buildRange * 0.7 : PLAYER.buildRange);
-    if (isRepair) {
-      const ob = this.world.objAt(tx, ty);
-      const ok = !!ob && (BREAKABLE_KINDS.has(ob.kind) || ob.kind === 'spike');
-      ctx.strokeStyle = ok && inRange ? (ob!.hp < ob!.maxHp ? '#7dd3ff' : 'rgba(125,211,255,0.4)') : 'rgba(255,255,255,0.25)';
-      ctx.lineWidth = 2;
+    const ob = this.world.objAt(tx, ty);
+    // 修理対象（壊れた建築物）にカーソルが乗っていたら修理表示
+    const repairable = !!ob && (BREAKABLE_KINDS.has(ob.kind) || ob.kind === 'spike' || ob.kind === 'torch');
+    if (repairable && ob) {
+      const inRange = Math.hypot(cx - me.x, cy - me.y) <= PLAYER.buildRange * 0.7;
+      const damaged = ob.hp < ob.maxHp;
+      ctx.strokeStyle = !inRange ? 'rgba(255,255,255,0.3)' : damaged ? '#7dd3ff' : 'rgba(125,211,255,0.45)';
+      ctx.lineWidth = o.altDown ? 3 : 2;
       ctx.strokeRect(tx * TILE + 1, ty * TILE + 1, TILE - 2, TILE - 2);
+      this.worldLabel(
+        cx,
+        ty * TILE - 10,
+        damaged ? `右クリックで修理  ${Math.ceil(ob.hp)}/${ob.maxHp}` : `耐久 ${Math.ceil(ob.hp)}/${ob.maxHp}`,
+        damaged ? '#9fdcff' : '#c3cbe0',
+      );
       return;
     }
+    const cost = BUILD_COST[kind];
+    const inRange = Math.hypot(cx - me.x, cy - me.y) <= PLAYER.buildRange;
+    const solidKind = kind === 'woodWall' || kind === 'ironWall';
+    const affordable = this.lastStash.wood >= cost.wood && this.lastStash.scrap >= cost.scrap;
     const valid =
       inRange &&
+      affordable &&
       this.world.inBounds(tx, ty) &&
       this.world.terrainAt(tx, ty) !== T_WALL &&
-      !this.world.objAt(tx, ty) &&
-      (kind === 'spike' || !circleOverlapsTile(me.x, me.y, PLAYER.radius, tx, ty));
-    const ghost: ObjSnap = { id: -1, kind: kind!, tx, ty, hp: 1, maxHp: 1, ready: 1 };
-    ctx.globalAlpha = 0.45;
+      !ob &&
+      (!solidKind || !circleOverlapsTile(me.x, me.y, PLAYER.radius, tx, ty));
+    const ghost: ObjSnap = { id: -1, kind, tx, ty, hp: 1, maxHp: 1, ready: 1 };
+    ctx.globalAlpha = 0.5;
     if (!this.art.drawLowObject(ctx, ghost, this.time, () => false)) this.art.drawTallObject(ctx, ghost, this.time);
     ctx.globalAlpha = 1;
-    ctx.fillStyle = valid ? 'rgba(90,255,140,0.18)' : 'rgba(255,70,70,0.25)';
+    const pulse = 0.15 + Math.sin(this.time * 6) * 0.05;
+    ctx.fillStyle = valid ? `rgba(90,255,140,${pulse})` : `rgba(255,70,70,${pulse + 0.08})`;
     ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
     ctx.strokeStyle = valid ? '#5bff8c' : '#ff4646';
     ctx.lineWidth = 2;
     ctx.strokeRect(tx * TILE + 1, ty * TILE + 1, TILE - 2, TILE - 2);
+    const costText = cost.wood ? `木材 ${cost.wood}` : `鉄 ${cost.scrap}`;
+    const why = !inRange ? '遠すぎる' : !affordable ? '資材不足' : ob || this.world.terrainAt(tx, ty) === T_WALL ? '置けない' : '';
+    this.worldLabel(cx, ty * TILE - 10, why ? `${costText}（${why}）` : costText, valid ? '#a8ffc4' : '#ff9a9a');
+  }
+
+  private worldLabel(x: number, y: number, text: string, color: string): void {
+    const { ctx } = this;
+    ctx.font = 'bold 11px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = color;
+    ctx.fillText(text, x, y);
   }
 
   private drawStructureBars(objs: ObjSnap[]): void {
@@ -471,13 +529,49 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawParticles(fx: Effects, glow: boolean): void {
+  private drawDecals(decals: Decal[], x0: number, y0: number, x1: number, y1: number): void {
+    const { ctx } = this;
+    for (const d of decals) {
+      if (d.x < x0 || d.y < y0 || d.x > x1 || d.y > y1) continue;
+      const a = Math.min(1, d.life / 6) * (d.kind === 'scorch' ? 0.55 : 0.75);
+      ctx.save();
+      ctx.translate(d.x, d.y);
+      ctx.rotate(d.rot);
+      ctx.globalAlpha = a;
+      if (d.kind === 'scorch') {
+        const g = ctx.createRadialGradient(0, 0, 0, 0, 0, d.r);
+        g.addColorStop(0, 'rgba(10,8,6,0.9)');
+        g.addColorStop(1, 'rgba(10,8,6,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(0, 0, d.r, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.fillStyle = d.kind === 'pool' ? '#4a0606' : '#6a0a0a';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, d.r, d.r * 0.7, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 飛び散った滴
+        for (let i = 0; i < (d.kind === 'pool' ? 5 : 3); i++) {
+          const ang = ((d.seed >> (i * 3)) % 628) / 100;
+          const dist = d.r * (1 + ((d.seed >> (i * 2)) % 7) / 7);
+          ctx.beginPath();
+          ctx.arc(Math.cos(ang) * dist, Math.sin(ang) * dist, 1 + (d.r / 6) * (((d.seed >> i) % 5) / 5), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  private drawParticles(fx: Effects, glow: boolean, groundOnly = false): void {
     const { ctx } = this;
     ctx.save();
     if (glow) ctx.globalCompositeOperation = 'lighter';
     ctx.lineCap = 'round';
     for (const p of fx.particles) {
       if (p.glow !== glow) continue;
+      if ((p.kind === 'casing') !== groundOnly) continue;
       const t = p.life / p.maxLife;
       ctx.globalAlpha = Math.min(1, t * 1.4);
       if (p.kind === 'ring') {
@@ -493,6 +587,22 @@ export class Renderer {
         ctx.moveTo(p.x, p.y);
         ctx.lineTo(p.x - p.vx * 0.03, p.y - p.vy * 0.03);
         ctx.stroke();
+      } else if (p.kind === 'casing') {
+        ctx.globalAlpha = Math.min(1, p.life);
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.fillRect(-p.size / 2, -p.size / 4, p.size, 0.8);
+        ctx.restore();
+      } else if (p.kind === 'smoke') {
+        ctx.globalAlpha = t * 0.35;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
       } else if (p.kind === 'chunk') {
         ctx.save();
         ctx.translate(p.x, p.y);
@@ -695,7 +805,7 @@ export class Renderer {
         ctx.strokeStyle = '#ffd84d';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 22, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - p.reloadT / GUN.reloadTime));
+        ctx.arc(p.x, p.y, 22, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - p.reloadT / WEAPONS[weaponOfSnap(p)].reloadTime));
         ctx.stroke();
       }
     } else if (p.status === 'down') {
@@ -870,32 +980,57 @@ export class Renderer {
       ctx.globalAlpha = 1;
     }
 
-    // ---- クロスヘア ----
+    // ---- クロスヘア（連射で広がる） ----
     const cx = o.mouseX;
     const cy = o.mouseY;
     const alive = me && me.status === 'alive';
-    ctx.strokeStyle = alive ? (PLAYER_COLORS[o.localId] ?? '#fff') : '#777';
+    const isGun = o.localTool === Tool.Gun || o.localTool === Tool.Shotgun;
+    const col = alive ? (PLAYER_COLORS[o.localId] ?? '#fff') : '#777';
     ctx.lineWidth = 2;
-    ctx.beginPath();
-    if (o.localTool === Tool.Gun) {
-      ctx.arc(cx, cy, 8, 0, Math.PI * 2);
-      ctx.moveTo(cx - 14, cy);
-      ctx.lineTo(cx - 5, cy);
-      ctx.moveTo(cx + 5, cy);
-      ctx.lineTo(cx + 14, cy);
-      ctx.moveTo(cx, cy - 14);
-      ctx.lineTo(cx, cy - 5);
-      ctx.moveTo(cx, cy + 5);
-      ctx.lineTo(cx, cy + 14);
-    } else {
-      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-    }
-    ctx.stroke();
-    if (me && o.localTool === Tool.Gun && alive) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    const drawCross = () => {
+      ctx.beginPath();
+      if (isGun) {
+        const sg = o.localTool === Tool.Shotgun;
+        const g = (sg ? 12 : 5) + this.bloom * 12;
+        const len = 8;
+        ctx.moveTo(cx - g - len, cy);
+        ctx.lineTo(cx - g, cy);
+        ctx.moveTo(cx + g, cy);
+        ctx.lineTo(cx + g + len, cy);
+        ctx.moveTo(cx, cy - g - len);
+        ctx.lineTo(cx, cy - g);
+        ctx.moveTo(cx, cy + g);
+        ctx.lineTo(cx, cy + g + len);
+        if (sg) {
+          ctx.moveTo(cx + g + 4, cy);
+          ctx.arc(cx, cy, g + 4, 0, Math.PI * 2);
+        }
+      } else {
+        ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      }
+      ctx.stroke();
+    };
+    ctx.lineWidth = 4;
+    drawCross();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2;
+    drawCross();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(cx - 1, cy - 1, 2, 2);
+    if (me && isGun && alive) {
+      const sg = o.localTool === Tool.Shotgun;
       ctx.font = 'bold 11px "Segoe UI", sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillStyle = me.inv.mag === 0 ? '#ff6b6b' : '#e6ebf5';
-      ctx.fillText(me.reloadT > 0 ? 'RELOAD…' : `${me.inv.mag}/${me.inv.ammo}`, cx + 14, cy + 14);
+      ctx.textBaseline = 'middle';
+      const mag = sg ? me.inv.smag : me.inv.mag;
+      const res = sg ? me.inv.shells : me.inv.ammo;
+      ctx.fillStyle = mag === 0 ? '#ff6b6b' : '#e6ebf5';
+      const txt = sg && !me.inv.shotgun ? '未所持' : me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.strokeText(txt, cx + 16, cy + 16);
+      ctx.fillText(txt, cx + 16, cy + 16);
     }
     void dark;
   }
@@ -1047,47 +1182,115 @@ export class Renderer {
 
   private drawHotbar(o: RenderOptions, view: ViewState): void {
     const { ctx, w, h } = this;
-    const size = 54;
-    const gap = 6;
-    const total = TOOLS.length * size + (TOOLS.length - 1) * gap;
+    const me = view.players.find((p) => p.id === o.localId);
+    const size = 50;
+    const gap = 5;
+    const total = SLOTS.length * size + (SLOTS.length - 1) * gap;
     const x0 = w / 2 - total / 2;
     const y = h - size - 14;
-    TOOLS.forEach((t, i) => {
+    SLOTS.forEach((t, i) => {
       const x = x0 + i * (size + gap);
       const sel = o.localTool === t.id;
-      panel(ctx, x, y, size, size, sel ? 'rgba(60,90,130,0.9)' : undefined);
+      const usable = i < USABLE_SLOTS;
+      panel(ctx, x, y, size, size, sel ? 'rgba(60,90,130,0.92)' : usable ? undefined : 'rgba(10,12,16,0.4)');
       if (sel) {
         ctx.strokeStyle = '#9fd8ff';
         ctx.lineWidth = 2;
         roundRectPath(ctx, x + 1, y + 1, size - 2, size - 2, 7);
         ctx.stroke();
       }
-      drawToolIcon(ctx, t.id, x + size / 2, y + size / 2 - 4);
       ctx.font = 'bold 10px "Segoe UI", sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = usable ? '#ffffff' : 'rgba(255,255,255,0.3)';
       ctx.fillText(t.key, x + 5, y + 4);
-      ctx.textAlign = 'center';
-      ctx.font = '9px "Segoe UI", sans-serif';
-      const kind = TOOL_BUILD[t.id];
-      let label: string = t.short;
-      let affordable = true;
-      if (kind) {
-        const c = BUILD_COST[kind];
-        label = c.wood ? `木${c.wood}` : `鉄${c.scrap}`;
-        affordable = view.stash.wood >= c.wood && view.stash.scrap >= c.scrap;
+      if (!usable || !me) return;
+      let label = '';
+      let warn = false;
+      let locked = false;
+      switch (t.id) {
+        case Tool.Melee:
+          drawSlotIcon(ctx, 'axe', x + size / 2, y + size / 2 - 3);
+          label = '斧';
+          break;
+        case Tool.Gun:
+          drawSlotIcon(ctx, me.inv.gun >= 1 ? 'rifle' : 'pistol', x + size / 2, y + size / 2 - 3);
+          label = `${me.inv.mag}/${me.inv.ammo}`;
+          warn = me.inv.mag === 0;
+          break;
+        case Tool.Shotgun:
+          locked = !me.inv.shotgun;
+          drawSlotIcon(ctx, 'shotgun', x + size / 2, y + size / 2 - 3, locked);
+          label = locked ? '未入手' : `${me.inv.smag}/${me.inv.shells}`;
+          warn = !locked && me.inv.smag === 0;
+          break;
+        case Tool.Build: {
+          const bp = BLUEPRINTS[o.localBp];
+          drawBlueprintIcon(ctx, bp.kind, x + size / 2, y + size / 2 - 3);
+          const c = BUILD_COST[bp.kind];
+          label = c.wood ? `木${c.wood}` : `鉄${c.scrap}`;
+          warn = view.stash.wood < c.wood || view.stash.scrap < c.scrap;
+          break;
+        }
+        case Tool.Food:
+          drawSlotIcon(ctx, 'food', x + size / 2, y + size / 2 - 3, me.inv.food <= 0);
+          label = `×${me.inv.food}`;
+          warn = me.inv.food <= 0;
+          break;
+        case Tool.Medkit:
+          drawSlotIcon(ctx, 'medkit', x + size / 2, y + size / 2 - 3, me.inv.medkit <= 0);
+          label = `×${me.inv.medkit}`;
+          warn = me.inv.medkit <= 0;
+          break;
       }
-      ctx.fillStyle = affordable ? '#c3cbe0' : '#ff7070';
-      ctx.fillText(label, x + size / 2, y + size - 13);
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 9px "Segoe UI", sans-serif';
+      ctx.fillStyle = locked ? '#7d8597' : warn ? '#ff7070' : '#dfe6f3';
+      ctx.fillText(label, x + size / 2, y + size - 12);
     });
-    const cur = TOOLS[o.localTool];
-    if (cur) {
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+
+    // 建築ツール選択中：設計図の選択バー
+    if (o.localTool === Tool.Build) {
+      const bs = 40;
+      const bg = 6;
+      const bt = BLUEPRINTS.length * bs + (BLUEPRINTS.length - 1) * bg;
+      const bx0 = w / 2 - bt / 2;
+      const by = y - bs - 30;
+      BLUEPRINTS.forEach((bp, i) => {
+        const bx = bx0 + i * (bs + bg);
+        const sel = i === o.localBp;
+        const c = BUILD_COST[bp.kind];
+        const ok = view.stash.wood >= c.wood && view.stash.scrap >= c.scrap;
+        panel(ctx, bx, by, bs, bs, sel ? 'rgba(70,110,70,0.92)' : undefined);
+        if (sel) {
+          ctx.strokeStyle = '#a8ffc4';
+          ctx.lineWidth = 2;
+          roundRectPath(ctx, bx + 1, by + 1, bs - 2, bs - 2, 7);
+          ctx.stroke();
+        }
+        drawBlueprintIcon(ctx, bp.kind, bx + bs / 2, by + bs / 2 - 4, 0.8);
+        ctx.font = 'bold 9px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = ok ? '#dfe6f3' : '#ff7070';
+        ctx.fillText(c.wood ? `木${c.wood}` : `鉄${c.scrap}`, bx + bs / 2, by + bs - 11);
+      });
+      ctx.font = 'bold 11px "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillStyle = '#e6ebf5';
-      ctx.fillText(`${cur.name}  （1〜6 / ホイール / B で切替）`, w / 2, y - 6);
+      ctx.fillText(`${BLUEPRINTS[o.localBp].name}  [B]設計図切替  左クリック:設置  右クリック:修理`, w / 2, by - 5);
+    } else {
+      const cur = SLOTS[o.localTool];
+      if (cur) {
+        ctx.font = 'bold 12px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = '#e6ebf5';
+        let name: string = cur.name;
+        if (o.localTool === Tool.Gun && me) name = WEAPONS[me.inv.gun >= 1 ? 'rifle' : 'pistol'].name;
+        ctx.fillText(`${name}  （1〜6 / ホイールで切替）`, w / 2, y - 6);
+      }
     }
   }
 
@@ -1162,19 +1365,13 @@ function panel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h
 }
 
 /** ホットバーのアイコン（ベクター） */
-function drawToolIcon(ctx: CanvasRenderingContext2D, id: number, x: number, y: number): void {
+function drawSlotIcon(ctx: CanvasRenderingContext2D, kind: 'axe' | 'pistol' | 'rifle' | 'shotgun' | 'food' | 'medkit', x: number, y: number, dim = false): void {
   ctx.save();
   ctx.translate(x, y);
+  if (dim) ctx.globalAlpha = 0.35;
   ctx.lineCap = 'round';
-  switch (id) {
-    case Tool.Gun:
-      ctx.fillStyle = '#cfd6df';
-      ctx.fillRect(-12, -6, 22, 6);
-      ctx.fillRect(-12, -6, 7, 14);
-      ctx.fillStyle = '#7a8594';
-      ctx.fillRect(-4, 0, 3, 4);
-      break;
-    case Tool.Axe:
+  switch (kind) {
+    case 'axe':
       ctx.strokeStyle = '#a77d4f';
       ctx.lineWidth = 3;
       ctx.beginPath();
@@ -1190,25 +1387,79 @@ function drawToolIcon(ctx: CanvasRenderingContext2D, id: number, x: number, y: n
       ctx.closePath();
       ctx.fill();
       break;
-    case Tool.WoodWall:
+    case 'pistol':
+      ctx.fillStyle = '#cfd6df';
+      ctx.fillRect(-11, -6, 20, 6);
+      ctx.fillRect(-11, -6, 6, 13);
+      ctx.fillStyle = '#7a8594';
+      ctx.fillRect(-4, 0, 3, 4);
+      break;
+    case 'rifle':
+      ctx.fillStyle = '#cfd6df';
+      ctx.fillRect(-15, -4, 30, 5);
+      ctx.fillStyle = '#8a6a48';
+      ctx.fillRect(-17, -4, 7, 8);
+      ctx.fillStyle = '#7a8594';
+      ctx.fillRect(-2, 1, 4, 8);
+      ctx.fillRect(8, -6, 3, 2);
+      break;
+    case 'shotgun':
+      ctx.fillStyle = '#9aa3ad';
+      ctx.fillRect(-12, -5, 28, 3);
+      ctx.fillRect(-12, -2, 24, 3);
+      ctx.fillStyle = '#8a5c33';
+      ctx.fillRect(-18, -4, 9, 8);
+      ctx.fillRect(0, 1, 7, 3);
+      if (dim) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#c3cbe0';
+        ctx.fillRect(-5, -2, 10, 8);
+        ctx.strokeStyle = '#c3cbe0';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, -3, 4, Math.PI, 0);
+        ctx.stroke();
+      }
+      break;
+    case 'food':
+      ctx.fillStyle = '#b8c2cc';
+      ctx.fillRect(-7, -9, 14, 18);
+      ctx.fillStyle = '#d9534f';
+      ctx.fillRect(-7, -4, 14, 8);
+      ctx.fillStyle = '#ffe08a';
+      ctx.fillRect(-4, -2, 8, 4);
+      break;
+    case 'medkit':
+      ctx.fillStyle = '#e8edf2';
+      ctx.fillRect(-10, -8, 20, 16);
+      ctx.fillStyle = '#d9534f';
+      ctx.fillRect(-2, -6, 4, 12);
+      ctx.fillRect(-6, -2, 12, 4);
+      break;
+  }
+  ctx.restore();
+}
+
+function drawBlueprintIcon(ctx: CanvasRenderingContext2D, kind: BuildKind, x: number, y: number, s = 1): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.lineCap = 'round';
+  switch (kind) {
+    case 'woodWall':
       for (let i = 0; i < 3; i++) {
         ctx.fillStyle = i % 2 ? '#a06d3e' : '#8a5c33';
         ctx.fillRect(-12, -11 + i * 8, 24, 7);
       }
       break;
-    case Tool.IronWall:
+    case 'ironWall':
       ctx.fillStyle = '#8d99a8';
       ctx.fillRect(-12, -11, 24, 22);
       ctx.strokeStyle = '#3d444d';
       ctx.lineWidth = 2;
       ctx.strokeRect(-11, -10, 22, 20);
-      ctx.fillStyle = '#e0e6ee';
-      ctx.fillRect(-9, -8, 2, 2);
-      ctx.fillRect(7, -8, 2, 2);
-      ctx.fillRect(-9, 6, 2, 2);
-      ctx.fillRect(7, 6, 2, 2);
       break;
-    case Tool.Spike:
+    case 'spike':
       ctx.strokeStyle = '#c9a26b';
       ctx.lineWidth = 2.5;
       ctx.beginPath();
@@ -1220,19 +1471,23 @@ function drawToolIcon(ctx: CanvasRenderingContext2D, id: number, x: number, y: n
       }
       ctx.stroke();
       break;
-    case Tool.Repair:
-      ctx.strokeStyle = '#a77d4f';
-      ctx.lineWidth = 3;
+    case 'torch':
+      ctx.strokeStyle = '#7a5532';
+      ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.moveTo(-9, 10);
-      ctx.lineTo(6, -5);
+      ctx.moveTo(0, 11);
+      ctx.lineTo(0, -3);
       ctx.stroke();
-      ctx.fillStyle = '#9aa3ad';
-      ctx.save();
-      ctx.translate(7, -6);
-      ctx.rotate(Math.PI / 4);
-      ctx.fillRect(-9, -4, 18, 8);
-      ctx.restore();
+      ctx.fillStyle = '#ff9a3d';
+      ctx.beginPath();
+      ctx.moveTo(-5, -3);
+      ctx.quadraticCurveTo(0, -18, 5, -3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#ffe08a';
+      ctx.beginPath();
+      ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
+      ctx.fill();
       break;
   }
   ctx.restore();

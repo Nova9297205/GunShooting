@@ -4,7 +4,7 @@
 //   - BGM   : 昼 / 夜 / 大襲撃 で曲調が変わる自動生成ミュージック
 //   ★ 音声ファイルに差し替える場合は、各メソッドの中身を AudioBuffer の再生に置き換えればOK
 // ============================================================
-import type { GameEvent, SoundKey, ViewState } from '../types';
+import type { GameEvent, SoundKey, ViewState, WeaponId } from '../types';
 import { TILE, ZOMBIE } from './constants';
 
 export type MusicMood = 'day' | 'night' | 'horde';
@@ -280,14 +280,37 @@ export class AudioManager {
 
   // ======================== 効果音 ========================
 
-  shot(x: number, y: number, local: boolean): void {
-    if (!this.ready || !this.gate(local ? 'shot' : `shot${Math.round(x)}`, 0.05)) return;
+  shot(x: number, y: number, local: boolean, w: WeaponId = 'pistol'): void {
+    if (!this.ready || !this.gate(local ? `shot-${w}` : `shot${Math.round(x)}`, w === 'rifle' ? 0.04 : 0.05)) return;
     const s = this.at(x, y, local);
     if (!s) return;
     const k = s.k * (local ? 1 : 0.75);
-    this.noise({ dur: 0.11, g: 0.55 * k, filter: 'bandpass', f: 1900, q: 0.6, pan: s.pan });
-    this.noise({ dur: 0.22, g: 0.45 * k, filter: 'lowpass', f: 700, f2: 200, pan: s.pan });
-    this.tone({ type: 'square', f: 170, f2: 45, dur: 0.09, g: 0.25 * k, lp: 900, pan: s.pan });
+    if (w === 'shotgun') {
+      // 重く低いドン
+      this.noise({ dur: 0.35, g: 0.7 * k, filter: 'lowpass', f: 1400, f2: 180, pan: s.pan });
+      this.noise({ dur: 0.08, g: 0.45 * k, filter: 'bandpass', f: 2600, q: 0.5, pan: s.pan });
+      this.tone({ type: 'square', f: 110, f2: 32, dur: 0.22, g: 0.32 * k, lp: 600, pan: s.pan });
+      if (local) {
+        // ポンプアクション
+        const t = this.ctx!.currentTime;
+        this.noise({ dur: 0.05, g: 0.16, filter: 'bandpass', f: 1500, q: 2, t: t + 0.3 });
+        this.noise({ dur: 0.05, g: 0.18, filter: 'bandpass', f: 1100, q: 2, t: t + 0.42 });
+      }
+    } else if (w === 'rifle') {
+      this.noise({ dur: 0.08, g: 0.45 * k, filter: 'bandpass', f: 2300, q: 0.7, pan: s.pan });
+      this.noise({ dur: 0.16, g: 0.38 * k, filter: 'lowpass', f: 900, f2: 250, pan: s.pan });
+      this.tone({ type: 'square', f: 200, f2: 60, dur: 0.06, g: 0.2 * k, lp: 1000, pan: s.pan });
+    } else {
+      this.noise({ dur: 0.11, g: 0.55 * k, filter: 'bandpass', f: 1900, q: 0.6, pan: s.pan });
+      this.noise({ dur: 0.22, g: 0.45 * k, filter: 'lowpass', f: 700, f2: 200, pan: s.pan });
+      this.tone({ type: 'square', f: 170, f2: 45, dur: 0.09, g: 0.25 * k, lp: 900, pan: s.pan });
+    }
+    // 薬莢が地面に落ちる音
+    if (local && Math.random() < 0.7) {
+      const t = this.ctx!.currentTime + 0.25 + Math.random() * 0.15;
+      this.tone({ f: w === 'shotgun' ? 1900 : 3800 + Math.random() * 800, dur: 0.06, g: 0.035, t });
+      this.tone({ f: w === 'shotgun' ? 2300 : 4600, dur: 0.04, g: 0.02, t: t + 0.07 });
+    }
   }
 
   emptyClick(): void {
@@ -321,6 +344,15 @@ export class AudioManager {
     if (!s) return;
     this.noise({ dur: 0.09, g: 0.3 * s.k, filter: 'lowpass', f: 900, pan: s.pan });
     this.tone({ f: 130, f2: 60, dur: 0.1, g: 0.28 * s.k, pan: s.pan });
+  }
+
+  private meleeHit(x: number, y: number): void {
+    if (!this.gate('melee', 0.05)) return;
+    const s = this.spatial(x, y);
+    if (!s) return;
+    this.noise({ dur: 0.12, g: 0.45 * s.k, filter: 'lowpass', f: 1100, pan: s.pan });
+    this.tone({ type: 'triangle', f: 160, f2: 70, dur: 0.14, g: 0.4 * s.k, pan: s.pan });
+    this.noise({ dur: 0.05, g: 0.2 * s.k, filter: 'bandpass', f: 600, q: 2, pan: s.pan });
   }
 
   private ricochet(x: number, y: number): void {
@@ -510,7 +542,8 @@ export class AudioManager {
     if (!this.ready) return;
     switch (ev.k) {
       case 'hit':
-        this.fleshHit(ev.x, ev.y);
+        if (ev.m) this.meleeHit(ev.x, ev.y);
+        else this.fleshHit(ev.x, ev.y);
         break;
       case 'wall':
         this.ricochet(ev.x, ev.y);

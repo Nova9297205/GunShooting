@@ -27,16 +27,18 @@ export type ObjKind =
 
 export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch';
 
-/** ホットバーのツール番号 */
+/** ホットバーのスロット番号（キー 1〜9 に対応） */
 export const Tool = {
-  Gun: 0,
-  Axe: 1,
-  WoodWall: 2,
-  IronWall: 3,
-  Spike: 4,
-  Repair: 5,
-  Torch: 6,
+  Melee: 0,
+  Gun: 1,
+  Shotgun: 2,
+  Build: 3,
+  Food: 4,
+  Medkit: 5,
 } as const;
+
+/** 武器の種類（射撃系） */
+export type WeaponId = 'pistol' | 'rifle' | 'shotgun';
 
 /** 1フレーム分の操作入力（ゲスト→ホストへ送信） */
 export interface InputFrame {
@@ -56,8 +58,12 @@ export interface InputFrame {
   craft: boolean;
   eat: boolean;
   heal: boolean;
-  /** 選択中のツール (Tool.*) */
+  /** 選択中のスロット (Tool.*) */
   tool: number;
+  /** 建築ツールで選んでいる設計図の番号（BLUEPRINTS のインデックス） */
+  bp: number;
+  /** 右クリック押しっぱなし（建築ツールでは修理） */
+  alt: boolean;
   /** マウスが指しているタイル座標（建築・修理対象） */
   tx: number;
   ty: number;
@@ -74,10 +80,18 @@ export interface MoveBody {
 }
 
 export interface Inventory {
-  /** 予備弾薬 */
+  /** 予備弾薬（拳銃・ライフル共通） */
   ammo: number;
-  /** マガジン内の弾 */
+  /** 拳銃/ライフルのマガジン内の弾 */
   mag: number;
+  /** 予備のショットガンシェル */
+  shells: number;
+  /** ショットガンの装填数 */
+  smag: number;
+  /** 銃のランク：0=拳銃 1=アサルトライフル */
+  gun: number;
+  /** ショットガン所持 0/1 */
+  shotgun: number;
   gunpowder: number;
   food: number;
   medkit: number;
@@ -148,10 +162,10 @@ export type SoundKey = 'loot' | 'eat' | 'heal' | 'craft' | 'error' | 'day' | 'ni
 
 /** 一度きりの演出イベント */
 export type GameEvent =
-  | { k: 'hit'; x: number; y: number; o: number }
+  | { k: 'hit'; x: number; y: number; o: number; a: number; m?: number }
   | { k: 'wall'; x: number; y: number; o: number }
   | { k: 'dmg'; x: number; y: number; v: number; p: boolean }
-  | { k: 'kill'; x: number; y: number; r: number }
+  | { k: 'kill'; x: number; y: number; r: number; o: number; t: ZombieType; id: number; a: number; dx: number; dy: number }
   | { k: 'phit'; id: number }
   | { k: 'down'; id: number; x: number; y: number }
   | { k: 'revive'; id: number; x: number; y: number }
