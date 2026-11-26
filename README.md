@@ -1,5 +1,7 @@
 # CO-OP SHOOTER 2D（GunShooting）
 
+> 🧟 ゾンビサバイバル＆拠点防衛ゲーム **DEAD NIGHTS 2D** は [`zombie/`](zombie/README.md) にあります（GitHub Pages では `/zombie/` で公開）。
+
 ブラウザで動く 2〜3人協力（PvE）見下ろし型シューティングのプロトタイプです。
 専用ゲームサーバー不要で、PeerJS（WebRTC）によるホスト・ゲスト方式の P2P マルチプレイに対応しています。
 
@@ -80,7 +82,7 @@ npm run dev
 
 1. リポジトリの **Settings → Pages → Build and deployment → Source** を「**GitHub Actions**」にする
 2. このブランチを `main` にマージする
-3. 公開 URL: `https://nova9297205.github.io/GunShooting/`
+3. 公開 URL: `https://nova9297205.github.io/GunShooting/`（ゾンビサバイバルは `https://nova9297205.github.io/GunShooting/zombie/`）
 
 > 非公開（Private）リポジトリで Pages を使うには GitHub Pro 以上が必要です。無料プランの場合はリポジトリを Public にしてください。
 
