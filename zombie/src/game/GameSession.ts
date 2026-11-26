@@ -1,0 +1,511 @@
+// ============================================================
+// GameSession: ゲームループ本体（モード別の更新・同期・描画）
+//   solo  : ローカルで HostSimulation を回す
+//   host  : HostSimulation を回し、約30Hzでスナップショット（オブジェクトは差分）を配信
+//   guest : 入力を送りつつ自機の移動・照準・射撃エフェクトをクライアント側予測で即時反映、
+//           他プレイヤー・ゾンビ・弾はスナップショット間を線形補間して描画
+// ============================================================
+import type {
+  BulletSnap,
+  GameEvent,
+  GameMode,
+  GameResult,
+  InputFrame,
+  MoveBody,
+  PlayerSnap,
+  Snapshot,
+  StartInfo,
+  ViewState,
+} from '../types';
+import { Tool } from '../types';
+import { AXE, GUN, INTERP_DELAY, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, TOOLS, ZOMBIE } from './constants';
+import { Effects } from './Effects';
+import type { HostSimulation } from './Engine';
+import { InputController } from './Input';
+import { angleLerp, lerp, stepMovement } from './physics';
+import { Renderer } from './Renderer';
+import { generateTerrain, TileWorld } from './world';
+import type { NetworkManager } from '../network/NetworkManager';
+
+export interface SessionOptions {
+  mode: GameMode;
+  canvas: HTMLCanvasElement;
+  localId: number;
+  info: StartInfo;
+  /** ソロ/ホスト時は呼び出し側で生成したシミュレーションを渡す */
+  sim?: HostSimulation;
+  net?: NetworkManager;
+  roomCode?: string;
+  onGameOver: (r: GameResult) => void;
+}
+
+interface BufferedSnap {
+  snap: Snapshot;
+  fired: boolean;
+}
+
+interface LocalBullet extends BulletSnap {
+  life: number;
+}
+
+export class GameSession {
+  private renderer: Renderer;
+  private input: InputController;
+  private effects = new Effects();
+  private world: TileWorld;
+  private running = false;
+  private rafId = 0;
+  private pumpTimer = 0;
+  private lastFrame = 0;
+  private seq = 0;
+  private localTool: number = Tool.Gun;
+  private localAim = 0;
+
+  // host / solo
+  private sim: HostSimulation | null;
+  private acc = 0;
+  private lastPump = 0;
+  private pendingEvents: GameEvent[] = [];
+  private gameOverHandled = false;
+
+  // guest
+  private snaps: BufferedSnap[] = [];
+  private latest: Snapshot | null = null;
+  private timeOffset: number | null = null;
+  private pred: MoveBody | null = null;
+  private pendingInputs: InputFrame[] = [];
+  private predErr = { x: 0, y: 0 };
+  private localFireCd = 0;
+  private localSwingCd = 0;
+  private localShotSeqs: number[] = [];
+  private localBullets: LocalBullet[] = [];
+  private localBulletId = -1;
+
+  constructor(private o: SessionOptions) {
+    this.sim = o.sim ?? null;
+    if (this.sim) {
+      this.world = this.sim.world;
+    } else {
+      this.world = new TileWorld(generateTerrain(o.info.seed));
+      for (const ob of o.info.objs) this.world.setObj({ ...ob });
+    }
+    this.renderer = new Renderer(o.canvas, this.world);
+    this.input = new InputController(o.canvas);
+  }
+
+  start(): void {
+    this.running = true;
+    this.input.attach();
+    window.addEventListener('resize', this.onResize);
+    this.lastFrame = performance.now();
+    this.lastPump = performance.now();
+    if (this.sim) this.pumpTimer = window.setInterval(this.pump, 8);
+    this.rafId = requestAnimationFrame(this.frame);
+  }
+
+  stop(): void {
+    this.running = false;
+    cancelAnimationFrame(this.rafId);
+    clearInterval(this.pumpTimer);
+    this.input.detach();
+    window.removeEventListener('resize', this.onResize);
+  }
+
+  // ---------------- ネットワークからの呼び出し ----------------
+
+  receiveInput(playerId: number, f: InputFrame): void {
+    this.sim?.queueInput(playerId, f);
+    this.pump();
+  }
+
+  removePlayer(playerId: number): void {
+    this.sim?.removePlayer(playerId);
+  }
+
+  receiveSnapshot(s: Snapshot): void {
+    // オブジェクト差分は即時反映（建築・破壊・資源の再湧き）
+    for (const ob of s.objs) this.world.setObj({ ...ob });
+    for (const id of s.removed) this.world.removeObj(id);
+
+    const now = performance.now() / 1000;
+    const est = s.time - now;
+    if (this.timeOffset === null || Math.abs(est - this.timeOffset) > 1) this.timeOffset = est;
+    else this.timeOffset += (est - this.timeOffset) * 0.05;
+
+    this.snaps.push({ snap: s, fired: false });
+    this.latest = s;
+    const rt = this.renderTime(now);
+    while (this.snaps.length > 2 && this.snaps[1].snap.time < rt - 0.5) {
+      const old = this.snaps.shift()!;
+      if (!old.fired) this.fireEvents(old);
+    }
+    if (this.snaps.length > 90) {
+      const old = this.snaps.shift()!;
+      if (!old.fired) this.fireEvents(old);
+    }
+    this.reconcile(s);
+  }
+
+  // ---------------- ホスト計算 ----------------
+
+  private pump = (): void => {
+    const sim = this.sim;
+    if (!sim || !this.running) return;
+    const now = performance.now();
+    this.acc += Math.min(0.25, (now - this.lastPump) / 1000);
+    this.lastPump = now;
+    while (this.acc >= TICK_DT) {
+      this.acc -= TICK_DT;
+      sim.step(TICK_DT);
+      const evs = sim.drainEvents();
+      for (const ev of evs) this.effects.handleEvent(ev, this.o.localId);
+      if (this.o.mode === 'host' && this.o.net) {
+        this.pendingEvents.push(...evs);
+        if (sim.tick % SNAPSHOT_EVERY === 0 || sim.gameOver) {
+          this.o.net.sendSnapshot(sim.snapshot(this.pendingEvents));
+          this.pendingEvents = [];
+        }
+      } else {
+        sim.takeObjDelta(); // ソロでは差分は不要なので捨てる
+      }
+      if (sim.gameOver && !this.gameOverHandled && sim.result) {
+        this.gameOverHandled = true;
+        const result = sim.result;
+        this.o.net?.sendGameOver(result);
+        setTimeout(() => this.o.onGameOver(result), 1800);
+        break;
+      }
+    }
+  };
+
+  // ---------------- ゲスト：予測とリコンシリエーション ----------------
+
+  private reconcile(s: Snapshot): void {
+    const me = s.players.find((p) => p.id === this.o.localId);
+    if (!me) return;
+    this.pendingInputs = this.pendingInputs.filter((f) => f.seq > me.ack);
+    this.localShotSeqs = this.localShotSeqs.filter((q) => q > me.ack);
+    const before = this.pred ? { x: this.pred.x, y: this.pred.y } : null;
+    const pred: MoveBody = {
+      x: me.x,
+      y: me.y,
+      bodyAngle: me.bodyAngle,
+      dashTime: me.dashTime,
+      dashCd: me.dashCd,
+      dashDx: me.dashDx,
+      dashDy: me.dashDy,
+    };
+    for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
+    if (before) {
+      this.predErr.x += before.x - pred.x;
+      this.predErr.y += before.y - pred.y;
+      if (Math.hypot(this.predErr.x, this.predErr.y) > 120) this.predErr = { x: 0, y: 0 };
+    }
+    this.pred = pred;
+  }
+
+  private renderTime(nowSec: number): number {
+    return nowSec + (this.timeOffset ?? 0) - INTERP_DELAY;
+  }
+
+  private fireEvents(b: BufferedSnap): void {
+    b.fired = true;
+    for (const ev of b.snap.events) {
+      if (ev.k === 'wall' && ev.o === this.o.localId) continue; // ローカル予測弾で表現済み
+      this.effects.handleEvent(ev, this.o.localId);
+    }
+  }
+
+  private buildGuestView(nowSec: number): ViewState | null {
+    if (this.snaps.length === 0 || !this.latest) return null;
+    const rt = this.renderTime(nowSec);
+    for (const b of this.snaps) if (!b.fired && b.snap.time <= rt) this.fireEvents(b);
+
+    let a = this.snaps[0].snap;
+    let b = a;
+    for (let i = 0; i < this.snaps.length; i++) {
+      const s = this.snaps[i].snap;
+      if (s.time <= rt) {
+        a = s;
+        b = this.snaps[i + 1]?.snap ?? s;
+      } else break;
+    }
+    const span = b.time - a.time;
+    const t = span > 0 ? Math.min(1, Math.max(0, (rt - a.time) / span)) : 1;
+
+    const players: PlayerSnap[] = b.players.map((pb) => {
+      const pa = a.players.find((p) => p.id === pb.id);
+      if (!pa) return pb;
+      return {
+        ...pb,
+        x: lerp(pa.x, pb.x, t),
+        y: lerp(pa.y, pb.y, t),
+        aim: angleLerp(pa.aim, pb.aim, t),
+        bodyAngle: angleLerp(pa.bodyAngle, pb.bodyAngle, t),
+        downTimer: lerp(pa.downTimer, pb.downTimer, t),
+        reviveProgress: lerp(pa.reviveProgress, pb.reviveProgress, t),
+      };
+    });
+
+    const aZ = new Map(a.zombies.map((z) => [z.id, z]));
+    const zombies = b.zombies.map((zb) => {
+      const za = aZ.get(zb.id);
+      if (!za) return zb;
+      return { ...zb, x: lerp(za.x, zb.x, t), y: lerp(za.y, zb.y, t), angle: angleLerp(za.angle, zb.angle, t) };
+    });
+
+    const bullets: BulletSnap[] = [];
+    const aB = new Map(a.bullets.map((x) => [x.id, x]));
+    for (const bb of b.bullets) {
+      if (bb.owner === this.o.localId) continue;
+      const ba = aB.get(bb.id);
+      if (ba) bullets.push({ ...bb, x: lerp(ba.x, bb.x, t), y: lerp(ba.y, bb.y, t) });
+      else if (a === b) bullets.push(bb);
+    }
+
+    // 自機：最新の確定状態 + ローカル予測位置
+    const meLatest = this.latest.players.find((p) => p.id === this.o.localId);
+    const idx = players.findIndex((p) => p.id === this.o.localId);
+    if (meLatest && this.pred) {
+      const me: PlayerSnap = {
+        ...meLatest,
+        x: this.pred.x + this.predErr.x,
+        y: this.pred.y + this.predErr.y,
+        bodyAngle: this.pred.bodyAngle,
+        dashTime: this.pred.dashTime,
+        dashCd: this.pred.dashCd,
+        aim: this.localAim,
+        tool: this.localTool,
+        inv: { ...meLatest.inv, mag: Math.max(0, meLatest.inv.mag - this.localShotSeqs.length) },
+      };
+      if (idx >= 0) players[idx] = me;
+      else players.push(me);
+    }
+    for (const lb of this.localBullets) bullets.push(lb);
+
+    const L = this.latest;
+    return {
+      time: rt,
+      tick: b.tick,
+      day: L.day,
+      minute: L.minute,
+      phase: L.phase,
+      stash: L.stash,
+      hordeLeft: L.hordeLeft,
+      players,
+      zombies,
+      bullets,
+    };
+  }
+
+  private updateLocalBullets(dt: number, view: ViewState | null): void {
+    for (const b of this.localBullets) {
+      for (let s = 0; s < 2 && b.life > 0; s++) {
+        b.x += (b.vx * dt) / 2;
+        b.y += (b.vy * dt) / 2;
+        if (this.world.blocksBullet(Math.floor(b.x / TILE), Math.floor(b.y / TILE))) {
+          b.life = 0;
+          this.effects.handleEvent({ k: 'wall', x: b.x - b.vx * 0.005, y: b.y - b.vy * 0.005, o: this.o.localId }, this.o.localId);
+          break;
+        }
+        if (view) {
+          for (const z of view.zombies) {
+            const r = ZOMBIE[z.type].radius + 3;
+            if ((z.x - b.x) ** 2 + (z.y - b.y) ** 2 < r * r) {
+              b.life = 0; // 見た目上の消滅のみ。ダメージはホストが判定
+              break;
+            }
+          }
+        }
+      }
+      b.life -= dt;
+    }
+    this.localBullets = this.localBullets.filter((b) => b.life > 0);
+  }
+
+  // ---------------- メインフレーム ----------------
+
+  private handleToolKeys(): void {
+    for (let i = 0; i < TOOLS.length; i++) if (this.input.consume(`Digit${i + 1}`)) this.localTool = i;
+    if (this.input.consume('KeyB')) {
+      // 建築ツール（3〜6）を順に切り替え
+      this.localTool = this.localTool < Tool.WoodWall || this.localTool >= Tool.Repair ? Tool.WoodWall : this.localTool + 1;
+    }
+    const wheel = this.input.consumeWheel();
+    if (wheel) this.localTool = (this.localTool + (wheel > 0 ? 1 : -1) + TOOLS.length) % TOOLS.length;
+  }
+
+  private frame = (nowMs: number): void => {
+    if (!this.running) return;
+    this.rafId = requestAnimationFrame(this.frame);
+    const dt = Math.min(0.1, Math.max(0, (nowMs - this.lastFrame) / 1000));
+    this.lastFrame = nowMs;
+    const localId = this.o.localId;
+
+    let myPos: { x: number; y: number } | null = null;
+    let myStatus: PlayerSnap['status'] = 'alive';
+    let meServer: PlayerSnap | undefined;
+    if (this.sim) {
+      const p = this.sim.players.find((pl) => pl.id === localId);
+      if (p) {
+        myPos = p;
+        myStatus = p.status;
+      }
+    } else if (this.pred && this.latest) {
+      myPos = { x: this.pred.x + this.predErr.x, y: this.pred.y + this.predErr.y };
+      meServer = this.latest.players.find((p) => p.id === localId);
+      myStatus = meServer?.status ?? 'dead';
+    }
+
+    // ---- 入力 ----
+    this.handleToolKeys();
+    const mv = this.input.getMove();
+    const mw = this.renderer.screenToWorld(this.input.mouseX, this.input.mouseY);
+    const aim = myPos ? Math.atan2(mw.y - myPos.y, mw.x - myPos.x) : this.localAim;
+    this.localAim = aim;
+    const frame: InputFrame = {
+      seq: ++this.seq,
+      dt,
+      mx: mv.x,
+      my: mv.y,
+      aim,
+      fire: this.input.consumeFire(),
+      revive: this.input.isDown('KeyE'),
+      dash: this.input.consumeDash(),
+      interact: this.input.consume('KeyF'),
+      reload: this.input.consume('KeyR'),
+      craft: this.input.consume('KeyC'),
+      eat: this.input.consume('KeyQ'),
+      heal: this.input.consume('KeyH'),
+      tool: this.localTool,
+      tx: Math.floor(mw.x / TILE),
+      ty: Math.floor(mw.y / TILE),
+    };
+
+    let view: ViewState | null;
+    if (this.sim) {
+      this.sim.queueInput(localId, frame);
+      this.pump();
+      view = this.sim.view();
+    } else {
+      if (this.pred && this.latest && myStatus !== 'dead') {
+        stepMovement(this.pred, frame, dt, myStatus, this.world);
+        this.pendingInputs.push(frame);
+        if (this.pendingInputs.length > 240) this.pendingInputs.shift();
+      }
+      this.o.net?.sendInput(frame);
+      const decay = Math.exp(-10 * dt);
+      this.predErr.x *= decay;
+      this.predErr.y *= decay;
+      this.predictLocalActions(frame, myStatus, meServer, dt);
+      view = this.buildGuestView(nowMs / 1000);
+      this.updateLocalBullets(dt, view);
+    }
+
+    if (!view) {
+      this.drawWaiting();
+      return;
+    }
+
+    const me = view.players.find((p) => p.id === localId);
+    const reviveHint =
+      !!me &&
+      me.status === 'alive' &&
+      view.players.some((p) => p.id !== localId && p.status === 'down' && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange);
+
+    this.renderer.render(view, {
+      localId,
+      mode: this.o.mode,
+      roomCode: this.o.roomCode,
+      effects: this.effects,
+      dt,
+      mouseX: this.input.mouseX,
+      mouseY: this.input.mouseY,
+      skipAnimDetectId: this.o.mode === 'guest' ? localId : null,
+      localTool: this.localTool,
+      reviveHint,
+      interactHint: me && me.status === 'alive' ? this.interactHint(me) : null,
+      syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
+    });
+  };
+
+  /** ゲスト：射撃・近接の見た目を即時に出す（判定はホスト） */
+  private predictLocalActions(frame: InputFrame, status: PlayerSnap['status'], me: PlayerSnap | undefined, dt: number): void {
+    this.localFireCd -= dt;
+    this.localSwingCd = Math.max(0, this.localSwingCd - dt);
+    if (!frame.fire || status !== 'alive' || !me || !this.pred) {
+      if (this.localFireCd < 0) this.localFireCd = 0;
+      return;
+    }
+    if (this.localTool === Tool.Gun) {
+      const mag = me.inv.mag - this.localShotSeqs.length;
+      if (me.reloadT > 0 || mag <= 0) {
+        if (this.localFireCd < 0) this.localFireCd = 0;
+        return;
+      }
+      if (this.localFireCd <= 0) {
+        this.localFireCd += GUN.fireInterval;
+        const a = this.localAim + (Math.random() - 0.5) * 2 * GUN.spread;
+        const px = this.pred.x + this.predErr.x;
+        const py = this.pred.y + this.predErr.y;
+        this.localBullets.push({
+          id: this.localBulletId--,
+          owner: this.o.localId,
+          x: px + Math.cos(this.localAim) * GUN.muzzle,
+          y: py + Math.sin(this.localAim) * GUN.muzzle,
+          vx: Math.cos(a) * GUN.bulletSpeed,
+          vy: Math.sin(a) * GUN.bulletSpeed,
+          life: GUN.bulletLife,
+        });
+        this.localShotSeqs.push(frame.seq);
+        this.renderer.triggerShot(this.o.localId);
+      }
+    } else if (this.localTool === Tool.Axe && this.localSwingCd <= 0) {
+      this.localSwingCd = AXE.interval;
+      this.renderer.triggerSwing(this.o.localId);
+    }
+  }
+
+  private interactHint(me: PlayerSnap): string | null {
+    const ptx = Math.floor(me.x / TILE);
+    const pty = Math.floor(me.y / TILE);
+    let best: string | null = null;
+    let bd = PLAYER.interactRange;
+    for (let ty = pty - 2; ty <= pty + 2; ty++)
+      for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
+        const ob = this.world.objAt(tx, ty);
+        if (!ob || !ob.ready || (ob.kind !== 'crate' && ob.kind !== 'box')) continue;
+        const d = Math.hypot((tx + 0.5) * TILE - me.x, (ty + 0.5) * TILE - me.y);
+        if (d < bd) {
+          bd = d;
+          best = ob.kind === 'crate' ? '[F] 物資クレートを調べる' : '[F] 収納箱を開ける';
+        }
+      }
+    if (best) return best;
+    if (this.localTool !== Tool.Axe) {
+      for (const dist of [30, 52]) {
+        const ob = this.world.objAt(
+          Math.floor((me.x + Math.cos(this.localAim) * dist) / TILE),
+          Math.floor((me.y + Math.sin(this.localAim) * dist) / TILE),
+        );
+        if (ob && (ob.kind === 'tree' || ob.kind === 'car') && ob.hp > 0) {
+          return ob.kind === 'tree' ? '[2] 斧に持ち替えて木を伐採（木材）' : '[2] 斧に持ち替えて廃車を解体（鉄スクラップ）';
+        }
+      }
+    }
+    return null;
+  }
+
+  private drawWaiting(): void {
+    const ctx = this.o.canvas.getContext('2d')!;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0b0d10';
+    ctx.fillRect(0, 0, this.o.canvas.width, this.o.canvas.height);
+    ctx.fillStyle = '#aab4c8';
+    ctx.font = '20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('ホストからの同期を待っています…', this.o.canvas.width / 2, this.o.canvas.height / 2);
+  }
+
+  private onResize = () => this.renderer.resize();
+}

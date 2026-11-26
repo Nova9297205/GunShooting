@@ -24,8 +24,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            zombie/package-lock.json
       - run: npm ci
       - run: npm run build
+      # ゾンビサバイバル（DEAD NIGHTS 2D）を /zombie/ に配置
+      - run: npm ci
+        working-directory: zombie
+      - run: npm run build
+        working-directory: zombie
+      - run: cp -r zombie/dist dist/zombie
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
