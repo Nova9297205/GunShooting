@@ -402,6 +402,222 @@ export class VectorArt implements ArtSet {
         ctx.fillRect(x + 5, y + 6, 30, 2);
         return true;
       }
+      case 'door': {
+        // 壁の向き：左右が壁なら横向きのドア
+        const horiz = tall(-1, 0) || tall(1, 0);
+        const open = o.ready === 1;
+        const dmg = o.hp / o.maxHp;
+        ctx.save();
+        ctx.translate(cx, cy);
+        if (!horiz) ctx.rotate(Math.PI / 2);
+        // 戸枠
+        ctx.fillStyle = '#3d3a35';
+        ctx.fillRect(-20, -7, 4, 14);
+        ctx.fillRect(16, -7, 4, 14);
+        if (open) {
+          // 開いた扉：蝶番を軸に90度回転
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          ctx.fillRect(-14, -2, 6, 32);
+          ctx.fillStyle = '#6b5236';
+          ctx.fillRect(-17, -2, 6, 32);
+          ctx.fillStyle = '#4f3c28';
+          ctx.fillRect(-17, -2, 6, 3);
+        } else {
+          ctx.fillStyle = 'rgba(0,0,0,0.35)';
+          ctx.fillRect(-15, 2, 32, 9);
+          const g = ctx.createLinearGradient(0, -5, 0, 5);
+          g.addColorStop(0, '#7a5e3e');
+          g.addColorStop(1, '#5a4430');
+          ctx.fillStyle = g;
+          ctx.fillRect(-16, -5, 32, 10);
+          ctx.strokeStyle = 'rgba(30,20,12,0.6)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(-15.5, -4.5, 31, 9);
+          ctx.fillStyle = '#b8a888';
+          ctx.fillRect(9, -1.5, 3, 3); // ドアノブ
+          if (dmg < 0.7) {
+            ctx.strokeStyle = 'rgba(10,8,6,0.7)';
+            ctx.beginPath();
+            ctx.moveTo(-6, -5);
+            ctx.lineTo(-2, 0);
+            ctx.lineTo(-7, 5);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+        return true;
+      }
+      case 'shelf': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#3c3a36';
+        ctx.fillRect(x + 3, y + 6, 34, 28);
+        ctx.fillStyle = '#56524b';
+        ctx.fillRect(x + 3, y + 6, 34, 3);
+        ctx.fillRect(x + 3, y + 19, 34, 2);
+        // 棚の上の箱や缶（探索済みはまばら）
+        const n = o.ready ? 6 : 2;
+        for (let i = 0; i < n; i++) {
+          const hx = hash2(o.id, i, 3);
+          ctx.fillStyle = ['#7a6a52', '#6b7058', '#8a7d68', '#5e6a70', '#7d5a48'][i % 5];
+          ctx.fillRect(x + 5 + hx * 26, y + (i % 2 ? 22 : 10), 5 + hash2(o.id, i, 4) * 3, 7);
+        }
+        return true;
+      }
+      case 'cabinet': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#9a9890';
+        ctx.fillRect(x + 6, y + 6, 28, 28);
+        ctx.fillStyle = '#b4b1a8';
+        ctx.fillRect(x + 6, y + 6, 28, 4);
+        ctx.strokeStyle = '#6b6962';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 6.5, y + 6.5, 27, 27);
+        ctx.beginPath();
+        ctx.moveTo(x + 20, y + 10);
+        ctx.lineTo(x + 20, y + 34);
+        ctx.stroke();
+        ctx.fillStyle = '#8a3a30';
+        ctx.fillRect(x + 16, y + 15, 8, 3);
+        ctx.fillRect(x + 18.5, y + 12.5, 3, 8);
+        return true;
+      }
+      case 'locker': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#4f5a4a';
+        ctx.fillRect(x + 5, y + 4, 30, 32);
+        ctx.fillStyle = '#5f6b58';
+        ctx.fillRect(x + 5, y + 4, 30, 3);
+        ctx.strokeStyle = '#353d32';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 20, y + 7);
+        ctx.lineTo(x + 20, y + 36);
+        ctx.stroke();
+        ctx.fillStyle = '#2f362c';
+        for (let i = 0; i < 3; i++) {
+          ctx.fillRect(x + 9, y + 10 + i * 3, 8, 1);
+          ctx.fillRect(x + 23, y + 10 + i * 3, 8, 1);
+        }
+        ctx.fillStyle = '#a89c80';
+        ctx.fillRect(x + 17, y + 22, 2, 4);
+        ctx.fillRect(x + 21, y + 22, 2, 4);
+        return true;
+      }
+      case 'wcase': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#3b4030';
+        ctx.fillRect(x + 2, y + 11, 36, 18);
+        ctx.fillStyle = '#4b5240';
+        ctx.fillRect(x + 2, y + 11, 36, 4);
+        ctx.fillStyle = '#9a8f70';
+        ctx.fillRect(x + 8, y + 18, 4, 4);
+        ctx.fillRect(x + 28, y + 18, 4, 4);
+        ctx.fillStyle = '#a8a080';
+        ctx.fillRect(x + 14, y + 19, 12, 2);
+        if (o.ready) {
+          const pulse = 0.25 + Math.sin(t * 3 + o.id) * 0.15;
+          ctx.strokeStyle = `rgba(210,190,130,${pulse})`;
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(x + 1, y + 10, 38, 20);
+        }
+        return true;
+      }
+      case 'fridge': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#b0ad9f';
+        ctx.fillRect(x + 6, y + 4, 28, 32);
+        ctx.fillStyle = '#c6c3b6';
+        ctx.fillRect(x + 6, y + 4, 28, 3);
+        ctx.strokeStyle = '#7d7a6e';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 6, y + 15);
+        ctx.lineTo(x + 34, y + 15);
+        ctx.stroke();
+        ctx.fillStyle = '#6b6860';
+        ctx.fillRect(x + 28, y + 9, 2, 4);
+        ctx.fillRect(x + 28, y + 19, 2, 8);
+        ctx.fillStyle = 'rgba(90,70,40,0.35)'; // 錆・汚れ
+        ctx.fillRect(x + 8, y + 28, 10, 6);
+        return true;
+      }
+      case 'desk': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#5e4a36';
+        ctx.fillRect(x + 2, y + 8, 36, 22);
+        ctx.fillStyle = '#6e5840';
+        ctx.fillRect(x + 2, y + 8, 36, 3);
+        ctx.fillStyle = '#d6d0c0';
+        ctx.save();
+        ctx.translate(x + 12, y + 18);
+        ctx.rotate(hash2(o.id, 1) - 0.5);
+        ctx.fillRect(-5, -4, 10, 8);
+        ctx.restore();
+        ctx.fillStyle = '#3a3a3a';
+        ctx.beginPath();
+        ctx.arc(x + 30, y + 16, 3, 0, Math.PI * 2);
+        ctx.fill();
+        return true;
+      }
+      case 'bed': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#4a4036';
+        ctx.fillRect(x + 5, y + 2, 30, 36);
+        ctx.fillStyle = '#8a8676';
+        ctx.fillRect(x + 7, y + 4, 26, 32);
+        ctx.fillStyle = '#b9b3a0';
+        ctx.fillRect(x + 9, y + 5, 22, 7); // 枕
+        ctx.fillStyle = '#5e6650';
+        ctx.fillRect(x + 7, y + 17, 26, 19); // 毛布
+        ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        ctx.fillRect(x + 7, y + 17, 26, 2);
+        if (hash2(o.id, 9) > 0.7) {
+          ctx.fillStyle = 'rgba(80,20,15,0.5)';
+          ctx.beginPath();
+          ctx.ellipse(x + 22, y + 26, 6, 4, 0.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        return true;
+      }
+      case 'rubble': {
+        for (let i = 0; i < 7; i++) {
+          const hx = hash2(o.id, i, 1);
+          const hy = hash2(o.id, i, 2);
+          const sz = 4 + hash2(o.id, i, 3) * 7;
+          ctx.fillStyle = 'rgba(0,0,0,0.25)';
+          ctx.fillRect(x + 4 + hx * 26 + 2, y + 4 + hy * 26 + 3, sz, sz * 0.7);
+          ctx.fillStyle = ['#6e6a62', '#5d5952', '#7d776c'][i % 3];
+          ctx.fillRect(x + 4 + hx * 26, y + 4 + hy * 26, sz, sz * 0.7);
+        }
+        return true;
+      }
+      case 'sandbag': {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(x + 4, y + 12, 38, 26);
+        for (let row = 0; row < 3; row++)
+          for (let k = 0; k < 2; k++) {
+            const bx = x + 2 + k * 18 + (row % 2) * 9 - 4;
+            ctx.fillStyle = row === 1 ? '#8a7d5e' : '#958866';
+            ctx.beginPath();
+            ctx.ellipse(bx + 9, y + 10 + row * 9, 9, 5, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(50,40,25,0.4)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
+        return true;
+      }
+      case 'stash': {
+        this.propShadow(ctx, x, y);
+        ctx.fillStyle = '#4a4f55';
+        ctx.fillRect(x + 3, y + 9, 34, 23);
+        ctx.fillStyle = '#5c6268';
+        ctx.fillRect(x + 3, y + 9, 34, 6);
+        ctx.fillStyle = '#8a8270';
+        ctx.fillRect(x + 3, y + 14, 34, 2);
+        ctx.fillRect(x + 18, y + 13, 4, 5);
+        return true;
+      }
       case 'bench': {
         ctx.fillStyle = 'rgba(0,0,0,0.35)';
         ctx.fillRect(x + 6, y + 12, 36, 26);
@@ -512,6 +728,11 @@ export class VectorArt implements ArtSet {
       default:
         return false;
     }
+  }
+
+  private propShadow(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(x + 8, y + 10, 32, 30);
   }
 
   /** 揺らめく炎（加算合成） */
@@ -1036,15 +1257,21 @@ export class VectorArt implements ArtSet {
     const body = down ? '#5d6470' : color;
     const skin = '#e3c7a8';
 
-    // バックパック
+    // バックパック（寝袋付き）
     ctx.fillStyle = outline;
-    roundRect(ctx, -r - 4, -9, 11, 18, 3);
+    roundRect(ctx, -r - 6, -10, 14, 20, 4);
     ctx.fill();
-    ctx.fillStyle = '#5a4630';
-    roundRect(ctx, -r - 3, -8, 9, 16, 3);
+    ctx.fillStyle = '#4e4634';
+    roundRect(ctx, -r - 5, -9, 12, 18, 4);
     ctx.fill();
-    ctx.fillStyle = '#6e573b';
-    ctx.fillRect(-r - 2, -6, 7, 3);
+    ctx.fillStyle = '#5e5440';
+    ctx.fillRect(-r - 4, -7, 9, 4);
+    ctx.fillStyle = '#4a5440';
+    roundRect(ctx, -r - 8, -9, 4, 18, 2); // 丸めた寝袋
+    ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.fillRect(-r - 8, -3, 4, 1.5);
+    ctx.fillRect(-r - 8, 3, 4, 1.5);
 
     // 武器と腕
     if (!down) this.drawWeapon(ctx, p, anim, body, skin, outline, t);
@@ -1062,7 +1289,17 @@ export class VectorArt implements ArtSet {
     ctx.beginPath();
     ctx.ellipse(1, -1, 7, r - 3, 0, 0, Math.PI * 2);
     ctx.fill();
-    // 頭（帽子）
+    // タクティカルベスト（胸のポーチと肩のストラップ）
+    if (!down) {
+      ctx.fillStyle = 'rgba(30,32,26,0.85)';
+      ctx.fillRect(-4, -r + 3, 3, 2 * r - 6);
+      ctx.fillStyle = '#3d4234';
+      roundRect(ctx, 1, -9, 5, 6, 1.5);
+      ctx.fill();
+      roundRect(ctx, 1, 3, 5, 6, 1.5);
+      ctx.fill();
+    }
+    // 頭と帽子（プレイヤーごとに違う：ヘルメット / キャップ / ニット帽）
     ctx.fillStyle = outline;
     ctx.beginPath();
     ctx.arc(2, 0, 7.5, 0, Math.PI * 2);
@@ -1071,11 +1308,39 @@ export class VectorArt implements ArtSet {
     ctx.beginPath();
     ctx.arc(2, 0, 6.5, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = shade(body.startsWith('#') ? body : '#888888', -0.45);
-    ctx.beginPath();
-    ctx.arc(0.5, 0, 6.6, Math.PI * 0.55, Math.PI * 1.45);
-    ctx.fill();
-    ctx.fillRect(4, -4, 4, 8); // つば
+    const hat = p.id % 3;
+    if (hat === 0) {
+      // ヘルメット
+      ctx.fillStyle = outline;
+      ctx.beginPath();
+      ctx.arc(0.5, 0, 8.2, 0, Math.PI * 2);
+      ctx.fill();
+      const hg = ctx.createRadialGradient(-1, -2, 1, 0.5, 0, 8);
+      hg.addColorStop(0, '#6e7558');
+      hg.addColorStop(1, '#474c38');
+      ctx.fillStyle = hg;
+      ctx.beginPath();
+      ctx.arc(0.5, 0, 7.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(-4, -0.8, 9, 1.6); // ヘルメットのバンド
+    } else if (hat === 1) {
+      // キャップ（つば付き）
+      ctx.fillStyle = shade(body.startsWith('#') ? body : '#888888', -0.4);
+      ctx.beginPath();
+      ctx.arc(0.5, 0, 6.8, Math.PI * 0.5, Math.PI * 1.5);
+      ctx.fill();
+      ctx.fillRect(0, -6.8, 3, 13.6);
+      ctx.fillRect(4, -4.5, 5, 9);
+    } else {
+      // ニット帽
+      ctx.fillStyle = '#5a4a3c';
+      ctx.beginPath();
+      ctx.arc(0.5, 0, 7, Math.PI * 0.45, Math.PI * 1.55);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(-5, -0.8, 6, 1.6);
+    }
     ctx.restore();
   }
 

@@ -15,7 +15,8 @@ export const INTERP_DELAY = 0.1;
 export const MAX_PLAYERS = 3;
 export const NAME_MAX = 10;
 
-export const PLAYER_COLORS = ['#4da3ff', '#5be37d', '#ffd84d'];
+/** プレイヤー識別色（彩度を落としたミリタリー調：スチールブルー / オリーブ / オーカー） */
+export const PLAYER_COLORS = ['#7f9cb8', '#93a86a', '#c4a35c'];
 
 // ---------------- 時間（昼夜サイクル） ----------------
 /** 06:00〜20:00 の昼（実時間秒） */
@@ -125,9 +126,9 @@ export interface ZombieStats {
 }
 
 export const ZOMBIE: Record<ZombieType, ZombieStats> = {
-  walker: { radius: 14, hp: 60, daySpeed: 42, nightSpeed: 88, damage: 10, wallDamage: 18, attackInterval: 1.0, color: '#5f7d4a', skin: '#9bb07a' },
-  runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#7a5a4a', skin: '#c2a080' },
-  brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#4f5b3c', skin: '#7f9160' },
+  walker: { radius: 14, hp: 60, daySpeed: 42, nightSpeed: 88, damage: 10, wallDamage: 18, attackInterval: 1.0, color: '#565a4a', skin: '#8e9278' },
+  runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#5c5048', skin: '#a2968a' },
+  brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#46483e', skin: '#7a7e6a' },
 };
 
 export const ZOMBIE_SENSE = {
@@ -153,6 +154,17 @@ export const OBJ_HP: Record<ObjKind, number> = {
   barbed: 140,
   turret: 320,
   chest: 1,
+  door: 110,
+  shelf: 1,
+  cabinet: 1,
+  locker: 1,
+  wcase: 1,
+  fridge: 1,
+  desk: 1,
+  bed: 1,
+  rubble: 1,
+  sandbag: 400,
+  stash: 1,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -168,13 +180,23 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
   'bench',
   'turret',
   'chest',
+  'door',
+  'shelf',
+  'cabinet',
+  'locker',
+  'wcase',
+  'fridge',
+  'desk',
+  'bed',
+  'sandbag',
+  'stash',
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */
-export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench', 'chest']);
+export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench', 'chest', 'door', 'shelf', 'locker', 'fridge', 'sandbag', 'stash']);
 
 /** ゾンビが破壊して進む建築物 */
-export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall', 'turret']);
+export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall', 'turret', 'door']);
 
 export const BUILD_COST: Record<BuildKind, { wood: number; scrap: number }> = {
   woodWall: { wood: 5, scrap: 0 },
@@ -275,7 +297,14 @@ export const T_WALL = 1; // 廃墟の壁（破壊不可）
 export const T_ROAD = 2;
 export const T_FLOOR = 3;
 export const T_DIRT = 4;
+export const T_WINDOW = 5; // ガラス窓（通れないが、見通せて撃ち抜ける）
+export const T_WOOD = 6; // フローリング
+export const T_TILE = 7; // タイル床
+export const T_FENCE = 8; // 金網フェンス（通れないが見通せる）
 
-/** セーフハウス（タイル座標） */
-export const SAFEHOUSE = { x: 34, y: 25, w: 12, h: 10 };
-export const CAMPFIRE_TILE = { x: 40, y: 30 };
+/** 屋内の床 */
+export const INDOOR_FLOORS: ReadonlySet<number> = new Set([T_FLOOR, T_WOOD, T_TILE]);
+
+/** 拠点の敷地（タイル座標）：フェンスで囲まれた安全地帯 */
+export const SAFEHOUSE = { x: 31, y: 21, w: 18, h: 17 };
+export const CAMPFIRE_TILE = { x: 44, y: 33 };

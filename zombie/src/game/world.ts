@@ -1,7 +1,8 @@
 // ============================================================
 // タイルワールド（地形＋オブジェクト）とシード付きマップ生成
 //   地形はシードから決定的に生成（ホスト・ゲストで同一）
-//   オブジェクト（木・車・クレート・建築物）はホストが管理し差分同期
+//   建物は「外壁・内壁・ドア・ガラス窓・床材・家具」を持つ部屋割り構造
+//   オブジェクト（ドア・家具・木・車など）はホストが管理し差分同期
 // ============================================================
 import type { ObjKind, ObjSnap } from '../types';
 import {
@@ -13,10 +14,14 @@ import {
   SAFEHOUSE,
   SOLID_KINDS,
   T_DIRT,
+  T_FENCE,
   T_FLOOR,
   T_GRASS,
   T_ROAD,
+  T_TILE,
   T_WALL,
+  T_WINDOW,
+  T_WOOD,
   TILE,
 } from './constants';
 
@@ -31,16 +36,39 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
-/** オブジェクトが「存在して」衝突するか（伐採済みの木・解体済みの車は通れる） */
+/** オブジェクトが通行を妨げるか（開いたドア・伐採済みの木・解体済みの車は通れる） */
 export function objIsSolid(o: ObjSnap): boolean {
   if (!SOLID_KINDS.has(o.kind)) return false;
   if (o.kind === 'tree' || o.kind === 'car') return o.hp > 0;
+  if (o.kind === 'door') return o.ready === 0;
   return true;
+}
+
+/** 名前付きロケーション（探索先）。tier が高いほど遠く危険でレア物資が出る */
+export interface Location {
+  name: string;
+  kind: 'house' | 'market' | 'hospital' | 'police' | 'military' | 'gas' | 'base' | 'ruin';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  tier: number;
+}
+
+/** 屋根を持つ建物（中に入るまで屋根で覆う） */
+export interface Building {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** 屋根の色の種類 */
+  roof: number;
 }
 
 export class TileWorld<T extends ObjSnap = ObjSnap> {
   terrain: Uint8Array;
   locations: Location[] = [];
+  buildings: Building[] = [];
   objects = new Map<number, T>();
   private grid: Int32Array; // タイル → オブジェクトID（0 = なし）
 
@@ -78,15 +106,16 @@ export class TileWorld<T extends ObjSnap = ObjSnap> {
     this.objects.delete(id);
   }
 
-  /** 移動を遮るタイルか */
+  /** 移動を遮るタイルか（壁・窓・フェンス・閉じたドア・家具） */
   solid(tx: number, ty: number): boolean {
     if (!this.inBounds(tx, ty)) return true;
-    if (this.terrain[ty * MAP_W + tx] === T_WALL) return true;
+    const t = this.terrain[ty * MAP_W + tx];
+    if (t === T_WALL || t === T_WINDOW || t === T_FENCE) return true;
     const o = this.objAt(tx, ty);
     return !!o && objIsSolid(o);
   }
 
-  /** プレイヤーの弾を止めるタイルか */
+  /** 弾を止めるタイルか（窓・フェンス越しには撃てる） */
   blocksBullet(tx: number, ty: number): boolean {
     if (!this.inBounds(tx, ty)) return true;
     if (this.terrain[ty * MAP_W + tx] === T_WALL) return true;
@@ -94,16 +123,18 @@ export class TileWorld<T extends ObjSnap = ObjSnap> {
     return !!o && BULLET_BLOCK_KINDS.has(o.kind) && objIsSolid(o);
   }
 
-  /** 視線を遮るか（廃墟の壁・建築壁・木・車） */
+  /** 視線を遮るか（壁と閉じたドアだけ。窓・フェンス・家具越しには見える） */
   blocksSight(tx: number, ty: number): boolean {
-    return this.solid(tx, ty);
+    if (!this.inBounds(tx, ty)) return true;
+    if (this.terrain[ty * MAP_W + tx] === T_WALL) return true;
+    const o = this.objAt(tx, ty);
+    return !!o && o.kind === 'door' && o.ready === 0;
   }
 
   /** 2点間の視線チェック（サンプリング） */
   lineClear(x1: number, y1: number, x2: number, y2: number): boolean {
     const d = Math.hypot(x2 - x1, y2 - y1);
     const steps = Math.ceil(d / (TILE / 3));
-    // 始点・終点のタイル自体（タレットや壁際のゾンビ）は判定しない
     const sx = Math.floor(x1 / TILE);
     const sy = Math.floor(y1 / TILE);
     const ex = Math.floor(x2 / TILE);
@@ -117,30 +148,12 @@ export class TileWorld<T extends ObjSnap = ObjSnap> {
     }
     return true;
   }
-}
 
-// ---------------- マップ生成 ----------------
-
-/** 名前付きロケーション（探索先）。tier が高いほど遠く危険でレア物資が出る */
-export interface Location {
-  name: string;
-  kind: 'house' | 'gas' | 'police' | 'military' | 'ruin';
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  tier: number;
-}
-
-export interface GeneratedWorld {
-  terrain: Uint8Array;
-  objs: ObjSnap[];
-  locations: Location[];
-}
-
-export function generateTerrain(seed: number): { terrain: Uint8Array; locations: Location[] } {
-  const g = generateWorld(seed);
-  return { terrain: g.terrain, locations: g.locations };
+  /** タイルが屋内か（屋根の下） */
+  buildingAt(tx: number, ty: number): Building | null {
+    for (const b of this.buildings) if (tx > b.x && ty > b.y && tx < b.x + b.w - 1 && ty < b.y + b.h - 1) return b;
+    return null;
+  }
 }
 
 /** タイルがどのロケーションに含まれるか */
@@ -149,235 +162,370 @@ export function locationAt(locs: Location[], tx: number, ty: number): Location |
   return null;
 }
 
+// ============================================================
+// マップ生成
+// ============================================================
+
+export interface GeneratedWorld {
+  terrain: Uint8Array;
+  objs: ObjSnap[];
+  locations: Location[];
+  buildings: Building[];
+}
+
+export function generateTerrain(seed: number): { terrain: Uint8Array; locations: Location[]; buildings: Building[] } {
+  const g = generateWorld(seed);
+  return { terrain: g.terrain, locations: g.locations, buildings: g.buildings };
+}
+
+type BuildingKind = Location['kind'];
+
+/** 建物の種類ごとの家具の出現表 [種類, 重み] */
+const PROPS: Record<string, [ObjKind, number][]> = {
+  house: [['shelf', 3], ['bed', 2], ['fridge', 1], ['desk', 2], ['locker', 2], ['cabinet', 1], ['crate', 1]],
+  market: [['shelf', 6], ['fridge', 3], ['crate', 2], ['desk', 1]],
+  hospital: [['bed', 4], ['cabinet', 4], ['desk', 2], ['locker', 2], ['shelf', 1]],
+  police: [['locker', 4], ['desk', 3], ['wcase', 2], ['cabinet', 1], ['shelf', 1]],
+  military: [['wcase', 3], ['locker', 3], ['mcrate', 3], ['crate', 2], ['bed', 1]],
+  gas: [['shelf', 4], ['fridge', 2], ['desk', 1], ['crate', 1]],
+  base: [],
+  ruin: [['crate', 2], ['shelf', 1], ['rubble', 3]],
+};
+
 export function generateWorld(seed: number): GeneratedWorld {
   const rnd = mulberry32(seed);
   const ri = (a: number, b: number) => a + Math.floor(rnd() * (b - a + 1));
   const terrain = new Uint8Array(MAP_W * MAP_H);
   const objs: ObjSnap[] = [];
   const occupied = new Uint8Array(MAP_W * MAP_H);
+  const reserved = new Uint8Array(MAP_W * MAP_H); // 建物・道路の予約
+  const locations: Location[] = [];
+  const buildings: Building[] = [];
   let nextId = 1;
   const idx = (x: number, y: number) => y * MAP_W + x;
+  const inMap = (x: number, y: number) => x >= 0 && y >= 0 && x < MAP_W && y < MAP_H;
   const setT = (x: number, y: number, v: number) => {
-    if (x >= 0 && y >= 0 && x < MAP_W && y < MAP_H) terrain[idx(x, y)] = v;
+    if (inMap(x, y)) terrain[idx(x, y)] = v;
   };
-  const addObj = (kind: ObjKind, tx: number, ty: number) => {
-    if (tx < 1 || ty < 1 || tx >= MAP_W - 1 || ty >= MAP_H - 1) return;
-    if (occupied[idx(tx, ty)] || terrain[idx(tx, ty)] === T_WALL) return;
+  const tAt = (x: number, y: number) => (inMap(x, y) ? terrain[idx(x, y)] : T_WALL);
+  const addObj = (kind: ObjKind, tx: number, ty: number, ready = 1): ObjSnap | null => {
+    if (tx < 1 || ty < 1 || tx >= MAP_W - 1 || ty >= MAP_H - 1) return null;
+    if (occupied[idx(tx, ty)]) return null;
+    const t = terrain[idx(tx, ty)];
+    if (t === T_WALL || t === T_WINDOW || t === T_FENCE) return null;
     occupied[idx(tx, ty)] = 1;
     const hp = OBJ_HP[kind];
-    objs.push({ id: nextId++, kind, tx, ty, hp, maxHp: hp, ready: 1 });
+    const o: ObjSnap = { id: nextId++, kind, tx, ty, hp, maxHp: hp, ready };
+    objs.push(o);
+    return o;
   };
   const sh = SAFEHOUSE;
-  const nearSafehouse = (x: number, y: number, m: number) =>
-    x >= sh.x - m && x < sh.x + sh.w + m && y >= sh.y - m && y < sh.y + sh.h + m;
 
-  // 土のまだら模様
-  for (let i = 0; i < 40; i++) {
+  // ---- 地面のまだら模様 ----
+  for (let i = 0; i < 46; i++) {
     const cx = ri(0, MAP_W - 1);
     const cy = ri(0, MAP_H - 1);
-    const r = ri(2, 5);
+    const r = ri(2, 6);
     for (let y = cy - r; y <= cy + r; y++)
       for (let x = cx - r; x <= cx + r; x++)
         if ((x - cx) ** 2 + (y - cy) ** 2 <= r * r && rnd() < 0.8) setT(x, y, T_DIRT);
   }
 
-  // 道路（十字＋ランダム1本）
-  const roadY = sh.y + Math.floor(sh.h / 2) - 1;
+  // ---- 道路（十字＋北と南の横道＋東の縦道） ----
+  const roadY = sh.y + Math.floor(sh.h / 2);
   const roadX = sh.x + Math.floor(sh.w / 2) - 1;
-  for (let x = 0; x < MAP_W; x++) for (let k = 0; k < 2; k++) setT(x, roadY + k, T_ROAD);
-  for (let y = 0; y < MAP_H; y++) for (let k = 0; k < 2; k++) setT(roadX + k, y, T_ROAD);
-  const extraY = rnd() < 0.5 ? ri(6, 14) : ri(MAP_H - 15, MAP_H - 7);
-  for (let x = 0; x < MAP_W; x++) for (let k = 0; k < 2; k++) setT(x, extraY + k, T_ROAD);
-  const extraX = rnd() < 0.5 ? ri(8, 18) : ri(MAP_W - 19, MAP_W - 9);
-  for (let y = 0; y < MAP_H; y++) for (let k = 0; k < 2; k++) setT(extraX + k, y, T_ROAD);
+  const road = (x0: number, y0: number, x1: number, y1: number) => {
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) {
+        setT(x, y, T_ROAD);
+        if (inMap(x, y)) reserved[idx(x, y)] = 1;
+      }
+  };
+  road(0, roadY, MAP_W - 1, roadY + 1);
+  road(roadX, 0, roadX + 1, MAP_H - 1);
+  road(3, 18, MAP_W - 4, 19);
+  road(3, 46, MAP_W - 4, 47);
+  road(60, 0, 61, MAP_H - 1);
 
-  // ---- 名前付きロケーション（中心から遠いほど高ランク） ----
-  const locations: Location[] = [];
-  const overlapsLoc = (x: number, y: number, w: number, h: number, m: number) =>
-    locations.some((r) => x < r.x + r.w + m && x + w + m > r.x && y < r.y + r.h + m && y + h + m > r.y);
-  /** 建物を刻む：外周を壁、内側を床。崩れた壁と入口を作る */
-  const building = (x: number, y: number, w: number, h: number, broken: number, doors: number, part: boolean) => {
+  const overlaps = (x: number, y: number, w: number, h: number, m: number) => {
+    for (let yy = y - m; yy < y + h + m; yy++)
+      for (let xx = x - m; xx < x + w + m; xx++) if (!inMap(xx, yy) || reserved[idx(xx, yy)]) return true;
+    return false;
+  };
+  const reserve = (x: number, y: number, w: number, h: number) => {
+    for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (inMap(xx, yy)) reserved[idx(xx, yy)] = 1;
+  };
+  /** 目標地点の近くで空いている場所を探す */
+  const findSpot = (cx: number, cy: number, w: number, h: number, spread: number): { x: number; y: number } | null => {
+    for (let r = 0; r <= spread; r++)
+      for (let t = 0; t < 16; t++) {
+        const x = cx - Math.floor(w / 2) + ri(-r, r);
+        const y = cy - Math.floor(h / 2) + ri(-r, r);
+        if (x < 2 || y < 2 || x + w > MAP_W - 2 || y + h > MAP_H - 2) continue;
+        if (!overlaps(x, y, w, h, 1)) return { x, y };
+      }
+    return null;
+  };
+
+  // ---- 建物を刻む：外壁・BSPで部屋割り・内壁のドア・外のドア・窓・家具 ----
+  const makeBuilding = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    kind: BuildingKind,
+    floor: number,
+    opts: { minRoom?: number; windows?: number; doors?: number; propRate?: number; roof?: number } = {},
+  ) => {
+    reserve(x - 1, y - 1, w + 2, h + 2);
+    buildings.push({ x, y, w, h, roof: opts.roof ?? ri(0, 3) });
     for (let yy = y; yy < y + h; yy++)
       for (let xx = x; xx < x + w; xx++) {
         const edge = xx === x || yy === y || xx === x + w - 1 || yy === y + h - 1;
-        setT(xx, yy, edge && rnd() > broken ? T_WALL : T_FLOOR);
+        setT(xx, yy, edge ? T_WALL : floor);
       }
-    for (let d = 0; d < doors; d++) {
-      const side = d % 4 === 0 ? ri(0, 3) : (d + ri(0, 3)) % 4;
-      const p = side < 2 ? ri(x + 1, x + w - 3) : ri(y + 1, y + h - 3);
-      for (let k = 0; k < 2; k++) {
-        if (side === 0) setT(p + k, y, T_FLOOR);
-        if (side === 1) setT(p + k, y + h - 1, T_FLOOR);
-        if (side === 2) setT(x, p + k, T_FLOOR);
-        if (side === 3) setT(x + w - 1, p + k, T_FLOOR);
+    const doorTiles: [number, number][] = [];
+    // BSPで部屋を分割（内壁には必ずドアを1つ）
+    const rooms: { x: number; y: number; w: number; h: number }[] = [];
+    const minRoom = opts.minRoom ?? 4;
+    const split = (rx: number, ry: number, rw: number, rh: number, depth: number) => {
+      const canV = rw >= minRoom * 2 + 1;
+      const canH = rh >= minRoom * 2 + 1;
+      if (depth > 3 || (!canV && !canH) || (depth > 0 && rnd() < 0.2)) {
+        rooms.push({ x: rx, y: ry, w: rw, h: rh });
+        return;
+      }
+      const vertical = canV && (!canH || rw > rh || (rw === rh && rnd() < 0.5));
+      if (vertical) {
+        const sx = rx + ri(minRoom, rw - minRoom - 1);
+        for (let yy = ry; yy < ry + rh; yy++) setT(sx, yy, T_WALL);
+        const dy = ri(ry, ry + rh - 1);
+        setT(sx, dy, floor);
+        doorTiles.push([sx, dy]);
+        split(rx, ry, sx - rx, rh, depth + 1);
+        split(sx + 1, ry, rx + rw - sx - 1, rh, depth + 1);
+      } else {
+        const sy = ry + ri(minRoom, rh - minRoom - 1);
+        for (let xx = rx; xx < rx + rw; xx++) setT(xx, sy, T_WALL);
+        const dx = ri(rx, rx + rw - 1);
+        setT(dx, sy, floor);
+        doorTiles.push([dx, sy]);
+        split(rx, ry, rw, sy - ry, depth + 1);
+        split(rx, sy + 1, rw, ry + rh - sy - 1, depth + 1);
+      }
+    };
+    split(x + 1, y + 1, w - 2, h - 2, 0);
+    // 外のドア
+    const nDoors = opts.doors ?? 2;
+    const sides = [0, 1, 2, 3].sort(() => rnd() - 0.5);
+    for (let d = 0; d < nDoors; d++) {
+      const side = sides[d % 4];
+      for (let tries = 0; tries < 12; tries++) {
+        const px = side < 2 ? ri(x + 1, x + w - 2) : side === 2 ? x : x + w - 1;
+        const py = side >= 2 ? ri(y + 1, y + h - 2) : side === 0 ? y : y + h - 1;
+        const ix = side === 2 ? px + 1 : side === 3 ? px - 1 : px;
+        const iy = side === 0 ? py + 1 : side === 1 ? py - 1 : py;
+        if (tAt(ix, iy) === T_WALL) continue;
+        setT(px, py, floor);
+        doorTiles.push([px, py]);
+        break;
       }
     }
-    if (part && w >= 7) {
-      const mx = x + Math.floor(w / 2);
-      const gap = y + 1 + ri(0, h - 4);
-      for (let yy = y + 1; yy < y + h - 1; yy++) if (yy !== gap && yy !== gap + 1) setT(mx, yy, T_WALL);
+    // ガラス窓
+    const winRate = opts.windows ?? 0.22;
+    for (let yy = y; yy < y + h; yy++)
+      for (let xx = x; xx < x + w; xx++) {
+        const corner = (xx === x || xx === x + w - 1) && (yy === y || yy === y + h - 1);
+        const edge = xx === x || yy === y || xx === x + w - 1 || yy === y + h - 1;
+        if (!edge || corner || tAt(xx, yy) !== T_WALL) continue;
+        if (doorTiles.some(([dx, dy]) => Math.abs(dx - xx) + Math.abs(dy - yy) <= 1)) continue;
+        const ix = xx === x ? xx + 1 : xx === x + w - 1 ? xx - 1 : xx;
+        const iy = yy === y ? yy + 1 : yy === y + h - 1 ? yy - 1 : yy;
+        if (tAt(ix, iy) === T_WALL) continue;
+        if ((xx + yy) % 3 === 0 && rnd() < winRate * 3) setT(xx, yy, T_WINDOW);
+      }
+    // ドア（閉じた状態で生成）
+    for (const [dx, dy] of doorTiles) addObj('door', dx, dy, 0);
+    // 家具：部屋の壁際に並べる（ドアの前は空ける）
+    const table = PROPS[kind];
+    const total = table.reduce((a, [, w2]) => a + w2, 0);
+    const pick = (): ObjKind => {
+      let r = rnd() * total;
+      for (const [k, w2] of table) {
+        r -= w2;
+        if (r <= 0) return k;
+      }
+      return table[0][0];
+    };
+    const rate = opts.propRate ?? 0.38;
+    for (const rm of rooms) {
+      if (table.length === 0) break;
+      for (let yy = rm.y; yy < rm.y + rm.h; yy++)
+        for (let xx = rm.x; xx < rm.x + rm.w; xx++) {
+          const nearWall = tAt(xx - 1, yy) === T_WALL || tAt(xx + 1, yy) === T_WALL || tAt(xx, yy - 1) === T_WALL || tAt(xx, yy + 1) === T_WALL;
+          if (!nearWall) continue;
+          if (doorTiles.some(([dx, dy]) => Math.abs(dx - xx) + Math.abs(dy - yy) <= 1)) continue;
+          if (rnd() < rate) addObj(pick(), xx, yy);
+        }
+      if (rm.w >= 5 && rm.h >= 5 && rnd() < 0.5) addObj(pick(), rm.x + Math.floor(rm.w / 2), rm.y + Math.floor(rm.h / 2));
     }
-  };
-  const fillCrates = (x: number, y: number, w: number, h: number, n: number, kind: ObjKind) => {
-    for (let i = 0, tries = 0; i < n && tries < 40; tries++) {
-      const cx = ri(x + 1, x + w - 2);
-      const cy = ri(y + 1, y + h - 2);
-      if (terrain[idx(cx, cy)] !== T_FLOOR || occupied[idx(cx, cy)]) continue;
-      addObj(kind, cx, cy);
-      i++;
-    }
+    return { rooms, doorTiles };
   };
 
-  // 警察署（北東の角・★★★）
+  // ---- 拠点（フェンスで囲まれた安全地帯） ----
   {
-    const w = 13;
-    const h = 9;
-    const x = ri(MAP_W - w - 6, MAP_W - w - 3);
-    const y = ri(3, 5);
-    building(x, y, w, h, 0.08, 3, true);
-    for (let xx = x + 1; xx < x + w - 1; xx++) if (xx !== x + 3 && xx !== x + 4) setT(xx, y + 4, T_WALL);
-    locations.push({ name: '警察署', kind: 'police', x, y, w, h, tier: 3 });
-    fillCrates(x, y, w, h, 4, 'mcrate');
+    reserve(sh.x - 1, sh.y - 1, sh.w + 2, sh.h + 2);
+    for (let yy = sh.y; yy < sh.y + sh.h; yy++)
+      for (let xx = sh.x; xx < sh.x + sh.w; xx++) {
+        const edge = xx === sh.x || yy === sh.y || xx === sh.x + sh.w - 1 || yy === sh.y + sh.h - 1;
+        if (tAt(xx, yy) === T_ROAD && !edge) continue;
+        setT(xx, yy, edge ? T_FENCE : T_DIRT);
+      }
+    // 門（道路の位置）
+    for (let k = 0; k < 2; k++) {
+      setT(roadX + k, sh.y, T_ROAD);
+      setT(roadX + k, sh.y + sh.h - 1, T_ROAD);
+      setT(sh.x, roadY + k, T_ROAD);
+      setT(sh.x + sh.w - 1, roadY + k, T_ROAD);
+    }
+    // 拠点の建物（左上の区画）：作業台・共有倉庫・個人倉庫・ベッド
+    const bx = sh.x + 2;
+    const by = sh.y + 2;
+    const bw = 8;
+    const bh = 6;
+    for (let yy = by; yy < by + bh; yy++)
+      for (let xx = bx; xx < bx + bw; xx++) {
+        const edge = xx === bx || yy === by || xx === bx + bw - 1 || yy === by + bh - 1;
+        setT(xx, yy, edge ? T_WALL : T_WOOD);
+      }
+    buildings.push({ x: bx, y: by, w: bw, h: bh, roof: 0 });
+    setT(bx + 4, by + bh - 1, T_WOOD);
+    addObj('door', bx + 4, by + bh - 1, 1);
+    setT(bx + bw - 1, by + 2, T_WINDOW);
+    setT(bx + 2, by, T_WINDOW);
+    setT(bx + 5, by, T_WINDOW);
+    addObj('bench', bx + 1, by + 1);
+    addObj('chest', bx + 3, by + 1);
+    addObj('stash', bx + 6, by + 1);
+    addObj('bed', bx + 1, by + 4);
+    addObj('bed', bx + 2, by + 4);
+    addObj('box', bx + 6, by + 4);
+    addObj('campfire', CAMPFIRE_TILE.x, CAMPFIRE_TILE.y);
+    for (let i = 0; i < 4; i++) addObj('sandbag', CAMPFIRE_TILE.x - 3 + i, CAMPFIRE_TILE.y + 3);
+    locations.push({ name: '拠点', kind: 'base', x: sh.x, y: sh.y, w: sh.w, h: sh.h, tier: 0 });
   }
-  // 軍の野営地（南西の角・★★★）：フェンスで囲まれた敷地と土嚢
+
+  // ---- ロケーション（中心から遠いほど危険） ----
+  const place = (
+    name: string,
+    kind: BuildingKind,
+    tier: number,
+    cx: number,
+    cy: number,
+    w: number,
+    h: number,
+    floor: number,
+    opts: Parameters<typeof makeBuilding>[6] = {},
+  ) => {
+    const spot = findSpot(cx, cy, w, h, 8);
+    if (!spot) return null;
+    const res = makeBuilding(spot.x, spot.y, w, h, kind, floor, opts);
+    locations.push({ name, kind, x: spot.x, y: spot.y, w, h, tier });
+    return { ...spot, ...res };
+  };
+  // 住宅街
+  for (const [cx, cy] of [
+    [11, 9],
+    [22, 9],
+    [16, 26],
+    [24, 39],
+    [52, 52],
+    [70, 52],
+    [52, 40],
+  ]) {
+    place('住宅', 'house', 1, cx, cy, ri(8, 10), ri(7, 8), T_WOOD, { minRoom: 3, doors: 2 });
+  }
+  place('スーパーマーケット', 'market', 2, 49, 9, 15, 10, T_TILE, { minRoom: 6, windows: 0.35, doors: 2, propRate: 0.55 });
+  place('病院', 'hospital', 2, 12, 38, 14, 10, T_TILE, { minRoom: 4, windows: 0.25, doors: 2, propRate: 0.45 });
+  place('ガソリンスタンド', 'gas', 2, 70, roadY - 4, 7, 5, T_TILE, { minRoom: 7, windows: 0.4, doors: 1 });
+  place('警察署', 'police', 3, 72, 7, 12, 10, T_FLOOR, { minRoom: 3, windows: 0.18, doors: 2, propRate: 0.45 });
+  // 軍事検問所（南西の角）：フェンスの敷地＋土嚢＋小屋
   {
-    const w = 15;
+    const w = 16;
     const h = 11;
-    const x = ri(3, 6);
-    const y = ri(MAP_H - h - 5, MAP_H - h - 3);
-    building(x, y, w, h, 0.25, 3, false);
-    for (let yy = y + 1; yy < y + h - 1; yy++) for (let xx = x + 1; xx < x + w - 1; xx++) setT(xx, yy, T_DIRT);
-    // テント（小さな建物）
-    building(x + 2, y + 2, 4, 3, 0, 1, false);
-    building(x + 9, y + 6, 4, 3, 0, 1, false);
-    locations.push({ name: '軍の野営地', kind: 'military', x, y, w, h, tier: 3 });
-    for (let i = 0; i < 6; i++) addObj('stone', x + 7 + (i % 3), y + 3 + Math.floor(i / 3) * 4);
-    for (let i = 0, tries = 0; i < 5 && tries < 60; tries++) {
-      const cx = ri(x + 1, x + w - 2);
-      const cy = ri(y + 1, y + h - 2);
-      if (terrain[idx(cx, cy)] === T_WALL || occupied[idx(cx, cy)]) continue;
-      addObj('mcrate', cx, cy);
-      i++;
+    const spot = findSpot(9, 53, w, h, 6);
+    if (spot) {
+      const { x, y } = spot;
+      reserve(x - 1, y - 1, w + 2, h + 2);
+      for (let yy = y; yy < y + h; yy++)
+        for (let xx = x; xx < x + w; xx++) {
+          const edge = xx === x || yy === y || xx === x + w - 1 || yy === y + h - 1;
+          setT(xx, yy, edge ? T_FENCE : T_DIRT);
+        }
+      setT(x + 7, y, T_DIRT);
+      setT(x + 8, y, T_DIRT);
+      setT(x + w - 1, y + 5, T_DIRT);
+      locations.push({ name: '軍事検問所', kind: 'military', x, y, w, h, tier: 3 });
+      makeBuilding(x + 2, y + 2, 6, 5, 'military', T_FLOOR, { minRoom: 3, doors: 1, windows: 0.2, propRate: 0.6 });
+      makeBuilding(x + 9, y + 4, 5, 5, 'military', T_FLOOR, { minRoom: 5, doors: 1, windows: 0.1, propRate: 0.7 });
+      for (let i = 0; i < 4; i++) addObj('sandbag', x + 6 + i, y + 2);
+      for (let i = 0; i < 3; i++) addObj('mcrate', x + 3 + i * 2, y + 8);
     }
   }
-  // ガソリンスタンド（幹線道路沿い・★★）
-  {
-    const east = rnd() < 0.5;
-    const x = east ? ri(52, 58) : ri(12, 18);
-    const y = roadY + 2;
-    // 給油エリア（屋根の下の床）
-    for (let yy = y; yy < y + 5; yy++) for (let xx = x; xx < x + 6; xx++) setT(xx, yy, T_FLOOR);
-    building(x + 6, y, 5, 5, 0.05, 1, false);
-    for (let yy = y + 1; yy < y + 4; yy++) setT(x + 6, yy, T_FLOOR); // 店の入口
-    locations.push({ name: 'ガソリンスタンド', kind: 'gas', x, y, w: 11, h: 5, tier: 2 });
-    fillCrates(x + 6, y, 5, 5, 2, 'crate');
-    addObj('crate', x + 2, y + 2);
-    addObj('car', x + 1, y + 1);
-    addObj('car', x + 4, y + 3);
-  }
-  // 住宅跡（近場・★）
-  const houseSpots = [
-    [22, 15],
-    [54, 44],
-    [22, 44],
-    [52, 13],
-  ];
-  for (const [hx, hy] of houseSpots) {
-    for (let tries = 0; tries < 12; tries++) {
-      const w = ri(7, 9);
-      const h = ri(6, 7);
-      const x = hx + ri(-4, 4) - Math.floor(w / 2);
-      const y = hy + ri(-3, 3) - Math.floor(h / 2);
-      if (x < 2 || y < 2 || x + w > MAP_W - 2 || y + h > MAP_H - 2) continue;
-      if (nearSafehouse(x, y, 5) || nearSafehouse(x + w, y + h, 5) || overlapsLoc(x, y, w, h, 3)) continue;
-      let road = 0;
-      for (let yy = y; yy < y + h; yy++) for (let xx = x; xx < x + w; xx++) if (terrain[idx(xx, yy)] === T_ROAD) road++;
-      if (road > 0 && tries < 11) continue;
-      building(x, y, w, h, 0.12, 2, true);
-      locations.push({ name: '住宅跡', kind: 'house', x, y, w, h, tier: 1 });
-      fillCrates(x, y, w, h, 2, 'crate');
-      break;
-    }
-  }
-  // 名もない廃墟（ランダム）
-  for (let attempt = 0, made = 0; attempt < 300 && made < 4; attempt++) {
-    const w = ri(6, 9);
+  // 廃屋（ランダム）
+  for (let i = 0, made = 0; i < 80 && made < 5; i++) {
+    const w = ri(6, 8);
     const h = ri(5, 7);
-    const x = ri(2, MAP_W - w - 3);
-    const y = ri(2, MAP_H - h - 3);
-    if (nearSafehouse(x, y, 6) || nearSafehouse(x + w, y + h, 6) || nearSafehouse(x + w, y, 6) || nearSafehouse(x, y + h, 6)) continue;
-    if (overlapsLoc(x, y, w, h, 3)) continue;
-    let onRoad = false;
-    for (let yy = y; yy < y + h && !onRoad; yy++) for (let xx = x; xx < x + w; xx++) if (terrain[idx(xx, yy)] === T_ROAD) onRoad = true;
-    if (onRoad) continue;
-    building(x, y, w, h, 0.2, 2, rnd() < 0.5);
-    const d = Math.hypot(x + w / 2 - 40, y + h / 2 - 30);
-    locations.push({ name: '廃墟', kind: 'ruin', x, y, w, h, tier: d > 26 ? 2 : 1 });
-    fillCrates(x, y, w, h, 1, 'crate');
-    made++;
-  }
-
-  // ---- セーフハウス ----
-  for (let yy = sh.y; yy < sh.y + sh.h; yy++) for (let xx = sh.x; xx < sh.x + sh.w; xx++) setT(xx, yy, T_FLOOR);
-  for (let yy = sh.y; yy < sh.y + sh.h; yy++)
-    for (let xx = sh.x; xx < sh.x + sh.w; xx++) {
-      const edge = xx === sh.x || yy === sh.y || xx === sh.x + sh.w - 1 || yy === sh.y + sh.h - 1;
-      if (!edge) continue;
-      // 入口（道路が通る位置）と壊れた区間は空ける
-      const doorH = yy >= roadY - 1 && yy <= roadY + 2;
-      const doorV = xx >= roadX - 1 && xx <= roadX + 2;
-      if (doorH || doorV) continue;
-      const broken = (xx + yy * 3) % 7 === 0;
-      if (broken) continue;
-      addObj('stone', xx, yy);
+    const cx = ri(6, MAP_W - 7);
+    const cy = ri(6, MAP_H - 7);
+    if (Math.hypot(cx - 40, cy - 30) < 14) continue;
+    const res = place('廃屋', 'ruin', Math.hypot(cx - 40, cy - 30) > 28 ? 2 : 1, cx, cy, w, h, T_FLOOR, { minRoom: 3, doors: 2, windows: 0.3 });
+    if (res) {
+      made++;
+      for (let k = 0; k < 3; k++) {
+        const bx = res.x + ri(1, w - 2);
+        const by = rnd() < 0.5 ? res.y : res.y + h - 1;
+        setT(bx, by, T_FLOOR);
+        addObj('rubble', bx, by);
+      }
     }
-  occupied[idx(CAMPFIRE_TILE.x, CAMPFIRE_TILE.y)] = 0;
-  addObj('campfire', CAMPFIRE_TILE.x, CAMPFIRE_TILE.y);
-  addObj('box', sh.x + 2, sh.y + 2);
-  addObj('box', sh.x + sh.w - 3, sh.y + sh.h - 3);
-  addObj('crate', sh.x + sh.w - 3, sh.y + 2);
-  addObj('bench', sh.x + 2, sh.y + sh.h - 3);
-  addObj('chest', sh.x + 4, sh.y + sh.h - 3);
+  }
 
   // ---- 廃車（道路沿い） ----
-  let cars = 0;
-  for (let attempt = 0; attempt < 600 && cars < 30; attempt++) {
+  for (let attempt = 0, cars = 0; attempt < 800 && cars < 34; attempt++) {
     const x = ri(1, MAP_W - 2);
     const y = ri(1, MAP_H - 2);
-    if (terrain[idx(x, y)] !== T_ROAD || nearSafehouse(x, y, 3)) continue;
-    const before = objs.length;
-    addObj('car', x, y);
-    if (objs.length > before) cars++;
+    if (terrain[idx(x, y)] !== T_ROAD) continue;
+    if (x >= sh.x - 2 && x <= sh.x + sh.w + 1 && y >= sh.y - 2 && y <= sh.y + sh.h + 1) continue;
+    if (addObj('car', x, y)) cars++;
   }
 
   // ---- 森（木のクラスター） ----
-  for (let c = 0; c < 22; c++) {
+  for (let c = 0; c < 26; c++) {
     const cx = ri(2, MAP_W - 3);
     const cy = ri(2, MAP_H - 3);
-    if (nearSafehouse(cx, cy, 5)) continue;
+    if (Math.hypot(cx - 40, cy - 30) < 12) continue;
     const n = ri(5, 14);
     for (let i = 0; i < n; i++) {
       const x = cx + ri(-4, 4);
       const y = cy + ri(-4, 4);
-      if (x < 1 || y < 1 || x >= MAP_W - 1 || y >= MAP_H - 1) continue;
+      if (!inMap(x, y) || reserved[idx(x, y)]) continue;
       const t = terrain[idx(x, y)];
-      if ((t === T_GRASS || t === T_DIRT) && !nearSafehouse(x, y, 3)) addObj('tree', x, y);
+      if (t === T_GRASS || t === T_DIRT) addObj('tree', x, y);
     }
   }
-  // ---- 野外のクレート ----
-  for (let i = 0, placed = 0; i < 300 && placed < 6; i++) {
+  // ---- 野外の木箱・瓦礫 ----
+  for (let i = 0, placed = 0; i < 400 && placed < 14; i++) {
     const x = ri(2, MAP_W - 3);
     const y = ri(2, MAP_H - 3);
     const t = terrain[idx(x, y)];
-    if ((t === T_GRASS || t === T_DIRT) && !nearSafehouse(x, y, 4)) {
-      const before = objs.length;
-      addObj('crate', x, y);
-      if (objs.length > before) placed++;
+    if ((t === T_GRASS || t === T_DIRT) && !reserved[idx(x, y)] && Math.hypot(x - 40, y - 30) > 12) {
+      if (addObj(rnd() < 0.5 ? 'crate' : 'rubble', x, y)) placed++;
     }
   }
 
-  return { terrain, objs, locations };
+  return { terrain, objs, locations, buildings };
 }
 
-/** オブジェクトIDの開始値（建築物用。生成オブジェクトと衝突しない値） */
+/** オブジェクトIDの開始値（実行中に作るオブジェクト用。生成オブジェクトと衝突しない値） */
 export const BUILD_ID_START = 100000;

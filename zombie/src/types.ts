@@ -28,7 +28,18 @@ export type ObjKind =
   | 'bench'
   | 'barbed'
   | 'turret'
-  | 'chest';
+  | 'chest'
+  | 'door'
+  | 'shelf'
+  | 'cabinet'
+  | 'locker'
+  | 'wcase'
+  | 'fridge'
+  | 'desk'
+  | 'bed'
+  | 'rubble'
+  | 'sandbag'
+  | 'stash';
 
 export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'barbed' | 'turret';
 
@@ -201,7 +212,8 @@ export type GameEvent =
   | { k: 'burn'; x: number; y: number }
   | { k: 'noise'; x: number; y: number; r: number }
   | { k: 'tshot'; x: number; y: number; a: number; id: number }
-  | { k: 'ping'; id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go' };
+  | { k: 'ping'; id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go' }
+  | { k: 'door'; x: number; y: number; open: boolean };
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {

@@ -16,6 +16,7 @@ import {
   PLAYER,
   PLAYER_COLORS,
   T_WALL,
+  T_WINDOW,
   TILE,
   TORCH_LIGHT,
   BLUEPRINTS,
@@ -28,6 +29,7 @@ import {
 } from './constants';
 import type { Decal, Effects } from './Effects';
 import { circleOverlapsTile, clamp } from './physics';
+import { type Viewer, Vision } from './vision';
 import { locationAt, type TileWorld } from './world';
 
 /** 落ち影と側面を持つ「高い」建築物 */
@@ -119,6 +121,8 @@ export class Renderer {
   private time = 0;
   private terrainCanvas: HTMLCanvasElement | null = null;
   private miniCanvas: HTMLCanvasElement | null = null;
+  private vision = new Vision();
+  private grain: CanvasPattern | null = null;
   private lightCanvas = document.createElement('canvas');
   private lightCtx = this.lightCanvas.getContext('2d')!;
   private pAnim = new Map<number, PlayerAnim>();
@@ -297,18 +301,29 @@ export class Renderer {
       }
     }
 
+    // ---- 視界（レイキャスト）：自分と仲間の視界を合算 ----
+    const dark = darknessAt(view.minute);
+    this.updateVision(view, dark);
+    const vis = this.vision;
+    const zombiesSeen = view.zombies.filter((z) => vis.isVisible(z.x, z.y));
+
     this.drawBuildGhost(o, me);
-    this.drawBullets(view, o);
-    for (const z of view.zombies) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
+    this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
+    for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
     for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
     this.drawCloudShadows(view.minute, vx0, vy0, vx1, vy1);
     this.drawStructureBars(visible);
+    // ---- 屋根と霧（見えていない場所を隠す） ----
+    // 外壁が見えている建物の屋根は霧の上に（外から屋根として見える）、それ以外は記憶として霧の下に
+    this.drawRoofs(me, vx0, vy0, vx1, vy1, false);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(vis.fog, 0, 0, WORLD_W, WORLD_H);
+    this.drawRoofs(me, vx0, vy0, vx1, vy1, true);
     ctx.restore();
 
     // ---- ライティング ----
-    const dark = darknessAt(view.minute);
     this.drawLighting(view, dark, ox, oy);
 
     // ---- 光る要素・オーバーレイ ----
@@ -317,12 +332,96 @@ export class Renderer {
     this.drawParticles(fx, true);
     this.drawGlows(view, dark);
     for (const p of view.players) this.drawPlayerOverlay(p, p.id === o.localId);
-    this.drawZombieOverlays(view.zombies, dark, me);
+    this.drawZombieOverlays(zombiesSeen, dark, me);
     this.drawPingMarkers(fx);
     this.drawPopups(fx);
     ctx.restore();
 
+    this.drawPostFx();
     this.drawHUD(view, o, me, dark);
+  }
+
+  /** 視界の計算（昼は広く、夜は懐中電灯の届く範囲だけ） */
+  private updateVision(view: ViewState, dark: number): void {
+    const viewers: Viewer[] = [];
+    for (const p of view.players) {
+      if (p.status === 'dead') continue;
+      const down = p.status === 'down';
+      viewers.push({
+        x: p.x,
+        y: p.y,
+        aim: p.aim,
+        near: down ? 100 : 330 - dark * 180,
+        cone: down ? 0 : 820 - dark * 300,
+        half: down ? 0 : 0.72 - dark * 0.28,
+      });
+    }
+    this.vision.update(this.world, viewers);
+  }
+
+  /** 屋根：プレイヤーが中に入っていない建物の、見えていない部分を覆う */
+  private drawRoofs(me: PlayerSnap | undefined, x0: number, y0: number, x1: number, y1: number, seenPass: boolean): void {
+    const { ctx } = this;
+    const mtx = me ? Math.floor(me.x / TILE) : -1;
+    const mty = me ? Math.floor(me.y / TILE) : -1;
+    const cols = [
+      ['#4a4038', '#55493f'],
+      ['#3e4044', '#46484c'],
+      ['#4a5040', '#535946'],
+      ['#5a5248', '#625a4f'],
+    ];
+    for (const b of this.world.buildings) {
+      if (b.x * TILE > x1 || b.y * TILE > y1 || (b.x + b.w) * TILE < x0 || (b.y + b.h) * TILE < y0) continue;
+      const inside = mtx > b.x && mty > b.y && mtx < b.x + b.w - 1 && mty < b.y + b.h - 1;
+      if (inside) continue;
+      // 外壁のどこかが見えているか
+      let seen = false;
+      for (let tx = b.x; tx < b.x + b.w && !seen; tx++) seen = this.vision.tileVisible(tx, b.y) || this.vision.tileVisible(tx, b.y + b.h - 1);
+      for (let ty = b.y; ty < b.y + b.h && !seen; ty++) seen = this.vision.tileVisible(b.x, ty) || this.vision.tileVisible(b.x + b.w - 1, ty);
+      if (seen !== seenPass) continue;
+      if (seen) this.vision.markExplored(b.x, b.y, b.w, b.h);
+      const [c0, c1] = cols[b.roof % cols.length];
+      for (let ty = b.y; ty < b.y + b.h; ty++)
+        for (let tx = b.x; tx < b.x + b.w; tx++) {
+          const edge = tx === b.x || ty === b.y || tx === b.x + b.w - 1 || ty === b.y + b.h - 1;
+          if (this.vision.tileVisible(tx, ty) && (edge || !seenPass)) continue;
+          if (this.vision.tileVisible(tx, ty) && seenPass && !edge) continue;
+          // 波板の屋根（列ごとに明暗）
+          ctx.fillStyle = (tx + ty * 0) % 2 === 0 ? c0 : c1;
+          ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
+          ctx.fillStyle = 'rgba(0,0,0,0.12)';
+          ctx.fillRect(tx * TILE, ty * TILE + 36, TILE, 4);
+        }
+      // 屋根の縁と錆
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(b.x * TILE + 1, b.y * TILE + 1, b.w * TILE - 2, b.h * TILE - 2);
+    }
+  }
+
+  /** フィルムグレイン＋彩度を落とす色調補正 */
+  private drawPostFx(): void {
+    const { ctx, w, h } = this;
+    ctx.save();
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    // 彩度ダウン（全体をくすんだ色調に）
+    ctx.globalCompositeOperation = 'saturation';
+    ctx.globalAlpha = 0.32;
+    ctx.fillStyle = 'hsl(0,0%,50%)';
+    ctx.fillRect(0, 0, w, h);
+    // ほんのり暖色の色かぶり
+    ctx.globalCompositeOperation = 'soft-light';
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = '#8a7a5a';
+    ctx.fillRect(0, 0, w, h);
+    // フィルムグレイン
+    if (!this.grain) this.grain = makeGrain(ctx);
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = 0.09;
+    ctx.translate(-Math.floor(Math.random() * 128), -Math.floor(Math.random() * 128));
+    ctx.fillStyle = this.grain;
+    ctx.fillRect(0, 0, w + 128, h + 128);
+    ctx.restore();
   }
 
   /** 隣のタイルに高い壁（廃墟の壁・建築壁）があるか */
@@ -330,7 +429,8 @@ export class Renderer {
     return (dx, dy) => {
       const x = tx + dx;
       const y = ty + dy;
-      if (this.world.terrainAt(x, y) === T_WALL) return true;
+      const tt = this.world.terrainAt(x, y);
+      if (tt === T_WALL || tt === T_WINDOW) return true;
       const ob = this.world.objAt(x, y);
       return !!ob && WALL_KINDS.has(ob.kind);
     };
@@ -398,6 +498,17 @@ export class Renderer {
         const mv = Math.hypot(p.x - a.lastX, p.y - a.lastY);
         a.walk += mv * 0.18;
         a.move += (Math.min(1, mv / Math.max(1e-3, dt) / 160) - a.move) * Math.min(1, dt * 10);
+        // 土や草の上に足跡を残す
+        const prevStep = Math.floor((a.walk - mv * 0.18) / Math.PI);
+        if (p.status === 'alive' && mv > 0.2 && Math.floor(a.walk / Math.PI) !== prevStep) {
+          const t = this.world.terrainAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE));
+          if (t === 0 || t === 4) {
+            const ang = Math.atan2(p.y - a.lastY, p.x - a.lastX);
+            const side = Math.floor(a.walk / Math.PI) % 2 === 0 ? 1 : -1;
+            const fd = o.effects;
+            fd.decals.push({ x: p.x - Math.sin(ang) * 4 * side, y: p.y + Math.cos(ang) * 4 * side, r: 2.6, rot: ang, kind: 'foot', life: 9, maxLife: 9, seed: 0 });
+          }
+        }
         if (p.dashTime > 0 && p.status === 'alive') o.effects.burst(p.x, p.y, '#cfc6b0', 1, 40, 0.4, 4, 'dot', false);
       }
       a.lastX = p.x;
@@ -458,7 +569,7 @@ export class Renderer {
     if (repairable && ob) {
       const inRange = Math.hypot(cx - me.x, cy - me.y) <= PLAYER.buildRange * 0.7;
       const damaged = ob.hp < ob.maxHp;
-      ctx.strokeStyle = !inRange ? 'rgba(255,255,255,0.3)' : damaged ? '#7dd3ff' : 'rgba(125,211,255,0.45)';
+      ctx.strokeStyle = !inRange ? 'rgba(255,255,255,0.3)' : damaged ? '#9fb4c2' : 'rgba(125,211,255,0.45)';
       ctx.lineWidth = o.altDown ? 3 : 2;
       ctx.strokeRect(tx * TILE + 1, ty * TILE + 1, TILE - 2, TILE - 2);
       this.worldLabel(
@@ -487,12 +598,12 @@ export class Renderer {
     const pulse = 0.15 + Math.sin(this.time * 6) * 0.05;
     ctx.fillStyle = valid ? `rgba(90,255,140,${pulse})` : `rgba(255,70,70,${pulse + 0.08})`;
     ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
-    ctx.strokeStyle = valid ? '#5bff8c' : '#ff4646';
+    ctx.strokeStyle = valid ? '#8fbf6a' : '#c0503a';
     ctx.lineWidth = 2;
     ctx.strokeRect(tx * TILE + 1, ty * TILE + 1, TILE - 2, TILE - 2);
     const costText = cost.wood ? `木材 ${cost.wood}` : `鉄 ${cost.scrap}`;
     const why = !inRange ? '遠すぎる' : !affordable ? '資材不足' : ob || this.world.terrainAt(tx, ty) === T_WALL ? '置けない' : '';
-    this.worldLabel(cx, ty * TILE - 10, why ? `${costText}（${why}）` : costText, valid ? '#a8ffc4' : '#ff9a9a');
+    this.worldLabel(cx, ty * TILE - 10, why ? `${costText}（${why}）` : costText, valid ? '#a9c79c' : '#ff9a9a');
   }
 
   private worldLabel(x: number, y: number, text: string, color: string): void {
@@ -519,7 +630,7 @@ export class Renderer {
       const y = ob.ty * TILE - 6;
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
       ctx.fillRect(x - 1, y - 1, TILE - 6, 5);
-      ctx.fillStyle = r > 0.5 ? '#9fd8ff' : r > 0.25 ? '#ffd84d' : '#ff5c5c';
+      ctx.fillStyle = r > 0.5 ? '#9fb4c2' : r > 0.25 ? '#c9a85a' : '#c0573e';
       ctx.fillRect(x, y, (TILE - 8) * r, 3);
     }
   }
@@ -556,7 +667,14 @@ export class Renderer {
       ctx.translate(d.x, d.y);
       ctx.rotate(d.rot);
       ctx.globalAlpha = a;
-      if (d.kind === 'scorch') {
+      if (d.kind === 'foot') {
+        // 足跡（靴底の形）
+        ctx.fillStyle = 'rgba(40,32,24,0.55)';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, d.r * 1.4, d.r * 0.7, 0, 0, Math.PI * 2);
+        ctx.ellipse(-d.r * 1.9, 0, d.r * 0.7, d.r * 0.6, 0, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (d.kind === 'scorch') {
         const g = ctx.createRadialGradient(0, 0, 0, 0, 0, d.r);
         g.addColorStop(0, 'rgba(10,8,6,0.9)');
         g.addColorStop(1, 'rgba(10,8,6,0)');
@@ -775,6 +893,20 @@ export class Renderer {
       ctx.arc(ls.x, ls.y, r, 0, Math.PI * 2);
       ctx.fill();
     }
+    // 懐中電灯の光束に舞うほこり
+    for (const p of view.players) {
+      if (p.status !== 'alive') continue;
+      for (let i = 0; i < 18; i++) {
+        const seed = i * 97.13 + p.id * 13.7;
+        const dist = 40 + ((seed * 7.31 + this.time * (18 + (i % 5) * 6)) % 380);
+        const off = Math.sin(seed + this.time * 0.6) * 0.32;
+        const x = p.x + Math.cos(p.aim + off) * dist;
+        const y = p.y + Math.sin(p.aim + off) * dist;
+        const a2 = (0.25 + 0.25 * Math.sin(seed * 3 + this.time * 2)) * dark * (1 - dist / 440);
+        ctx.fillStyle = `rgba(255,244,220,${Math.max(0, a2)})`;
+        ctx.fillRect(x, y, 1.6, 1.6);
+      }
+    }
     for (const p of view.players) {
       if (p.status !== 'alive') continue;
       for (const [half, a] of [
@@ -817,10 +949,10 @@ export class Renderer {
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
       ctx.fillRect(p.x - w / 2 - 1, y - 1, w + 2, 5);
       const r = clamp(p.hp / p.maxHp, 0, 1);
-      ctx.fillStyle = r > 0.5 ? '#5be37d' : r > 0.25 ? '#ffd84d' : '#ff5c5c';
+      ctx.fillStyle = r > 0.5 ? '#7fa35e' : r > 0.25 ? '#c9a85a' : '#c0573e';
       ctx.fillRect(p.x - w / 2, y, w * r, 3);
       if (p.reloadT > 0) {
-        ctx.strokeStyle = '#ffd84d';
+        ctx.strokeStyle = '#c9a85a';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(p.x, p.y, 22, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - p.reloadT / WEAPONS[weaponOfSnap(p)].reloadTime));
@@ -833,7 +965,7 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(p.x, y - 2, 10, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.strokeStyle = r > 0.3 ? '#ff9a3d' : '#ff4d5e';
+      ctx.strokeStyle = r > 0.3 ? '#c88a4a' : '#b4483a';
       ctx.beginPath();
       ctx.arc(p.x, y - 2, 10, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * r);
       ctx.stroke();
@@ -841,7 +973,7 @@ export class Renderer {
       ctx.fillStyle = '#fff';
       ctx.fillText(String(Math.ceil(p.downTimer)), p.x, y - 2);
       ctx.font = 'bold 11px sans-serif';
-      ctx.fillStyle = Math.sin(this.time * 8) > 0 ? '#ff5c5c' : '#ffb3b3';
+      ctx.fillStyle = Math.sin(this.time * 8) > 0 ? '#c0573e' : '#c9a09a';
       ctx.fillText('DOWN', p.x, p.y + 28);
       if (p.reviveProgress > 0) {
         const rp = clamp(p.reviveProgress / PLAYER.reviveTime, 0, 1);
@@ -850,7 +982,7 @@ export class Renderer {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 26, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.strokeStyle = '#7dffb0';
+        ctx.strokeStyle = '#8fbf8a';
         ctx.beginPath();
         ctx.arc(p.x, p.y, 26, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * rp);
         ctx.stroke();
@@ -949,7 +1081,7 @@ export class Renderer {
     ctx.textBaseline = 'middle';
     if (me && me.status === 'down') {
       ctx.font = '900 28px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#ff5c5c';
+      ctx.fillStyle = '#c0573e';
       ctx.fillText('ダウン中！', w / 2, h * 0.3);
       ctx.font = '15px "Segoe UI", sans-serif';
       ctx.fillStyle = '#ffd0d5';
@@ -1045,7 +1177,7 @@ export class Renderer {
       ctx.textBaseline = 'middle';
       const mag = sg ? me.inv.smag : me.inv.mag;
       const res = sg ? me.inv.shells : me.inv.ammo;
-      ctx.fillStyle = mag === 0 ? '#ff6b6b' : '#e6ebf5';
+      ctx.fillStyle = mag === 0 ? '#c06050' : '#e6ebf5';
       const txt = sg && !me.inv.shotgun ? '未所持' : me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.7)';
@@ -1064,7 +1196,7 @@ export class Renderer {
         this.curLoc = key;
         if (loc) {
           const danger = loc.tier >= 3 ? '危険：見張りのゾンビ多数・レア物資' : loc.tier === 2 ? 'やや危険：弾薬・火薬・鉄が見つかりやすい' : '比較的安全：食料・布・薬草';
-          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.tier >= 3 ? '#ff8f8f' : loc.tier === 2 ? '#ffe08a' : '#a8ffc4', life: 3.5 };
+          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
         }
       }
     }
@@ -1097,7 +1229,7 @@ export class Renderer {
   private drawPingMarkers(fx: Effects): void {
     const { ctx } = this;
     for (const p of fx.pings) {
-      const col = p.t === 'enemy' ? '#ff5c5c' : p.t === 'loot' ? '#ffd84d' : (PLAYER_COLORS[p.id] ?? '#fff');
+      const col = p.t === 'enemy' ? '#c0573e' : p.t === 'loot' ? '#c9a85a' : (PLAYER_COLORS[p.id] ?? '#fff');
       const a = Math.min(1, p.life);
       const bounce = Math.abs(Math.sin(this.time * 4)) * 6;
       ctx.globalAlpha = a;
@@ -1158,7 +1290,7 @@ export class Renderer {
         const pulse = down ? 1 + Math.sin(this.time * 8) * 0.15 : 1;
         ctx.scale(pulse, pulse);
         ctx.rotate(e.ang);
-        ctx.fillStyle = down ? '#ff3b3b' : col;
+        ctx.fillStyle = down ? '#b03a2e' : col;
         ctx.beginPath();
         ctx.moveTo(22, 0);
         ctx.lineTo(10, -8);
@@ -1170,13 +1302,13 @@ export class Renderer {
         ctx.beginPath();
         ctx.arc(e.x, e.y, 14, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = down ? '#ff3b3b' : col;
+        ctx.strokeStyle = down ? '#b03a2e' : col;
         ctx.lineWidth = 2;
         ctx.stroke();
         ctx.font = 'bold 11px "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle = down ? '#ff8f8f' : col;
+        ctx.fillStyle = down ? '#c98070' : col;
         ctx.fillText(down ? 'SOS' : p.name.slice(0, 2), e.x, e.y);
         ctx.font = 'bold 10px "Segoe UI", sans-serif';
         ctx.lineWidth = 3;
@@ -1203,7 +1335,7 @@ export class Renderer {
     for (const p of fx.pings) {
       const e = edge(p.x, p.y);
       if (!e.off) continue;
-      const col = p.t === 'enemy' ? '#ff5c5c' : p.t === 'loot' ? '#ffd84d' : (PLAYER_COLORS[p.id] ?? '#fff');
+      const col = p.t === 'enemy' ? '#c0573e' : p.t === 'loot' ? '#c9a85a' : (PLAYER_COLORS[p.id] ?? '#fff');
       ctx.globalAlpha = Math.min(1, p.life);
       ctx.save();
       ctx.translate(e.x, e.y);
@@ -1237,7 +1369,7 @@ export class Renderer {
     const icon = view.phase === 'day' ? '☀' : horde ? '☠' : '☾';
     const label = view.phase === 'day' ? '昼' : horde ? '大襲撃' : '夜';
     ctx.font = '900 22px "Segoe UI", sans-serif';
-    ctx.fillStyle = horde ? '#ff6b6b' : view.phase === 'night' ? '#b9c8ff' : '#ffe2a8';
+    ctx.fillStyle = horde ? '#c06050' : view.phase === 'night' ? '#aab4c8' : '#e0cfa8';
     ctx.fillText(`Day ${view.day} - ${formatClock(view.minute)}  ${icon} ${label}`, cxm, 16);
 
     // 時間バー（昼=黄 / 夜=青）
@@ -1265,7 +1397,7 @@ export class Renderer {
       const left = HORDE_EVERY - (view.day % HORDE_EVERY);
       sub = `次の大襲撃まで あと ${left} 日（Day ${view.day + left} の夜）`;
     }
-    ctx.fillStyle = horde || view.day % HORDE_EVERY === 0 ? '#ff8f8f' : '#c3cbe0';
+    ctx.fillStyle = horde || view.day % HORDE_EVERY === 0 ? '#c98070' : '#c3cbe0';
     ctx.fillText(sub, cxm, 54);
   }
 
@@ -1299,13 +1431,13 @@ export class Renderer {
       if (p.status === 'alive') {
         ctx.fillStyle = color;
         ctx.fillRect(x + 24, y + 19, bw * clamp(p.hp / p.maxHp, 0, 1), 5);
-        ctx.fillStyle = '#e0a050';
+        ctx.fillStyle = '#b08a50';
         ctx.fillRect(x + 24, y + 27, bw * clamp(p.hunger / 100, 0, 1), 3);
       } else if (p.status === 'down') {
-        ctx.fillStyle = '#ff4d5e';
+        ctx.fillStyle = '#b4483a';
         ctx.fillRect(x + 24, y + 19, bw * clamp(p.downTimer / PLAYER.downTime, 0, 1), 5);
         ctx.font = 'bold 10px sans-serif';
-        ctx.fillStyle = '#ff9aa5';
+        ctx.fillStyle = '#c98a80';
         ctx.textAlign = 'right';
         ctx.fillText(`DOWN ${Math.ceil(p.downTimer)}s`, x + pw - 10, y + 26);
       } else {
@@ -1341,26 +1473,26 @@ export class Renderer {
       ctx.textAlign = 'left';
     };
     const hr = me.hp / me.maxHp;
-    bar('HP', y + 10, hr, hr > 0.5 ? '#5be37d' : hr > 0.25 ? '#ffd84d' : '#ff5c5c', `${Math.max(0, Math.ceil(me.hp))} / ${me.maxHp}`);
+    bar('HP', y + 10, hr, hr > 0.5 ? '#7fa35e' : hr > 0.25 ? '#c9a85a' : '#c0573e', `${Math.max(0, Math.ceil(me.hp))} / ${me.maxHp}`);
     const st = me.stamina / PLAYER.maxStamina;
-    bar('体力', y + 26, st, st >= PLAYER.dashStamina / PLAYER.maxStamina ? '#4da3ff' : '#2d5a8a', me.stamina >= PLAYER.dashStamina && me.dashCd <= 0 ? 'スタミナ  DASH OK [Shift]' : 'スタミナ');
+    bar('体力', y + 26, st, st >= PLAYER.dashStamina / PLAYER.maxStamina ? '#6f93b0' : '#2d5a8a', me.stamina >= PLAYER.dashStamina && me.dashCd <= 0 ? 'スタミナ  DASH OK [Shift]' : 'スタミナ');
     // ダッシュに必要な量の目盛り
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
     ctx.fillRect(x + 46 + (pw - 58) * (PLAYER.dashStamina / PLAYER.maxStamina), y + 26, 1, 10);
-    bar('空腹', y + 42, me.hunger / 100, me.hunger > 25 ? '#e0a050' : '#ff5c5c', `${Math.ceil(me.hunger)}%`);
+    bar('空腹', y + 42, me.hunger / 100, me.hunger > 25 ? '#b08a50' : '#c0573e', `${Math.ceil(me.hunger)}%`);
 
     ctx.font = '12px "Segoe UI", sans-serif';
     const rows: [string, string, string][][] = [
       [
-        ['弾', `${me.inv.mag}/${me.inv.ammo}`, '#ffd84d'],
-        ['シェル', `${me.inv.smag}/${me.inv.shells}`, '#ff9a6b'],
+        ['弾', `${me.inv.mag}/${me.inv.ammo}`, '#c9a85a'],
+        ['シェル', `${me.inv.smag}/${me.inv.shells}`, '#c08a6a'],
         ['火薬', String(me.inv.gunpowder), '#d0a070'],
-        ['キット', String(me.inv.kit), '#9fd8ff'],
+        ['キット', String(me.inv.kit), '#9fb4c2'],
       ],
       [
         ['布', String(me.inv.cloth), '#e6d8c0'],
         ['薬草', String(me.inv.herb), '#8fdc7a'],
-        ['パーツ', String(me.inv.parts), '#ffb86b'],
+        ['パーツ', String(me.inv.parts), '#c99a68'],
         ['木/鉄', `${view.stash.wood}/${view.stash.scrap}`, '#d9a66b'],
       ],
     ];
@@ -1395,7 +1527,7 @@ export class Renderer {
       const usable = i < USABLE_SLOTS;
       panel(ctx, x, y, size, size, sel ? 'rgba(60,90,130,0.92)' : usable ? undefined : 'rgba(10,12,16,0.4)');
       if (sel) {
-        ctx.strokeStyle = '#9fd8ff';
+        ctx.strokeStyle = '#9fb4c2';
         ctx.lineWidth = 2;
         roundRectPath(ctx, x + 1, y + 1, size - 2, size - 2, 7);
         ctx.stroke();
@@ -1446,7 +1578,7 @@ export class Renderer {
       }
       ctx.textAlign = 'center';
       ctx.font = 'bold 9px "Segoe UI", sans-serif';
-      ctx.fillStyle = locked ? '#7d8597' : warn ? '#ff7070' : '#dfe6f3';
+      ctx.fillStyle = locked ? '#7d8597' : warn ? '#c06a5a' : '#dfe6f3';
       ctx.fillText(label, x + size / 2, y + size - 12);
     });
 
@@ -1464,7 +1596,7 @@ export class Renderer {
         const ok = view.stash.wood >= c.wood && view.stash.scrap >= c.scrap;
         panel(ctx, bx, by, bs, bs, sel ? 'rgba(70,110,70,0.92)' : undefined);
         if (sel) {
-          ctx.strokeStyle = '#a8ffc4';
+          ctx.strokeStyle = '#a9c79c';
           ctx.lineWidth = 2;
           roundRectPath(ctx, bx + 1, by + 1, bs - 2, bs - 2, 7);
           ctx.stroke();
@@ -1473,7 +1605,7 @@ export class Renderer {
         ctx.font = 'bold 9px "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillStyle = ok ? '#dfe6f3' : '#ff7070';
+        ctx.fillStyle = ok ? '#dfe6f3' : '#c06a5a';
         ctx.fillText(c.wood ? `木${c.wood}` : `鉄${c.scrap}`, bx + bs / 2, by + bs - 11);
       });
       ctx.font = 'bold 11px "Segoe UI", sans-serif';
@@ -1508,7 +1640,7 @@ export class Renderer {
     // ロケーション（★の数で危険度）
     for (const loc of this.world.locations) {
       if (loc.kind === 'ruin') continue;
-      const col = loc.tier >= 3 ? '#ff6b6b' : loc.tier === 2 ? '#ffd84d' : '#9fe08a';
+      const col = loc.tier >= 3 ? '#c06050' : loc.tier === 2 ? '#c9a85a' : '#9fe08a';
       ctx.strokeStyle = col;
       ctx.lineWidth = 1;
       ctx.strokeRect(mx + loc.x * s - 1, my + loc.y * s - 1, loc.w * s + 2, loc.h * s + 2);
@@ -1525,19 +1657,18 @@ export class Renderer {
       else if (ob.kind === 'ironWall') c = '#b8c4d4';
       else if (ob.kind === 'stone') c = '#9a968f';
       else if (ob.kind === 'spike') c = '#8a6a3a';
-      else if (ob.kind === 'campfire' || ob.kind === 'torch') c = '#ff9a3d';
-      else if (ob.kind === 'crate' && ob.ready) c = '#ffe08a';
+      else if (ob.kind === 'campfire' || ob.kind === 'torch') c = '#c88a4a';
+      else if (ob.kind === 'crate' && ob.ready) c = '#d8c48a';
       else if (ob.kind === 'mcrate' && ob.ready) c = '#ff9a4d';
-      else if (ob.kind === 'bench' || ob.kind === 'chest') c = '#ffd84d';
-      else if (ob.kind === 'turret') c = '#9fd8ff';
+      else if (ob.kind === 'bench' || ob.kind === 'chest') c = '#c9a85a';
+      else if (ob.kind === 'turret') c = '#9fb4c2';
       else if (ob.kind === 'barbed') c = '#8a8f96';
       if (!c) continue;
       ctx.fillStyle = c;
       ctx.fillRect(mx + ob.tx * s, my + ob.ty * s, s, s);
     }
-    const me = view.players.find((p) => p.id === localId);
     for (const z of view.zombies) {
-      if (!z.horde && me && Math.hypot(z.x - me.x, z.y - me.y) > 700) continue;
+      if (!this.vision.isVisible(z.x, z.y)) continue;
       ctx.fillStyle = z.horde ? '#ff3030' : '#d05050';
       ctx.fillRect(mx + z.x * k - 1, my + z.y * k - 1, 2, 2);
     }
@@ -1548,7 +1679,7 @@ export class Renderer {
       ctx.arc(mx + p.x * k, my + p.y * k, p.id === localId ? 3.5 : 2.5, 0, Math.PI * 2);
       ctx.fill();
       if (p.status === 'down') {
-        ctx.strokeStyle = '#ff4d5e';
+        ctx.strokeStyle = '#b4483a';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.arc(mx + p.x * k, my + p.y * k, 6 + Math.sin(this.time * 8) * 1.5, 0, Math.PI * 2);
@@ -1557,7 +1688,7 @@ export class Renderer {
     }
     if (this.fx) {
       for (const p of this.fx.pings) {
-        ctx.strokeStyle = p.t === 'enemy' ? '#ff5c5c' : p.t === 'loot' ? '#ffd84d' : '#ffffff';
+        ctx.strokeStyle = p.t === 'enemy' ? '#c0573e' : p.t === 'loot' ? '#c9a85a' : '#ffffff';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.arc(mx + p.x * k, my + p.y * k, 4 + Math.sin(this.time * 6) * 1.5, 0, Math.PI * 2);
@@ -1653,7 +1784,7 @@ function drawSlotIcon(ctx: CanvasRenderingContext2D, kind: 'axe' | 'pistol' | 'r
       ctx.fillRect(-7, -9, 14, 18);
       ctx.fillStyle = '#d9534f';
       ctx.fillRect(-7, -4, 14, 8);
-      ctx.fillStyle = '#ffe08a';
+      ctx.fillStyle = '#d8c48a';
       ctx.fillRect(-4, -2, 8, 4);
       break;
     case 'medkit':
@@ -1731,7 +1862,7 @@ function drawBlueprintIcon(ctx: CanvasRenderingContext2D, kind: BuildKind, x: nu
       ctx.fillRect(-7, -6, 14, 10);
       ctx.fillStyle = '#1b1f26';
       ctx.fillRect(5, -3, 10, 4);
-      ctx.fillStyle = '#5bff8c';
+      ctx.fillStyle = '#8fbf6a';
       ctx.fillRect(-2, -3, 3, 3);
       break;
     case 'torch':
@@ -1741,13 +1872,13 @@ function drawBlueprintIcon(ctx: CanvasRenderingContext2D, kind: BuildKind, x: nu
       ctx.moveTo(0, 11);
       ctx.lineTo(0, -3);
       ctx.stroke();
-      ctx.fillStyle = '#ff9a3d';
+      ctx.fillStyle = '#c88a4a';
       ctx.beginPath();
       ctx.moveTo(-5, -3);
       ctx.quadraticCurveTo(0, -18, 5, -3);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = '#ffe08a';
+      ctx.fillStyle = '#d8c48a';
       ctx.beginPath();
       ctx.arc(0, -5, 2.5, 0, Math.PI * 2);
       ctx.fill();
@@ -1785,5 +1916,23 @@ function makeForestPattern(ctx: CanvasRenderingContext2D): CanvasPattern {
       g.fill();
     }
   }
+  return ctx.createPattern(c, 'repeat')!;
+}
+
+/** フィルムグレイン用のノイズパターン */
+function makeGrain(ctx: CanvasRenderingContext2D): CanvasPattern {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 256;
+  const g = c.getContext('2d')!;
+  const img = g.createImageData(256, 256);
+  for (let i = 0; i < 256 * 256; i++) {
+    const v = Math.floor(Math.random() * 255);
+    img.data[i * 4] = v;
+    img.data[i * 4 + 1] = v;
+    img.data[i * 4 + 2] = v;
+    img.data[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
   return ctx.createPattern(c, 'repeat')!;
 }

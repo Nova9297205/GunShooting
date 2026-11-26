@@ -597,6 +597,21 @@ export class AudioManager {
       case 'tshot':
         this.turretShot(ev.x, ev.y);
         break;
+      case 'door': {
+        const s = this.spatial(ev.x, ev.y);
+        if (!s || !this.gate('door', 0.1)) break;
+        const t = this.ctx!.currentTime;
+        if (ev.open) {
+          // きしむ音
+          this.tone({ type: 'sawtooth', f: 180, f2: 240, dur: 0.35, g: 0.05 * s.k, lp: 900, a: 0.05, pan: s.pan, t });
+          this.noise({ dur: 0.08, g: 0.12 * s.k, filter: 'bandpass', f: 900, q: 2, pan: s.pan, t });
+        } else {
+          // バタンと閉まる音
+          this.noise({ dur: 0.14, g: 0.35 * s.k, filter: 'lowpass', f: 700, pan: s.pan, t });
+          this.tone({ f: 110, f2: 60, dur: 0.12, g: 0.3 * s.k, pan: s.pan, t });
+        }
+        break;
+      }
       case 'ping': {
         const t = this.ctx!.currentTime;
         const [a, b] = ev.t === 'enemy' ? [880, 660] : ev.t === 'loot' ? [988, 1318] : [784, 1046];

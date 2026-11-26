@@ -100,6 +100,7 @@ export class GameSession {
       const gen = generateTerrain(o.info.seed);
       this.world = new TileWorld(gen.terrain);
       this.world.locations = gen.locations;
+      this.world.buildings = gen.buildings;
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
     }
     this.renderer = new Renderer(o.canvas, this.world);
@@ -626,7 +627,8 @@ export class GameSession {
         const d = Math.hypot((tx + 0.5) * TILE - me.x, (ty + 0.5) * TILE - me.y);
         if (d >= bd) continue;
         let h: string | null = null;
-        if (ob.ready && ob.kind === 'crate') h = '[F] 物資クレートを調べる';
+        if (ob.kind === 'door' && d < 58) h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
+        else if (ob.ready && ob.kind === 'crate') h = '[F] 物資クレートを調べる';
         else if (ob.ready && ob.kind === 'mcrate') h = '[F] 軍用クレートを調べる（レア物資）';
         else if (ob.ready && ob.kind === 'box') h = '[F] 収納箱を開ける';
         else if (ob.kind === 'turret') h = `[F] タレットに弾薬を補充（残弾 ${ob.ready}/60）`;

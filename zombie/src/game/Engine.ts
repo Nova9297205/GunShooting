@@ -43,6 +43,8 @@ import {
   SPIKE,
   START_MINUTE,
   T_WALL,
+  T_WINDOW,
+  T_FENCE,
   TILE,
   USABLE_SLOTS,
   CHEST_ITEMS,
@@ -231,6 +233,7 @@ export class HostSimulation {
     this.world = new TileWorld<SimObj>(gen.terrain);
     for (const o of gen.objs) this.world.setObj({ ...o, regrowT: 0 });
     this.world.locations = gen.locations;
+    this.world.buildings = gen.buildings;
     this.cycleT = ((START_MINUTE - 360) * DAY_SECONDS) / 840;
 
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -282,7 +285,7 @@ export class HostSimulation {
       });
     });
     for (const loc of this.world.locations) if (loc.tier >= 3) for (let i = 0; i < 6; i++) this.spawnGuard(loc);
-    this.events.push({ k: 'banner', t: 'DAY 1', s: '物資を集めて拠点を強化しよう。5日目の夜に大襲撃が来る…', c: '#ffe2a8', snd: 'day' });
+    this.events.push({ k: 'banner', t: 'DAY 1', s: '物資を集めて拠点を強化しよう。5日目の夜に大襲撃が来る…', c: '#e0cfa8', snd: 'day' });
   }
 
   // ======================== 外部API ========================
@@ -455,7 +458,7 @@ export class HostSimulation {
         this.hordeQuota = Math.round((30 + 20 * (n - 1)) * mult);
         this.hordeSpawned = 0;
         this.spawnTimer = 1.5;
-        this.events.push({ k: 'banner', t: '大襲撃 - HORDE NIGHT', s: 'ゾンビの大群が押し寄せてくる！朝 6:00 まで生き延びろ', c: '#ff3b3b', snd: 'horde' });
+        this.events.push({ k: 'banner', t: '大襲撃 - HORDE NIGHT', s: 'ゾンビの大群が押し寄せてくる！朝 6:00 まで生き延びろ', c: '#b03a2e', snd: 'horde' });
       } else if (this.phase === 'night') {
         this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: 'ゾンビが活発になった。懐中電灯で周囲を照らせ', c: '#9fb7ff', snd: 'night' });
       } else {
@@ -466,7 +469,7 @@ export class HostSimulation {
 
   private onDawn(hordeCleared: boolean): void {
     if (hordeCleared) {
-      this.events.push({ k: 'banner', t: '大襲撃クリア！', s: `DAY ${this.day} の朝を迎えた。生き延びたぞ！`, c: '#7dffb0', snd: 'clear' });
+      this.events.push({ k: 'banner', t: '大襲撃クリア！', s: `DAY ${this.day} の朝を迎えた。生き延びたぞ！`, c: '#8fbf8a', snd: 'clear' });
       // 残ったホードゾンビは朝日で燃え尽きる
       for (const z of this.zombies) {
         if (!z.horde) continue;
@@ -477,7 +480,7 @@ export class HostSimulation {
       const sub = isHordeDay(this.day)
         ? '今夜は大襲撃！ 拠点を固めろ'
         : `大襲撃まであと ${HORDE_EVERY - (this.day % HORDE_EVERY)} 日`;
-      this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: sub, c: '#ffe2a8', snd: 'day' });
+      this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: sub, c: '#e0cfa8', snd: 'day' });
     }
     // 戦闘不能者はキャンプファイアで復帰
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -553,7 +556,7 @@ export class HostSimulation {
     if (p.hunger <= 0) {
       p.hp -= PLAYER.starveDps * dt;
       if (p.warnCd <= 0) {
-        this.pop(p, '空腹でHPが減っている！ [Q]で食事', '#ffb347');
+        this.pop(p, '空腹でHPが減っている！ [Q]で食事', '#c99a5a');
         p.warnCd = 6;
       }
       if (p.hp <= 0) this.downPlayer(p);
@@ -607,7 +610,7 @@ export class HostSimulation {
         const w = this.weaponOf(p);
         if (w) this.fireWeapon(p, w);
         else if (p.warnCd <= 0) {
-          this.pop(p, 'ショットガンを持っていない（物資から入手）', '#ff8080');
+          this.pop(p, 'ショットガンを持っていない（物資から入手）', '#c87a6a');
           p.warnCd = 1.5;
         }
         break;
@@ -642,7 +645,7 @@ export class HostSimulation {
 
   private pop(p: SimPlayer, t: string, c: string, s?: SoundKey): void {
     // 赤い警告メッセージにはエラー音を付ける
-    this.events.push({ k: 'pop', x: p.x, y: p.y - 30, t, c, id: p.id, s: s ?? (c === '#ff8080' ? 'error' : undefined) });
+    this.events.push({ k: 'pop', x: p.x, y: p.y - 30, t, c, id: p.id, s: s ?? (c === '#c87a6a' ? 'error' : undefined) });
   }
 
   private fireWeapon(p: SimPlayer, wid: WeaponId): void {
@@ -654,7 +657,7 @@ export class HostSimulation {
     if (mag() <= 0) {
       if (reserve() > 0) this.startReload(p);
       else if (p.warnCd <= 0) {
-        this.pop(p, sg ? 'シェルがない！ [C]で作成（火薬2）' : '弾切れ！ [C]で弾薬を作成（火薬2）', '#ff8080');
+        this.pop(p, sg ? 'シェルがない！ [C]で作成（火薬2）' : '弾切れ！ [C]で弾薬を作成（火薬2）', '#c87a6a');
         p.warnCd = 1.5;
       }
       return;
@@ -692,7 +695,7 @@ export class HostSimulation {
     if ((sg ? p.inv.smag : p.inv.mag) >= WEAPONS[wid].magSize) return;
     if ((sg ? p.inv.shells : p.inv.ammo) <= 0) {
       if (p.warnCd <= 0) {
-        this.pop(p, sg ? '予備のシェルがない' : '予備弾薬がない', '#ff8080');
+        this.pop(p, sg ? '予備のシェルがない' : '予備弾薬がない', '#c87a6a');
         p.warnCd = 1.5;
       }
       return;
@@ -758,7 +761,7 @@ export class HostSimulation {
     const r = RECIPES.find((x) => x.id === id);
     if (!r) return;
     if (r.bench && !this.nearBench(p)) {
-      this.pop(p, '作業台の近くでないと作れない', '#ff8080');
+      this.pop(p, '作業台の近くでないと作れない', '#c87a6a');
       return;
     }
     if ((id === 'rifle' && p.inv.gun >= 1) || (id === 'shotgun' && p.inv.shotgun) || (id === 'axe' && p.inv.axe)) {
@@ -768,7 +771,7 @@ export class HostSimulation {
     const have = (m: string) => (m === 'wood' || m === 'scrap' ? this.stash[m] : (p.inv as unknown as Record<string, number>)[m]);
     for (const [m, n] of Object.entries(r.cost)) {
       if (have(m) < (n ?? 0)) {
-        this.pop(p, '素材が足りない', '#ff8080');
+        this.pop(p, '素材が足りない', '#c87a6a');
         return;
       }
     }
@@ -801,12 +804,12 @@ export class HostSimulation {
         p.inv.axe = 1;
         break;
     }
-    this.pop(p, `${r.name} を作成！`, '#ffd84d', 'craft');
+    this.pop(p, `${r.name} を作成！`, '#c9a85a', 'craft');
   }
 
   private useFood(p: SimPlayer, explicit: boolean): boolean {
     if (p.inv.food <= 0) {
-      if (explicit) this.pop(p, '食料がない', '#ff8080');
+      if (explicit) this.pop(p, '食料がない', '#c87a6a');
       return false;
     }
     if (p.hunger >= 99) {
@@ -816,13 +819,13 @@ export class HostSimulation {
     p.inv.food--;
     p.hunger = Math.min(100, p.hunger + PLAYER.foodValue);
     p.hp = Math.min(p.maxHp, p.hp + 5);
-    this.pop(p, `空腹 +${PLAYER.foodValue}`, '#ffcf6b', 'eat');
+    this.pop(p, `空腹 +${PLAYER.foodValue}`, '#c9a86a', 'eat');
     return true;
   }
 
   private useMedkit(p: SimPlayer, explicit: boolean): boolean {
     if (p.inv.medkit <= 0) {
-      if (explicit) this.pop(p, '救急キットがない', '#ff8080');
+      if (explicit) this.pop(p, '救急キットがない', '#c87a6a');
       return false;
     }
     if (p.hp >= p.maxHp) {
@@ -831,12 +834,49 @@ export class HostSimulation {
     }
     p.inv.medkit--;
     p.hp = Math.min(p.maxHp, p.hp + PLAYER.medkitValue);
-    this.pop(p, `HP +${PLAYER.medkitValue}`, '#7dffb0', 'heal');
+    this.pop(p, `HP +${PLAYER.medkitValue}`, '#8fbf8a', 'heal');
     return true;
   }
 
-  /** F キー：近くのクレート/収納箱を調べる。なければアイテム使用 */
+  /** ドアの開閉（音が出るので近くのゾンビが寄ってくる） */
+  private toggleDoor(p: SimPlayer, d: SimObj): void {
+    if (d.ready === 1) {
+      // 閉じるときは誰も挟まっていないこと
+      const blocked =
+        this.players.some((pl) => pl.status !== 'dead' && circleOverlapsTile(pl.x, pl.y, PLAYER.radius - 2, d.tx, d.ty)) ||
+        this.zombies.some((z) => circleOverlapsTile(z.x, z.y, ZOMBIE[z.type].radius - 2, d.tx, d.ty));
+      if (blocked) {
+        this.pop(p, 'ふさがっていて閉められない', '#aaaaaa');
+        return;
+      }
+    }
+    d.ready = d.ready ? 0 : 1;
+    this.changed.add(d.id);
+    const x = (d.tx + 0.5) * TILE;
+    const y = (d.ty + 0.5) * TILE;
+    this.events.push({ k: 'door', x, y, open: d.ready === 1 });
+    this.makeNoise(x, y, 230);
+    this.flowTimer = Math.min(this.flowTimer, 0.1);
+  }
+
+  /** F キー：近くのドアを開閉／クレートを調べる。なければアイテム使用 */
   private interact(p: SimPlayer): void {
+    let door: SimObj | null = null;
+    let dd = 58;
+    {
+      const ptx = Math.floor(p.x / TILE);
+      const pty = Math.floor(p.y / TILE);
+      for (let ty = pty - 2; ty <= pty + 2; ty++)
+        for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
+          const o = this.world.objAt(tx, ty);
+          if (!o || o.kind !== 'door') continue;
+          const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y);
+          if (d < dd) {
+            dd = d;
+            door = o;
+          }
+        }
+    }
     let best: SimObj | null = null;
     let bd = PLAYER.interactRange;
     const ptx = Math.floor(p.x / TILE);
@@ -854,14 +894,18 @@ export class HostSimulation {
           best = o;
         }
       }
+    if (door && (!best || dd <= bd)) {
+      this.toggleDoor(p, door);
+      return;
+    }
     if (best && best.kind === 'turret') {
       const n = Math.min(TURRET.maxAmmo - best.ready, p.inv.ammo);
-      if (n <= 0) this.pop(p, '補充する弾薬がない', '#ff8080');
+      if (n <= 0) this.pop(p, '補充する弾薬がない', '#c87a6a');
       else {
         p.inv.ammo -= n;
         best.ready += n;
         this.changed.add(best.id);
-        this.pop(p, `タレットに弾薬 +${n}`, '#ffd84d', 'craft');
+        this.pop(p, `タレットに弾薬 +${n}`, '#c9a85a', 'craft');
       }
       return;
     }
@@ -938,13 +982,13 @@ export class HostSimulation {
       inv.food += 1;
       parts.push('食料+1');
     }
-    this.events.push({ k: 'pop', x: (o.tx + 0.5) * TILE, y: o.ty * TILE - 6, t: parts.join('  '), c: tier >= 3 ? '#ffb86b' : '#ffe08a', id: p.id, s: 'loot' });
+    this.events.push({ k: 'pop', x: (o.tx + 0.5) * TILE, y: o.ty * TILE - 6, t: parts.join('  '), c: tier >= 3 ? '#c99a68' : '#d8c48a', id: p.id, s: 'loot' });
   }
 
   private swingAxe(p: SimPlayer): void {
     if (p.stamina < PLAYER.meleeStamina) {
       if (p.warnCd <= 0) {
-        this.pop(p, 'スタミナ切れ！', '#ffb347');
+        this.pop(p, 'スタミナ切れ！', '#c99a5a');
         p.warnCd = 1;
       }
       return;
@@ -1022,7 +1066,7 @@ export class HostSimulation {
     if (this.world.terrainAt(tx, ty) === T_WALL || this.world.objAt(tx, ty)) return;
     if (kind === 'turret' && p.inv.kit <= 0) {
       if (p.warnCd <= 0) {
-        this.pop(p, 'タレットキットが必要（作業台でクラフト）', '#ff8080');
+        this.pop(p, 'タレットキットが必要（作業台でクラフト）', '#c87a6a');
         p.warnCd = 1.2;
       }
       return;
@@ -1034,7 +1078,7 @@ export class HostSimulation {
     const cost = BUILD_COST[kind];
     if (this.stash.wood < cost.wood || this.stash.scrap < cost.scrap) {
       if (p.warnCd <= 0) {
-        this.pop(p, cost.wood ? `木材が足りない（${cost.wood}必要）` : `鉄スクラップが足りない（${cost.scrap}必要）`, '#ff8080');
+        this.pop(p, cost.wood ? `木材が足りない（${cost.wood}必要）` : `鉄スクラップが足りない（${cost.scrap}必要）`, '#c87a6a');
         p.warnCd = 1.2;
       }
       return;
@@ -1074,7 +1118,7 @@ export class HostSimulation {
     const useScrap = o.kind === 'ironWall' || o.kind === 'stone' || o.kind === 'barbed' || o.kind === 'turret';
     if (useScrap ? this.stash.scrap < 1 : this.stash.wood < 1) {
       if (p.warnCd <= 0) {
-        this.pop(p, useScrap ? '修理に鉄スクラップが必要' : '修理に木材が必要', '#ff8080');
+        this.pop(p, useScrap ? '修理に鉄スクラップが必要' : '修理に木材が必要', '#c87a6a');
         p.warnCd = 1.2;
       }
       return;
@@ -1083,7 +1127,7 @@ export class HostSimulation {
     else this.stash.wood -= 1;
     o.hp = Math.min(o.maxHp, o.hp + REPAIR.amount);
     this.changed.add(o.id);
-    this.events.push({ k: 'pop', x: cx, y: cy - 20, t: `修理 +${REPAIR.amount}`, c: '#7dd3ff', id: p.id });
+    this.events.push({ k: 'pop', x: cx, y: cy - 20, t: `修理 +${REPAIR.amount}`, c: '#9fb4c2', id: p.id });
     this.events.push({ k: 'build', x: cx, y: cy, kind: o.kind });
   }
 
@@ -1147,7 +1191,9 @@ export class HostSimulation {
 
   /** タイルに入るコスト（-1 = 通行不可）。建築壁は「壊して進む」ためのコスト付き */
   private enterCost(i: number): number {
-    if (this.world.terrain[i] === T_WALL) return -1;
+    const t = this.world.terrain[i];
+    // 壁・窓・フェンスは通れない（窓越しには見えるが通り抜けられない）
+    if (t === T_WALL || t === T_WINDOW || t === T_FENCE) return -1;
     const o = this.world.objAt(i % MAP_W, Math.floor(i / MAP_W));
     if (!o) return 1;
     if (BREAKABLE_KINDS.has(o.kind)) return 3 + o.hp / 35;
@@ -1554,7 +1600,7 @@ export class HostSimulation {
       const n = sg ? 2 + Math.floor(Math.random() * 3) : 4 + Math.floor(Math.random() * 6);
       if (sg) killer.inv.shells += n;
       else killer.inv.ammo += n;
-      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: sg ? `シェル+${n}` : `弾薬+${n}`, c: '#ffe08a', id: killer.id, s: 'loot' });
+      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: sg ? `シェル+${n}` : `弾薬+${n}`, c: '#d8c48a', id: killer.id, s: 'loot' });
     }
   }
 

@@ -18,6 +18,48 @@ import { MAX_PLAYERS, NAME_MAX } from '../game/constants';
 const ID_PREFIX = 'deadnights2d-v1-';
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
+// ---------------- 大きなメッセージの分割送信 ----------------
+// PeerJS の JSON チャンネルは1メッセージの大きさに上限があるため、
+// 大きいもの（開始時の全オブジェクト一覧など）は文字列にして分割し、受信側で組み立て直す。
+const CHUNK = 12000;
+let chunkSeq = 1;
+interface ChunkMsg {
+  type: 'chunk';
+  cid: number;
+  i: number;
+  n: number;
+  d: string;
+}
+
+function sendBig(conn: DataConnection, msg: object): void {
+  const s = JSON.stringify(msg);
+  if (s.length <= CHUNK) {
+    conn.send(msg);
+    return;
+  }
+  const n = Math.ceil(s.length / CHUNK);
+  const cid = chunkSeq++;
+  for (let i = 0; i < n; i++) conn.send({ type: 'chunk', cid, i, n, d: s.slice(i * CHUNK, (i + 1) * CHUNK) } satisfies ChunkMsg);
+}
+
+/** 分割されたメッセージを組み立てる。完成したら元のメッセージを返す */
+class ChunkAssembler {
+  private parts = new Map<number, string[]>();
+  feed(data: unknown): unknown | null {
+    const m = data as ChunkMsg;
+    if (!m || m.type !== 'chunk') return data;
+    let arr = this.parts.get(m.cid);
+    if (!arr) {
+      arr = new Array(m.n);
+      this.parts.set(m.cid, arr);
+    }
+    arr[m.i] = m.d;
+    for (let i = 0; i < m.n; i++) if (arr[i] === undefined) return null;
+    this.parts.delete(m.cid);
+    return JSON.parse(arr.join(''));
+  }
+}
+
 function genCode(): string {
   let s = '';
   for (let i = 0; i < 6; i++) s += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
@@ -103,7 +145,10 @@ export class NetworkManager {
       conn.send({ type: 'reject', reason } satisfies HostMessage);
       setTimeout(() => conn.close(), 300);
     };
-    conn.on('data', (data) => {
+    const asm = new ChunkAssembler();
+    conn.on('data', (raw) => {
+      const data = asm.feed(raw);
+      if (data === null) return;
       const msg = data as GuestMessage;
       if (!msg) return;
       if (msg.type === 'hello' && slot < 0) {
@@ -146,7 +191,7 @@ export class NetworkManager {
   }
 
   broadcast(msg: HostMessage): void {
-    for (const { conn } of this.conns.values()) if (conn.open) conn.send(msg);
+    for (const { conn } of this.conns.values()) if (conn.open) sendBig(conn, msg);
   }
 
   startGame(info: StartInfo): void {
@@ -194,7 +239,10 @@ export class NetworkManager {
       let lastSnapAt = 0;
 
       conn.on('open', () => conn.send({ type: 'hello', name } satisfies GuestMessage));
-      conn.on('data', (data) => {
+      const asm = new ChunkAssembler();
+      conn.on('data', (raw) => {
+        const data = asm.feed(raw);
+        if (data === null) return;
         const msg = data as HostMessage;
         switch (msg.type) {
           case 'welcome':
@@ -241,7 +289,7 @@ export class NetworkManager {
   }
 
   sendInput(f: InputFrame): void {
-    if (this.hostConn?.open) this.hostConn.send({ type: 'input', f } satisfies GuestMessage);
+    if (this.hostConn?.open) sendBig(this.hostConn, { type: 'input', f } satisfies GuestMessage);
   }
 
   // ======================== 共通 ========================
