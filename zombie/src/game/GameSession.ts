@@ -458,6 +458,11 @@ export class GameSession {
     if (this.localTool !== prevTool) audio.click();
     if (this.input.consume('KeyM')) audio.toggleMute();
     this.muteBtn.textContent = audio.settings.muted ? '🔇' : '🔊';
+    // Esc を先に処理する（重くて Esc と Tab/C が同じフレームに入っても、後から押したほうが効く）
+    if (this.input.consume('Escape')) {
+      this.craftMenu.toggle(false);
+      this.invPanel.toggle(false);
+    }
     if (this.input.consume('KeyC')) {
       this.invPanel.toggle(false);
       this.craftMenu.toggle();
@@ -465,10 +470,6 @@ export class GameSession {
     if (this.input.consume('Tab')) {
       this.craftMenu.toggle(false);
       this.invPanel.toggle();
-    }
-    if (this.input.consume('Escape')) {
-      this.craftMenu.toggle(false);
-      this.invPanel.toggle(false);
     }
     // F：パネルが開いていれば閉じる。作業台がいちばん近ければクラフト画面、それ以外はホストに任せる（ドア・探索・倉庫）
     let interact = this.input.consume('KeyF');

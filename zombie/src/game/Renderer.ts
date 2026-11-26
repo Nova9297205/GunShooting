@@ -134,6 +134,9 @@ export class Renderer {
   // ---- 軽量化 ----
   /** HUD のパネル類（時計・チーム・ステータス・ホットバー・ミニマップ）は別キャンバスに描き、約15Hzで更新 */
   private hudCanvas: HTMLCanvasElement;
+  /** 毎フレーム描き直す HUD（照準・バナー・ヒント・矢印・ログ） */
+  private fastCanvas: HTMLCanvasElement;
+  private fastCtx: CanvasRenderingContext2D;
   private hudCtx: CanvasRenderingContext2D;
   private hudT = 0;
   private hudKey = '';
@@ -159,6 +162,12 @@ export class Renderer {
       document.body.insertBefore(this.hudCanvas, canvas.nextSibling);
     }
     this.hudCtx = this.hudCanvas.getContext('2d')!;
+    this.fastCanvas = (document.getElementById('hud-fx') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    if (!this.fastCanvas.id) {
+      this.fastCanvas.id = 'hud-fx';
+      document.body.insertBefore(this.fastCanvas, this.hudCanvas.nextSibling);
+    }
+    this.fastCtx = this.fastCanvas.getContext('2d')!;
     this.grainEl = (document.getElementById('fx-grain') as HTMLDivElement | null) ?? document.createElement('div');
     if (!this.grainEl.id) {
       this.grainEl.id = 'fx-grain';
@@ -185,6 +194,7 @@ export class Renderer {
   setActive(on: boolean): void {
     for (const el of Object.values(this.ov ?? {})) el.classList.toggle('hidden', !on);
     this.hudCanvas.classList.toggle('hidden', !on);
+    this.fastCanvas.classList.toggle('hidden', !on);
     this.grainEl.classList.toggle('hidden', !on);
     this.canvas.classList.toggle('fx', on);
   }
@@ -192,6 +202,7 @@ export class Renderer {
   destroy(): void {
     this.setActive(false);
     this.hudCtx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+    this.fastCtx.clearRect(0, 0, this.fastCanvas.width, this.fastCanvas.height);
   }
 
   /** CSS の重ね合わせのスタイルを（変わったときだけ）更新 */
@@ -228,6 +239,8 @@ export class Renderer {
     this.canvas.height = Math.floor(this.h * this.dpr);
     this.hudCanvas.width = Math.floor(this.w * this.baseDpr);
     this.hudCanvas.height = Math.floor(this.h * this.baseDpr);
+    this.fastCanvas.width = this.hudCanvas.width;
+    this.fastCanvas.height = this.hudCanvas.height;
     this.hudKey = '';
     this.canvas.style.width = `${this.w}px`;
     this.canvas.style.height = `${this.h}px`;
@@ -427,7 +440,20 @@ export class Renderer {
     ctx.restore();
 
     // 色調・グレインは CSS（#game.fx / #fx-grain）で行う
-    this.drawHUD(view, o, me, dark);
+    // 照準・バナー・ヒントなど毎フレーム変わる HUD は、色調フィルターのかからない透明キャンバスへ
+    {
+      const main = this.ctx;
+      const f = this.fastCtx;
+      f.setTransform(1, 0, 0, 1, 0, 0);
+      f.clearRect(0, 0, this.fastCanvas.width, this.fastCanvas.height);
+      f.setTransform(this.baseDpr, 0, 0, this.baseDpr, 0, 0);
+      this.ctx = f;
+      try {
+        this.drawHUD(view, o, me, dark);
+      } finally {
+        this.ctx = main;
+      }
+    }
   }
 
   /** 視界の計算（昼は広く、夜は懐中電灯の届く範囲だけ） */
@@ -883,7 +909,8 @@ export class Renderer {
     }
     // ---- 色温度（乗算で全体に色味をつける） ----
     // （CSS の multiply 重ね合わせで行う：キャンバスに全画面の乗算をしない）
-    const mix = (c: number) => Math.round(255 + (c - 255) * Math.min(1, amb.a * 2.2));
+    // 以前は暗闇より先に乗算していたので、夜は弱めて同じ見た目に合わせる
+    const mix = (c: number) => Math.round(255 + (c - 255) * Math.min(1, amb.a * 2.2 * (1 - dark * 0.65)));
     this.setOv('tint', 'backgroundColor', amb.a > 0.005 ? `rgb(${mix(amb.r)},${mix(amb.g)},${mix(amb.b)})` : 'rgb(255,255,255)');
     if (dark > 0.01) {
       const l = this.lightCtx;

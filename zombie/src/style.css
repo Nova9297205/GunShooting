@@ -1510,3 +1510,11 @@ input[type='range'] {
   opacity: 0;
   background: radial-gradient(ellipse 70% 70% at 50% 50%, rgba(255, 0, 40, 0) 50%, rgba(255, 0, 40, 1) 100%);
 }
+#hud-fx {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 4;
+  pointer-events: none;
+}
