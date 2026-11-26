@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CO-OP SHOOTER 2D</title>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <!-- タイトル -->
+    <section id="screen-title" class="screen">
+      <div class="card">
+        <h1>CO-OP <span>SHOOTER</span> 2D</h1>
+        <p class="tagline">2〜3人協力 見下ろし型シューティング（P2P / PeerJS）</p>
+        <button id="btn-solo" class="btn">ソロでテスト開始</button>
+        <button id="btn-host" class="btn primary">部屋を作る（ホスト）</button>
+        <div class="join-row">
+          <input id="input-code" maxlength="6" placeholder="ルームID (6桁)" autocomplete="off" spellcheck="false" />
+          <button id="btn-join" class="btn">部屋に参加する（ゲスト）</button>
+        </div>
+        <p id="title-status" class="status"></p>
+        <div class="controls">
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動</div>
+          <div><kbd>マウス</kbd> 照準 / <kbd>左クリック</kbd> 射撃(長押し連射)</div>
+          <div><kbd>Shift</kbd> ダッシュ / <kbd>E</kbd> 長押しで味方を蘇生</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ロビー -->
+    <section id="screen-lobby" class="screen hidden">
+      <div class="card">
+        <h2>ロビー</h2>
+        <div class="room">
+          <span class="label">ルームID</span>
+          <span id="room-code" class="code">------</span>
+          <button id="btn-copy" class="btn small">コピー</button>
+        </div>
+        <ul id="lobby-list" class="slots"></ul>
+        <p id="lobby-status" class="status"></p>
+        <button id="btn-start" class="btn primary">ゲーム開始</button>
+        <button id="btn-leave" class="btn ghost">タイトルへ戻る</button>
+      </div>
+    </section>
+
+    <!-- リザルト -->
+    <section id="screen-result" class="screen hidden">
+      <div class="card">
+        <h2 class="gameover">GAME OVER</h2>
+        <p class="wave-reached">到達ウェーブ: <strong id="result-wave">1</strong></p>
+        <table class="result-table">
+          <thead><tr><th>プレイヤー</th><th>撃破数</th></tr></thead>
+          <tbody id="result-body"></tbody>
+        </table>
+        <button id="btn-result-back" class="btn primary">ロビーへ戻る</button>
+      </div>
+    </section>
+
+    <div id="toast" class="toast hidden"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
