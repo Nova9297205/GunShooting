@@ -313,6 +313,22 @@ export class AudioManager {
     }
   }
 
+  /** UI のクリック音 */
+  click(): void {
+    if (!this.ready || !this.gate('click', 0.04)) return;
+    this.tone({ type: 'triangle', f: 1250, f2: 900, dur: 0.045, g: 0.08 });
+    this.noise({ dur: 0.015, g: 0.05, filter: 'highpass', f: 4000 });
+  }
+
+  private turretShot(x: number, y: number): void {
+    if (!this.gate('tshot', 0.06)) return;
+    const s = this.spatial(x, y);
+    if (!s) return;
+    this.noise({ dur: 0.07, g: 0.3 * s.k, filter: 'bandpass', f: 2600, q: 0.8, pan: s.pan });
+    this.tone({ type: 'square', f: 260, f2: 90, dur: 0.06, g: 0.12 * s.k, lp: 1400, pan: s.pan });
+    this.tone({ f: 3200, dur: 0.03, g: 0.03 * s.k, pan: s.pan });
+  }
+
   emptyClick(): void {
     if (!this.ready || !this.gate('empty', 0.2)) return;
     this.tone({ type: 'square', f: 1400, dur: 0.025, g: 0.08 });
@@ -577,6 +593,9 @@ export class AudioManager {
         break;
       case 'burn':
         this.burn(ev.x, ev.y);
+        break;
+      case 'tshot':
+        this.turretShot(ev.x, ev.y);
         break;
       case 'pop':
         // 自分宛ての通知音だけ鳴らす

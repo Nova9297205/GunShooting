@@ -28,7 +28,7 @@ import {
 } from './constants';
 import type { Decal, Effects } from './Effects';
 import { circleOverlapsTile, clamp } from './physics';
-import type { TileWorld } from './world';
+import { locationAt, type TileWorld } from './world';
 
 /** 落ち影と側面を持つ「高い」建築物 */
 const WALL_KINDS: ReadonlySet<ObjSnap['kind']> = new Set<ObjSnap['kind']>(['stone', 'woodWall', 'ironWall']);
@@ -130,6 +130,9 @@ export class Renderer {
   /** 照準の広がり（連射で広がる） */
   private bloom = 0;
   private lastStash = { wood: 0, scrap: 0 };
+  private forest: CanvasPattern | null = null;
+  private curLoc: string | null = null;
+  private locToast: { text: string; sub: string; color: string; life: number } | null = null;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -237,8 +240,13 @@ export class Renderer {
     const oy = Math.round(this.h / 2 - this.cam.y + shake.y);
 
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.fillStyle = '#0b0d10';
-    ctx.fillRect(0, 0, this.w, this.h);
+    // マップの外側は深い森
+    if (!this.forest) this.forest = makeForestPattern(ctx);
+    ctx.save();
+    ctx.translate(Math.round(this.w / 2 - this.cam.x), Math.round(this.h / 2 - this.cam.y));
+    ctx.fillStyle = this.forest;
+    ctx.fillRect(this.cam.x - this.w / 2 - 20, this.cam.y - this.h / 2 - 20, this.w + 40, this.h + 40);
+    ctx.restore();
 
     // ---- ワールド ----
     ctx.save();
@@ -258,6 +266,15 @@ export class Renderer {
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
+    // 森との境界（柵と影）
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 10;
+    ctx.strokeRect(-5, -5, WORLD_W + 10, WORLD_H + 10);
+    ctx.strokeStyle = '#5a4630';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([14, 6]);
+    ctx.strokeRect(-1, -1, WORLD_W + 2, WORLD_H + 2);
+    ctx.setLineDash([]);
     const visible: ObjSnap[] = [];
     for (const ob of this.world.objects.values()) {
       const x = ob.tx * TILE;
@@ -284,7 +301,7 @@ export class Renderer {
     this.drawBullets(view, o);
     for (const z of view.zombies) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
     for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
-    for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time);
+    for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
     this.drawCloudShadows(view.minute, vx0, vy0, vx1, vy1);
     this.drawStructureBars(visible);
@@ -907,6 +924,7 @@ export class Renderer {
     }
 
     this.drawClock(view);
+    this.drawLocationToast(me, o.dt);
     this.drawTeam(view, o.localId);
     if (me) this.drawSelfPanel(view, me);
     this.drawHotbar(o, view);
@@ -1035,6 +1053,44 @@ export class Renderer {
     void dark;
   }
 
+  /** ロケーションに入ったときの表示（例：「警察署 ★★★ 危険」） */
+  private drawLocationToast(me: PlayerSnap | undefined, dt: number): void {
+    if (me) {
+      const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
+      const key = loc ? `${loc.name}${loc.x},${loc.y}` : null;
+      if (key !== this.curLoc) {
+        this.curLoc = key;
+        if (loc) {
+          const danger = loc.tier >= 3 ? '危険：見張りのゾンビ多数・レア物資' : loc.tier === 2 ? 'やや危険：弾薬・火薬・鉄が見つかりやすい' : '比較的安全：食料・布・薬草';
+          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.tier >= 3 ? '#ff8f8f' : loc.tier === 2 ? '#ffe08a' : '#a8ffc4', life: 3.5 };
+        }
+      }
+    }
+    if (!this.locToast) return;
+    const t = this.locToast;
+    t.life -= dt;
+    if (t.life <= 0) {
+      this.locToast = null;
+      return;
+    }
+    const { ctx, w } = this;
+    ctx.globalAlpha = Math.min(1, t.life, (3.5 - t.life) * 4);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = '900 22px "Segoe UI", sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeText(t.text, w / 2, 90);
+    ctx.fillStyle = t.color;
+    ctx.fillText(t.text, w / 2, 90);
+    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+    ctx.lineWidth = 4;
+    ctx.strokeText(t.sub, w / 2, 118);
+    ctx.fillStyle = '#e6ebf5';
+    ctx.fillText(t.sub, w / 2, 118);
+    ctx.globalAlpha = 1;
+  }
+
   private drawClock(view: ViewState): void {
     const { ctx, w } = this;
     const pw = 300;
@@ -1127,7 +1183,7 @@ export class Renderer {
     const { ctx, h } = this;
     const x = 12;
     const pw = 230;
-    const ph = 118;
+    const ph = 132;
     const y = h - ph - 28;
     panel(ctx, x, y, pw, ph);
     ctx.textAlign = 'left';
@@ -1152,32 +1208,35 @@ export class Renderer {
     bar('DASH', y + 42, 1 - me.dashCd / PLAYER.dashCooldown, '#4da3ff', me.dashCd <= 0 ? 'READY [Shift]' : '');
 
     ctx.font = '12px "Segoe UI", sans-serif';
-    const items: [string, string, string][] = [
-      ['弾', `${me.inv.mag}/${me.inv.ammo}`, '#ffd84d'],
-      ['火薬', String(me.inv.gunpowder), '#d0a070'],
-      ['食料', String(me.inv.food), '#ffcf6b'],
-      ['救急', String(me.inv.medkit), '#7dffb0'],
+    const rows: [string, string, string][][] = [
+      [
+        ['弾', `${me.inv.mag}/${me.inv.ammo}`, '#ffd84d'],
+        ['シェル', `${me.inv.smag}/${me.inv.shells}`, '#ff9a6b'],
+        ['火薬', String(me.inv.gunpowder), '#d0a070'],
+        ['キット', String(me.inv.kit), '#9fd8ff'],
+      ],
+      [
+        ['布', String(me.inv.cloth), '#e6d8c0'],
+        ['薬草', String(me.inv.herb), '#8fdc7a'],
+        ['パーツ', String(me.inv.parts), '#ffb86b'],
+        ['木/鉄', `${view.stash.wood}/${view.stash.scrap}`, '#d9a66b'],
+      ],
     ];
-    items.forEach(([k, v, c], i) => {
-      const ix = x + 10 + i * 55;
-      ctx.fillStyle = '#8f9bb3';
-      ctx.font = '10px "Segoe UI", sans-serif';
-      ctx.fillText(k, ix, y + 64);
-      ctx.fillStyle = c;
-      ctx.font = 'bold 13px "Segoe UI", sans-serif';
-      ctx.fillText(v, ix, y + 78);
-    });
-    ctx.fillStyle = '#8f9bb3';
-    ctx.font = '10px "Segoe UI", sans-serif';
-    ctx.fillText('共有資材', x + 10, y + 98);
-    ctx.font = 'bold 13px "Segoe UI", sans-serif';
-    ctx.fillStyle = '#d9a66b';
-    ctx.fillText(`木材 ${view.stash.wood}`, x + 64, y + 98);
-    ctx.fillStyle = '#c9d3e6';
-    ctx.fillText(`鉄 ${view.stash.scrap}`, x + 140, y + 98);
+    rows.forEach((row, ri) =>
+      row.forEach(([k, v, c], i) => {
+        const ix = x + 10 + i * 55;
+        const iy = y + 62 + ri * 28;
+        ctx.fillStyle = '#8f9bb3';
+        ctx.font = '10px "Segoe UI", sans-serif';
+        ctx.fillText(k, ix, iy);
+        ctx.fillStyle = c;
+        ctx.font = 'bold 12px "Segoe UI", sans-serif';
+        ctx.fillText(v, ix, iy + 13);
+      }),
+    );
     ctx.font = '9px "Segoe UI", sans-serif';
     ctx.fillStyle = '#6f7a90';
-    ctx.fillText('[F]調べる/使う [R]リロード [C]弾薬作成 [Q]食事 [H]救急', x + 10, y + ph - 6);
+    ctx.fillText('[F]調べる [R]リロード [C]クラフト [Q]食事 [H]救急', x + 10, y + ph - 7);
   }
 
   private drawHotbar(o: RenderOptions, view: ViewState): void {
@@ -1304,6 +1363,19 @@ export class Renderer {
     const my = this.h - mh - 12;
     panel(ctx, mx - 4, my - 4, mw + 8, mh + 8);
     ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
+    // ロケーション（★の数で危険度）
+    for (const loc of this.world.locations) {
+      if (loc.kind === 'ruin') continue;
+      const col = loc.tier >= 3 ? '#ff6b6b' : loc.tier === 2 ? '#ffd84d' : '#9fe08a';
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(mx + loc.x * s - 1, my + loc.y * s - 1, loc.w * s + 2, loc.h * s + 2);
+      ctx.font = 'bold 8px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = col;
+      ctx.fillText('★'.repeat(loc.tier), mx + (loc.x + loc.w / 2) * s, my + loc.y * s - 1);
+    }
     const k = s / TILE;
     for (const ob of this.world.objects.values()) {
       let c: string | null = null;
@@ -1313,6 +1385,10 @@ export class Renderer {
       else if (ob.kind === 'spike') c = '#8a6a3a';
       else if (ob.kind === 'campfire' || ob.kind === 'torch') c = '#ff9a3d';
       else if (ob.kind === 'crate' && ob.ready) c = '#ffe08a';
+      else if (ob.kind === 'mcrate' && ob.ready) c = '#ff9a4d';
+      else if (ob.kind === 'bench') c = '#ffd84d';
+      else if (ob.kind === 'turret') c = '#9fd8ff';
+      else if (ob.kind === 'barbed') c = '#8a8f96';
       if (!c) continue;
       ctx.fillStyle = c;
       ctx.fillRect(mx + ob.tx * s, my + ob.ty * s, s, s);
@@ -1471,6 +1547,42 @@ function drawBlueprintIcon(ctx: CanvasRenderingContext2D, kind: BuildKind, x: nu
       }
       ctx.stroke();
       break;
+    case 'barbed':
+      ctx.strokeStyle = '#a3acb7';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      for (let i = 0; i <= 24; i++) {
+        const px = -12 + i;
+        const py = Math.sin(i * 1.3) * 8;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = '#5b4a3a';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-12, -10);
+      ctx.lineTo(-12, 10);
+      ctx.moveTo(12, -10);
+      ctx.lineTo(12, 10);
+      ctx.stroke();
+      break;
+    case 'turret':
+      ctx.strokeStyle = '#2a2f37';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 2);
+      ctx.lineTo(-9, 11);
+      ctx.moveTo(0, 2);
+      ctx.lineTo(9, 11);
+      ctx.stroke();
+      ctx.fillStyle = '#5f6b7a';
+      ctx.fillRect(-7, -6, 14, 10);
+      ctx.fillStyle = '#1b1f26';
+      ctx.fillRect(5, -3, 10, 4);
+      ctx.fillStyle = '#5bff8c';
+      ctx.fillRect(-2, -3, 3, 3);
+      break;
     case 'torch':
       ctx.strokeStyle = '#7a5532';
       ctx.lineWidth = 4;
@@ -1491,4 +1603,36 @@ function drawBlueprintIcon(ctx: CanvasRenderingContext2D, kind: BuildKind, x: nu
       break;
   }
   ctx.restore();
+}
+
+/** マップ外の森（繰り返しパターン） */
+function makeForestPattern(ctx: CanvasRenderingContext2D): CanvasPattern {
+  const c = document.createElement('canvas');
+  c.width = 160;
+  c.height = 160;
+  const g = c.getContext('2d')!;
+  g.fillStyle = '#12200f';
+  g.fillRect(0, 0, 160, 160);
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (let i = 0; i < 26; i++) {
+    const x = rnd() * 160;
+    const y = rnd() * 160;
+    const r = 14 + rnd() * 16;
+    for (const [dx, dy] of [[0, 0], [160, 0], [-160, 0], [0, 160], [0, -160]]) {
+      g.fillStyle = 'rgba(0,0,0,0.35)';
+      g.beginPath();
+      g.arc(x + dx + 6, y + dy + 8, r, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = ['#1a3218', '#203a1c', '#16291a'][i % 3];
+      g.beginPath();
+      g.arc(x + dx, y + dy, r, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = 'rgba(90,130,70,0.18)';
+      g.beginPath();
+      g.arc(x + dx - r * 0.3, y + dy - r * 0.3, r * 0.45, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+  return ctx.createPattern(c, 'repeat')!;
 }

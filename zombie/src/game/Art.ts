@@ -44,8 +44,8 @@ export interface ArtSet {
   bakeTerrain(world: TileWorld): BakedTerrain;
   /** 地面レベル（スパイク・焚き火・切り株・クレート・影・壁の側面）。描いたら true */
   drawLowObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number, tall: TallQuery): boolean;
-  /** 高いオブジェクト（壁の天面・木の葉・車） */
-  drawTallObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number): void;
+  /** 高いオブジェクト（壁の天面・木の葉・車・タレットの砲身） */
+  drawTallObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number, aim?: { a: number; flash: number }): void;
   drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: ZombieAnim, t: number): void;
   drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerSnap, color: string, anim: PlayerAnim, t: number): void;
   /** 倒れたゾンビの亡骸 */
@@ -301,6 +301,128 @@ export class VectorArt implements ArtSet {
       case 'stone':
         southFace(ctx, x, y, '#4f4c48', '#393734', tall);
         return false;
+      case 'turret': {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(cx + 5, cy + 7, 16, 12, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // 三脚
+        ctx.strokeStyle = '#2a2f37';
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * Math.PI * 2 + 0.5;
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx + Math.cos(a) * 16, cy + Math.sin(a) * 16);
+        }
+        ctx.stroke();
+        return false;
+      }
+      case 'barbed': {
+        const ratio = o.hp / o.maxHp;
+        ctx.globalAlpha = 0.55 + ratio * 0.45;
+        ctx.strokeStyle = '#5b4a3a';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(x + 4, y + 8);
+        ctx.lineTo(x + 4, y + 34);
+        ctx.moveTo(x + TILE - 4, y + 8);
+        ctx.lineTo(x + TILE - 4, y + 34);
+        ctx.stroke();
+        // コイル状の鉄線
+        for (const [dy, col] of [
+          [0, '#3c4148'],
+          [-1, '#a3acb7'],
+        ] as const) {
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          for (let i = 0; i <= 28; i++) {
+            const px = x + 3 + (i / 28) * (TILE - 6);
+            const py = y + 20 + dy + Math.sin(i * 1.35) * 9;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.stroke();
+        }
+        ctx.fillStyle = '#c3ccd6';
+        for (let i = 0; i < 6; i++) ctx.fillRect(x + 6 + i * 5.5, y + 19 + Math.sin(i * 2) * 8, 2, 2);
+        ctx.globalAlpha = 1;
+        return true;
+      }
+      case 'mcrate': {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(x + 8, y + 12, 32, 26);
+        const lg = ctx.createLinearGradient(x, y + 6, x, y + 34);
+        lg.addColorStop(0, o.ready ? '#5d6b3c' : '#3f4733');
+        lg.addColorStop(1, o.ready ? '#3e4a26' : '#2c3324');
+        ctx.fillStyle = lg;
+        roundRect(ctx, x + 3, y + 6, 34, 28, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#2a321b';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(x + 3, y + 18, 34, 3);
+        // ステンシル文字風の印
+        ctx.fillStyle = o.ready ? '#e8d9a0' : '#7d7a60';
+        ctx.fillRect(x + 8, y + 10, 10, 2);
+        ctx.fillRect(x + 8, y + 24, 14, 2);
+        ctx.fillStyle = o.ready ? '#c0392b' : '#6b2a24';
+        ctx.fillRect(x + 26, y + 9, 7, 7);
+        if (o.ready) {
+          const pulse = 0.5 + Math.sin(t * 4 + o.id) * 0.35;
+          ctx.strokeStyle = `rgba(255,180,90,${pulse})`;
+          ctx.lineWidth = 2;
+          roundRect(ctx, x + 1, y + 4, 38, 32, 4);
+          ctx.stroke();
+        }
+        return true;
+      }
+      case 'bench': {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(x + 6, y + 12, 36, 26);
+        ctx.fillStyle = '#5a3a1e';
+        ctx.fillRect(x + 3, y + 26, 4, 10);
+        ctx.fillRect(x + 33, y + 26, 4, 10);
+        const lg = ctx.createLinearGradient(x, y + 4, x, y + 28);
+        lg.addColorStop(0, '#b07a44');
+        lg.addColorStop(1, '#7a5230');
+        ctx.fillStyle = lg;
+        ctx.fillRect(x + 1, y + 5, 38, 23);
+        ctx.strokeStyle = 'rgba(60,35,15,0.5)';
+        ctx.lineWidth = 1;
+        for (let i = 1; i < 4; i++) {
+          ctx.beginPath();
+          ctx.moveTo(x + 1, y + 5 + i * 6 + 0.5);
+          ctx.lineTo(x + 39, y + 5 + i * 6 + 0.5);
+          ctx.stroke();
+        }
+        // 工具：のこぎり・レンチ・万力
+        ctx.fillStyle = '#c3ccd6';
+        ctx.beginPath();
+        ctx.moveTo(x + 5, y + 9);
+        ctx.lineTo(x + 19, y + 9);
+        ctx.lineTo(x + 19, y + 14);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#7a5532';
+        ctx.fillRect(x + 19, y + 8, 5, 6);
+        ctx.strokeStyle = '#9aa3ad';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(x + 24, y + 22);
+        ctx.lineTo(x + 34, y + 16);
+        ctx.stroke();
+        ctx.fillStyle = '#4b5563';
+        ctx.fillRect(x + 6, y + 18, 8, 7);
+        const pulse = 0.35 + Math.sin(t * 2.5) * 0.2;
+        ctx.strokeStyle = `rgba(255,216,77,${pulse})`;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y + 4, 40, 25);
+        return true;
+      }
       case 'woodWall':
         southFace(ctx, x, y, '#5e3c20', '#3e2614', tall);
         return false;
@@ -397,7 +519,7 @@ export class VectorArt implements ArtSet {
     ctx.restore();
   }
 
-  drawTallObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number): void {
+  drawTallObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number, aim?: { a: number; flash: number }): void {
     const x = o.tx * TILE;
     const y = o.ty * TILE;
     const cx = x + TILE / 2;
@@ -495,6 +617,45 @@ export class VectorArt implements ArtSet {
         ctx.fillRect(-18, -10, 36, 2);
         if (ratio < 0.7) cracks(ctx, -20, -20, ratio, o.id);
         ctx.restore();
+        break;
+      }
+      case 'turret': {
+        const a = aim?.a ?? -Math.PI / 2 + Math.sin(t * 0.8 + o.id) * 0.6;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(a);
+        ctx.fillStyle = '#1b1f26';
+        roundRect(ctx, 2, -4, 22, 8, 2);
+        ctx.fill();
+        ctx.fillStyle = '#4b5563';
+        ctx.fillRect(4, -3, 18, 2);
+        ctx.fillStyle = '#20252d';
+        roundRect(ctx, -9, -9, 18, 18, 4);
+        ctx.fill();
+        ctx.fillStyle = '#5f6b7a';
+        roundRect(ctx, -8, -8, 16, 16, 4);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.fillRect(-7, -7, 14, 2);
+        if (aim && aim.flash > 0) {
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.fillStyle = 'rgba(255,220,130,0.95)';
+          ctx.beginPath();
+          ctx.moveTo(24, -4);
+          ctx.lineTo(36, 0);
+          ctx.lineTo(24, 4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.globalCompositeOperation = 'source-over';
+        }
+        ctx.restore();
+        // 残弾ランプ
+        const ammo = o.ready / 60;
+        ctx.fillStyle = ammo > 0.3 ? '#5bff8c' : ammo > 0 ? '#ffd84d' : '#ff4646';
+        ctx.beginPath();
+        ctx.arc(cx, cy, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        cracks(ctx, x, y, ratio, o.id);
         break;
       }
       case 'stone': {

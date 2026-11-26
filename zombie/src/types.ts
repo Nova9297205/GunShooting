@@ -23,9 +23,13 @@ export type ObjKind =
   | 'woodWall'
   | 'ironWall'
   | 'spike'
-  | 'torch';
+  | 'torch'
+  | 'mcrate'
+  | 'bench'
+  | 'barbed'
+  | 'turret';
 
-export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch';
+export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'barbed' | 'turret';
 
 /** ホットバーのスロット番号（キー 1〜9 に対応） */
 export const Tool = {
@@ -55,7 +59,8 @@ export interface InputFrame {
   dash: boolean;
   interact: boolean;
   reload: boolean;
-  craft: boolean;
+  /** クラフトするレシピID（なければ空文字） */
+  craft: string;
   eat: boolean;
   heal: boolean;
   /** 選択中のスロット (Tool.*) */
@@ -92,6 +97,14 @@ export interface Inventory {
   gun: number;
   /** ショットガン所持 0/1 */
   shotgun: number;
+  /** 布・薬草・武器パーツ（クラフト素材） */
+  cloth: number;
+  herb: number;
+  parts: number;
+  /** タレットキット（クラフトして設置） */
+  kit: number;
+  /** 斧のランク：0=斧 1=鋼の斧 */
+  axe: number;
   gunpowder: number;
   food: number;
   medkit: number;
@@ -148,7 +161,7 @@ export interface ObjSnap {
   ty: number;
   hp: number;
   maxHp: number;
-  /** クレート/収納箱: 1=物資あり 0=回収済み */
+  /** クレート/収納箱: 1=物資あり 0=回収済み ／ タレット: 残弾数 */
   ready: number;
 }
 
@@ -177,7 +190,8 @@ export type GameEvent =
   | { k: 'pop'; x: number; y: number; t: string; c: string; id: number; s?: SoundKey }
   | { k: 'banner'; t: string; s: string; c: string; snd?: SoundKey }
   | { k: 'burn'; x: number; y: number }
-  | { k: 'noise'; x: number; y: number; r: number };
+  | { k: 'noise'; x: number; y: number; r: number }
+  | { k: 'tshot'; x: number; y: number; a: number; id: number };
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {

@@ -70,6 +70,23 @@
       </div>
     </section>
 
+    <!-- ゲーム中のHUDボタン -->
+    <div id="hud-buttons" class="hidden">
+      <button id="btn-craft" class="hud-btn" title="クラフト [C]">🛠 クラフト <kbd>C</kbd></button>
+      <button id="btn-mute" class="hud-btn" title="ミュート [M]">🔊</button>
+    </div>
+
+    <!-- クラフトメニュー -->
+    <div id="craft-panel" class="craft hidden">
+      <div class="craft-head">
+        <span>クラフト</span>
+        <span id="craft-bench"></span>
+        <button id="craft-close" class="hud-btn">×</button>
+      </div>
+      <div id="craft-list"></div>
+      <p class="craft-hint">[C] / [Esc] で閉じる ・ 木材と鉄はチーム共有、その他は自分の持ち物から消費 ・ ゲームは止まりません</p>
+    </div>
+
     <div id="toast" class="toast hidden"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

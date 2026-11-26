@@ -19,7 +19,8 @@ import type {
 } from '../types';
 import { Tool } from '../types';
 import { audio } from './Audio';
-import { AXE, BLUEPRINTS, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, WEAPONS, ZOMBIE } from './constants';
+import { CraftMenu } from '../ui/CraftMenu';
+import { AXE, BENCH_RANGE, BLUEPRINTS, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, WEAPONS, ZOMBIE } from './constants';
 import { Effects } from './Effects';
 import type { HostSimulation } from './Engine';
 import { InputController } from './Input';
@@ -83,13 +84,19 @@ export class GameSession {
   private localBullets: LocalBullet[] = [];
   private localBulletId = -1;
   private campfires: { x: number; y: number }[] = [];
+  private craftMenu: CraftMenu;
+  private pendingCraft = '';
+  private hudButtons = document.getElementById('hud-buttons')!;
+  private muteBtn = document.getElementById('btn-mute')!;
 
   constructor(private o: SessionOptions) {
     this.sim = o.sim ?? null;
     if (this.sim) {
       this.world = this.sim.world;
     } else {
-      this.world = new TileWorld(generateTerrain(o.info.seed));
+      const gen = generateTerrain(o.info.seed);
+      this.world = new TileWorld(gen.terrain);
+      this.world.locations = gen.locations;
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
     }
     this.renderer = new Renderer(o.canvas, this.world);
@@ -100,6 +107,14 @@ export class GameSession {
       swing: (p) => audio.swing(p.x, p.y, p.id === o.localId),
       reload: (p) => audio.reload(p.x, p.y, p.id === o.localId),
     };
+    this.craftMenu = new CraftMenu(
+      document.getElementById('craft-panel')!,
+      (id) => {
+        this.pendingCraft = id;
+        audio.click();
+      },
+      () => audio.click(),
+    );
     for (const ob of this.world.objects.values()) {
       if (ob.kind === 'campfire') this.campfires.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE });
     }
@@ -113,9 +128,17 @@ export class GameSession {
     this.lastPump = performance.now();
     if (this.sim) this.pumpTimer = window.setInterval(this.pump, 8);
     this.rafId = requestAnimationFrame(this.frame);
+    this.hudButtons.classList.remove('hidden');
+    document.getElementById('btn-craft')!.onclick = () => this.craftMenu.toggle();
+    this.muteBtn.onclick = () => {
+      audio.toggleMute();
+      audio.click();
+    };
   }
 
   stop(): void {
+    this.hudButtons.classList.add('hidden');
+    this.craftMenu.destroy();
     this.running = false;
     cancelAnimationFrame(this.rafId);
     clearInterval(this.pumpTimer);
@@ -378,8 +401,20 @@ export class GameSession {
     }
 
     // ---- 入力 ----
+    const prevTool = this.localTool;
+    const prevBp = this.localBp;
     this.handleToolKeys();
+    if (this.localTool !== prevTool || this.localBp !== prevBp) audio.click();
     if (this.input.consume('KeyM')) audio.toggleMute();
+    this.muteBtn.textContent = audio.settings.muted ? '🔇' : '🔊';
+    if (this.input.consume('KeyC')) this.craftMenu.toggle();
+    if (this.input.consume('Escape')) this.craftMenu.toggle(false);
+    // 作業台の前で F を押したらクラフトメニュー
+    let interact = this.input.consume('KeyF');
+    if (interact && myPos && this.nearBench(myPos)) {
+      this.craftMenu.toggle(true);
+      interact = false;
+    }
     const mv = this.input.getMove();
     const mw = this.renderer.screenToWorld(this.input.mouseX, this.input.mouseY);
     const aim = myPos ? Math.atan2(mw.y - myPos.y, mw.x - myPos.x) : this.localAim;
@@ -393,9 +428,9 @@ export class GameSession {
       fire: this.input.consumeFire(),
       revive: this.input.isDown('KeyE'),
       dash: this.input.consumeDash(),
-      interact: this.input.consume('KeyF'),
+      interact,
       reload: this.input.consume('KeyR'),
-      craft: this.input.consume('KeyC'),
+      craft: this.pendingCraft,
       eat: this.input.consume('KeyQ'),
       heal: this.input.consume('KeyH'),
       tool: this.localTool,
@@ -405,6 +440,7 @@ export class GameSession {
       ty: Math.floor(mw.y / TILE),
     };
 
+    this.pendingCraft = '';
     let view: ViewState | null;
     if (this.sim) {
       this.sim.queueInput(localId, frame);
@@ -431,6 +467,7 @@ export class GameSession {
     }
 
     const me = view.players.find((p) => p.id === localId);
+    if (me) this.craftMenu.update(me.inv, view.stash, this.nearBench(me));
     // 弾切れのカチッという音
     if (
       me &&
@@ -511,6 +548,13 @@ export class GameSession {
     }
   }
 
+  private nearBench(pos: { x: number; y: number }): boolean {
+    for (const ob of this.world.objects.values()) {
+      if (ob.kind === 'bench' && Math.hypot((ob.tx + 0.5) * TILE - pos.x, (ob.ty + 0.5) * TILE - pos.y) <= BENCH_RANGE) return true;
+    }
+    return false;
+  }
+
   private interactHint(me: PlayerSnap): string | null {
     const ptx = Math.floor(me.x / TILE);
     const pty = Math.floor(me.y / TILE);
@@ -519,14 +563,21 @@ export class GameSession {
     for (let ty = pty - 2; ty <= pty + 2; ty++)
       for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
         const ob = this.world.objAt(tx, ty);
-        if (!ob || !ob.ready || (ob.kind !== 'crate' && ob.kind !== 'box')) continue;
+        if (!ob) continue;
         const d = Math.hypot((tx + 0.5) * TILE - me.x, (ty + 0.5) * TILE - me.y);
-        if (d < bd) {
+        if (d >= bd) continue;
+        let h: string | null = null;
+        if (ob.ready && ob.kind === 'crate') h = '[F] 物資クレートを調べる';
+        else if (ob.ready && ob.kind === 'mcrate') h = '[F] 軍用クレートを調べる（レア物資）';
+        else if (ob.ready && ob.kind === 'box') h = '[F] 収納箱を開ける';
+        else if (ob.kind === 'turret') h = `[F] タレットに弾薬を補充（残弾 ${ob.ready}/60）`;
+        if (h) {
           bd = d;
-          best = ob.kind === 'crate' ? '[F] 物資クレートを調べる' : '[F] 収納箱を開ける';
+          best = h;
         }
       }
     if (best) return best;
+    if (this.nearBench(me)) return '[F] / [C] 作業台でクラフト';
     if (this.localTool !== Tool.Melee) {
       for (const dist of [30, 52]) {
         const ob = this.world.objAt(

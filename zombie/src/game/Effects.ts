@@ -94,6 +94,8 @@ export class Effects {
   kickY = 0;
   /** 画面揺れの距離減衰の基準（カメラ中心） */
   listener = { x: 0, y: 0 };
+  /** タレットごとの最後の射撃方向（見た目用） */
+  turretAim = new Map<number, { a: number; flash: number }>();
 
   /** 位置に応じて減衰する画面揺れ */
   shakeAt(x: number, y: number, amount: number): void {
@@ -257,6 +259,7 @@ export class Effects {
       c.life -= dt;
     }
     this.corpses = this.corpses.filter((c) => c.life > 0);
+    for (const t of this.turretAim.values()) t.flash = Math.max(0, t.flash - dt);
     const kk = Math.exp(-14 * dt);
     this.kickX *= kk;
     this.kickY *= kk;
@@ -370,6 +373,11 @@ export class Effects {
         this.burst(ev.x, ev.y, '#ff9a3d', 16, 120, 1.0, 4, 'spark', true, -Math.PI / 2, 1.2);
         this.burst(ev.x, ev.y, '#555', 10, 60, 1.4, 8, 'smoke', false, -Math.PI / 2, 1);
         this.decal(ev.x, ev.y, 18, 'scorch', 40);
+        break;
+      case 'tshot':
+        this.turretAim.set(ev.id, { a: ev.a, flash: 0.06 });
+        this.burst(ev.x + Math.cos(ev.a) * 24, ev.y + Math.sin(ev.a) * 24, '#ffd27a', 3, 180, 0.12, 1.5, 'spark', true, ev.a, 0.6);
+        this.casing(ev.x - Math.cos(ev.a) * 12, ev.y - Math.sin(ev.a) * 12, ev.a, 'rifle');
         break;
       case 'noise':
         this.ring(ev.x, ev.y, '#5a6270', 46, 0.25); // 銃声（騒音）の小さな波紋

@@ -130,6 +130,10 @@ export const OBJ_HP: Record<ObjKind, number> = {
   ironWall: 950,
   spike: 160,
   torch: 60,
+  mcrate: 1,
+  bench: 1,
+  barbed: 140,
+  turret: 320,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -141,19 +145,24 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
   'stone',
   'woodWall',
   'ironWall',
+  'mcrate',
+  'bench',
+  'turret',
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */
-export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box']);
+export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench']);
 
 /** ゾンビが破壊して進む建築物 */
-export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall']);
+export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall', 'turret']);
 
 export const BUILD_COST: Record<BuildKind, { wood: number; scrap: number }> = {
   woodWall: { wood: 5, scrap: 0 },
   ironWall: { wood: 0, scrap: 6 },
   spike: { wood: 4, scrap: 0 },
   torch: { wood: 2, scrap: 0 },
+  barbed: { wood: 0, scrap: 3 },
+  turret: { wood: 0, scrap: 4 },
 };
 
 export const SPIKE = {
@@ -170,7 +179,8 @@ export const REPAIR = {
 export const REGROW = {
   tree: 150,
   car: 220,
-  crate: 110,
+  crate: 150,
+  mcrate: 300,
   box: 0, // 収納箱は毎朝補充
 };
 
@@ -195,7 +205,49 @@ export const BLUEPRINTS: { kind: BuildKind; name: string }[] = [
   { kind: 'ironWall', name: '鉄の壁' },
   { kind: 'spike', name: 'ウッドスパイク' },
   { kind: 'torch', name: '松明' },
+  { kind: 'barbed', name: '有刺鉄線' },
+  { kind: 'turret', name: '自動タレット' },
 ];
+
+/** 有刺鉄線：上を通るゾンビを大きく減速＋少しダメージ */
+export const BARBED = { dps: 9, slow: 0.32, wearPerSec: 3 };
+
+/** 自動タレット */
+export const TURRET = { range: 340, fireInterval: 0.3, damage: 17, maxAmmo: 60, startAmmo: 30, noise: 260 };
+
+/** クラフト素材の名前 */
+export const MATERIAL_NAMES = {
+  wood: '木材',
+  scrap: '鉄',
+  gunpowder: '火薬',
+  cloth: '布',
+  herb: '薬草',
+  parts: '武器パーツ',
+} as const;
+export type MaterialId = keyof typeof MATERIAL_NAMES;
+
+export interface Recipe {
+  id: string;
+  name: string;
+  desc: string;
+  /** 作業台の近くでしか作れない */
+  bench: boolean;
+  cost: Partial<Record<MaterialId, number>>;
+}
+
+/** クラフトレシピ（木材・鉄はチーム共有、それ以外は個人の持ち物から消費） */
+export const RECIPES: Recipe[] = [
+  { id: 'ammo', name: '弾薬 ×12', desc: 'ハンドガン・ライフル用の弾', bench: false, cost: { gunpowder: 1, scrap: 1 } },
+  { id: 'shells', name: 'ショットガンシェル ×6', desc: 'ショットガン用の散弾', bench: false, cost: { gunpowder: 2, scrap: 1 } },
+  { id: 'medkit', name: '救急キット', desc: 'HPを55回復する', bench: false, cost: { cloth: 2, herb: 1 } },
+  { id: 'kit', name: 'タレットキット', desc: '建築ツールで設置。近づくゾンビを自動で撃つ（[F]で弾を補充）', bench: true, cost: { scrap: 8, parts: 2, gunpowder: 2 } },
+  { id: 'rifle', name: 'アサルトライフル', desc: '銃をフルオート30連発に強化', bench: true, cost: { parts: 3, scrap: 10 } },
+  { id: 'shotgun', name: 'ショットガン', desc: '近距離の群れを一掃する散弾銃', bench: true, cost: { parts: 2, scrap: 8, wood: 4 } },
+  { id: 'axe', name: '鋼の斧', desc: '近接ダメージ1.6倍・採取量2倍', bench: true, cost: { scrap: 6, parts: 1 } },
+];
+
+/** 作業台を使える距離(px) */
+export const BENCH_RANGE = 110;
 
 // ---------------- 地形 ----------------
 export const T_GRASS = 0;

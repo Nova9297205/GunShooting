@@ -308,3 +308,142 @@ details.controls summary {
   color: #6f7a90;
   text-align: center;
 }
+
+#hud-buttons {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 20;
+}
+.hud-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(10, 12, 16, 0.75);
+  color: #e6ebf5;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.hud-btn:hover {
+  background: rgba(40, 50, 70, 0.9);
+}
+.craft {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 140px);
+  overflow: auto;
+  z-index: 30;
+  background: rgba(14, 17, 24, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+.craft-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 900;
+  font-size: 18px;
+  margin-bottom: 8px;
+}
+.craft-head #craft-bench {
+  font-size: 11px;
+  font-weight: 700;
+  margin-right: auto;
+}
+#craft-bench.ok {
+  color: #7dffb0;
+}
+#craft-bench.ng {
+  color: #ffb86b;
+}
+.craft .mats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #aab4c8;
+  margin-bottom: 8px;
+}
+.craft .mats b {
+  color: #fff;
+}
+.recipe {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #1a2130;
+  margin-bottom: 6px;
+}
+.recipe.dim {
+  opacity: 0.6;
+}
+.recipe .r-main {
+  flex: 1;
+}
+.recipe p {
+  margin: 2px 0 4px;
+  font-size: 11px;
+  color: #8f9bb3;
+}
+.recipe .tag {
+  margin-left: 6px;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #3a4a2a;
+  color: #c8f0a0;
+}
+.costs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cost {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.cost small {
+  opacity: 0.6;
+  margin-left: 2px;
+}
+.cost.ok {
+  color: #a8ffc4;
+}
+.cost.ng {
+  color: #ff8f8f;
+}
+.recipe button {
+  appearance: none;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-weight: 800;
+  background: linear-gradient(180deg, #d9534f, #a8322e);
+  color: #fff;
+  cursor: pointer;
+  min-width: 92px;
+}
+.recipe button:disabled {
+  background: #2a3142;
+  color: #6f7a90;
+  cursor: not-allowed;
+}
+.craft-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #6f7a90;
+  text-align: center;
+}
