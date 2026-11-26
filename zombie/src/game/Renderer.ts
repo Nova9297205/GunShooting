@@ -522,6 +522,13 @@ export class Renderer {
         a.lastAtk = z.atk;
       }
       a.lunge = Math.max(0, a.lunge - dt * 4);
+      // 予備動作：追跡中に近くのプレイヤーへ迫ると腕を振り上げる
+      let nd = Infinity;
+      if (z.alert === 2) for (const p of view.players) if (p.status === 'alive') nd = Math.min(nd, Math.hypot(p.x - z.x, p.y - z.y));
+      const target = nd < 110 ? 1 - Math.max(0, nd - 35) / 75 : 0;
+      a.near = (a.near ?? 0) + (target - (a.near ?? 0)) * Math.min(1, dt * 10);
+      // 被弾ののけぞり
+      a.hit = z.flash > 0 ? 1 : Math.max(0, (a.hit ?? 0) - dt * 6);
       const zm = Math.hypot(z.x - a.lastX, z.y - a.lastY);
       a.walk += zm * 0.2;
       a.move += (Math.min(1, zm / Math.max(1e-3, dt) / 60) - a.move) * Math.min(1, dt * 8);

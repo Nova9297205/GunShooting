@@ -10,6 +10,7 @@ import type { Corpse } from './Effects';
 import { Tool } from '../types';
 import { TILE, ZOMBIE } from './constants';
 import { heldWeapon } from './items';
+import { drawCorpse as drawCorpseNew, drawPlayer as drawPlayerNew, drawZombie as drawZombieNew } from './CharacterArt';
 import { type BakedTerrain, bakeTerrain } from './TerrainArt';
 import type { TileWorld } from './world';
 
@@ -31,6 +32,10 @@ export interface PlayerAnim {
 export interface ZombieAnim {
   lastAtk: number;
   lunge: number;
+  /** 近くのプレイヤーへの近さ 0..1（腕を振り上げる予備動作） */
+  near?: number;
+  /** 被弾ののけぞり 0..1 */
+  hit?: number;
   walk: number;
   lastX: number;
   lastY: number;
@@ -1041,6 +1046,10 @@ export class VectorArt implements ArtSet {
   // ---------------- ゾンビ ----------------
 
   drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: ZombieAnim, t: number): void {
+    drawZombieNew(ctx, z, anim, t);
+  }
+
+  drawZombieOld(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: ZombieAnim, t: number): void {
     const st = ZOMBIE[z.type];
     const r = st.radius;
     const flash = z.flash > 0;
@@ -1266,6 +1275,10 @@ export class VectorArt implements ArtSet {
   }
 
   drawCorpse(ctx: CanvasRenderingContext2D, c: Corpse): void {
+    drawCorpseNew(ctx, c);
+  }
+
+  drawCorpseOld(ctx: CanvasRenderingContext2D, c: Corpse): void {
     const st = ZOMBIE[c.type];
     const r = st.radius;
     const a = Math.min(1, c.life / 3);
@@ -1307,6 +1320,10 @@ export class VectorArt implements ArtSet {
   // ---------------- プレイヤー ----------------
 
   drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerSnap, color: string, anim: PlayerAnim, t: number): void {
+    drawPlayerNew(ctx, p, color, anim, t);
+  }
+
+  drawPlayerOld(ctx: CanvasRenderingContext2D, p: PlayerSnap, color: string, anim: PlayerAnim, t: number): void {
     const r = 14;
     ctx.save();
     ctx.translate(p.x, p.y);
