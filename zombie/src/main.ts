@@ -7,6 +7,7 @@ import { audio } from './game/Audio';
 import { HostSimulation } from './game/Engine';
 import { GameSession } from './game/GameSession';
 import { NetworkManager, sanitizeName } from './network/NetworkManager';
+import { loadProfile, saveProfile } from './game/progression';
 import type { GameMode, ObjKind, GameResult, LobbyPlayer, StartInfo } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -112,6 +113,7 @@ function startSession(m: GameMode, info: StartInfo, localId: number, sim?: HostS
     },
   });
   session.start();
+  if (import.meta.env.DEV) Object.assign(window, { __session: session });
 }
 
 /** ソロ/ホスト：シミュレーションを作って開始 */
@@ -132,6 +134,15 @@ function endSession(): void {
 
 function showResult(r: GameResult): void {
   audio.gameOver();
+  // 自分のスキル経験値・記録を保存（次回に引き継ぐ）
+  const mine = r.players.find((p) => p.id === (net?.localId ?? 0));
+  if (mine) {
+    const prof = loadProfile();
+    prof.xp = mine.xp.map((v, i) => Math.max(v, prof.xp[i] ?? 0));
+    prof.bestDay = Math.max(prof.bestDay, r.day);
+    prof.banked += mine.value;
+    saveProfile(prof);
+  }
   $('result-day').textContent = String(r.day);
   const body = $('result-body');
   body.innerHTML = '';
@@ -197,7 +208,7 @@ function showLobby(): void {
 $('btn-solo').addEventListener('click', () => {
   net?.destroy();
   net = null;
-  startAsHost('solo', [{ id: 0, name: sanitizeName(playerName(), 0) }]);
+  startAsHost('solo', [{ id: 0, name: sanitizeName(playerName(), 0), prof: loadProfile() }]);
 });
 
 $('btn-host').addEventListener('click', async () => {

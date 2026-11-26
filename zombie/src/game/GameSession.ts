@@ -25,6 +25,7 @@ import { InventoryPanel } from '../ui/InventoryPanel';
 import { AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
 import { CONTAINER_KINDS, STORAGE_KINDS } from './Engine';
 import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon } from './items';
+import { loadProfile, saveProfile } from './progression';
 import { Effects } from './Effects';
 import type { HostSimulation } from './Engine';
 import { InputController } from './Input';
@@ -96,6 +97,7 @@ export class GameSession {
   private lastViewing = 0;
   private lastStorageOpen = 0;
   private lastPrim = '';
+  private lastSave = 0;
   private lastSec = '';
   /** ゲスト：最後に受け取った倉庫の状態（変化したときだけ届く） */
   private storage: StorageState | null = null;
@@ -130,6 +132,10 @@ export class GameSession {
       () => audio.click(),
       (slot, att) => {
         this.ops.push(`mod:${slot}:${att}`);
+        audio.click();
+      },
+      (fac) => {
+        this.ops.push(`upg:${fac}`);
         audio.click();
       },
     );
@@ -274,6 +280,8 @@ export class GameSession {
       dashDy: me.dashDy,
       stamina: me.stamina,
       staminaDelay: me.staminaDelay,
+      stmMax: me.stmMax,
+      stmRegen: me.stmRegen,
     };
     for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
     if (before) {
@@ -376,6 +384,10 @@ export class GameSession {
       day: L.day,
       minute: L.minute,
       phase: L.phase,
+      weather: L.weather,
+      wx: L.wx,
+      base: L.base,
+      drop: L.drop,
       cont: L.cont,
       storage: this.storage ?? undefined,
       players,
@@ -467,6 +479,11 @@ export class GameSession {
       this.craftMenu.toggle(true);
       interact = false;
     }
+    // T：弾種（通常弾 ⇄ 徹甲弾/スラッグ）の切り替え
+    if (this.input.consume('KeyT') && (this.localTool === Tool.Primary || this.localTool === Tool.Secondary)) {
+      this.ops.push(`ammo:${this.localTool === Tool.Primary ? 'prim' : 'sec'}`);
+      audio.click();
+    }
     const mv = this.input.getMove();
     const mw = this.renderer.screenToWorld(this.input.mouseX, this.input.mouseY);
     const aim = myPos ? Math.atan2(mw.y - myPos.y, mw.x - myPos.x) : this.localAim;
@@ -521,7 +538,8 @@ export class GameSession {
     const me = view.players.find((p) => p.id === localId);
     if (me) {
       this.syncPanels(me, view);
-      this.craftMenu.update(me.bag, me.prim, me.sec, this.nearBench(me));
+      this.craftMenu.update(me.bag, me.prim, me.sec, this.nearBench(me), view.base, view.storage ?? this.storage);
+      this.saveProgress(me, view.day);
     }
     // 弾切れのカチッという音
     const held = me ? heldWeapon({ ...me, tool: this.localTool }) : null;
@@ -596,6 +614,17 @@ export class GameSession {
     }
   }
 
+  /** スキル経験値を自分のブラウザに保存（数秒おき） */
+  private saveProgress(me: PlayerSnap, day: number): void {
+    const now = performance.now();
+    if (now - this.lastSave < 4000) return;
+    this.lastSave = now;
+    const prof = loadProfile();
+    prof.xp = me.xp.map((v, i) => Math.max(v, prof.xp[i] ?? 0));
+    prof.bestDay = Math.max(prof.bestDay, day);
+    saveProfile(prof);
+  }
+
   /** 入れ物・倉庫のパネルをサーバーの状態に合わせて開閉する */
   private syncPanels(me: PlayerSnap, view: ViewState): void {
     // 新しく武器を装備したら持ち替える
@@ -622,6 +651,8 @@ export class GameSession {
       me,
       cont: me.viewing && view.cont[me.viewing] ? { id: me.viewing, name: CONTAINER_NAMES[ob?.kind ?? 'bag'] ?? '入れ物', slots: view.cont[me.viewing] } : null,
       storage: view.storage ?? this.storage,
+      coop: view.players.length > 1,
+      allies: view.players.filter((p) => p.id !== me.id && p.status === 'alive' && Math.hypot(p.x - me.x, p.y - me.y) < 160).map((p) => ({ id: p.id, name: p.name })),
     });
   }
 

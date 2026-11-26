@@ -315,8 +315,9 @@ export class Renderer {
     this.drawRoofs(me, vx0, vy0, vx1, vy1, true);
     ctx.restore();
 
-    // ---- ライティング ----
+    // ---- ライティング・天候 ----
     this.drawLighting(view, dark, ox, oy);
+    this.drawWeather(view, dark, o.dt);
 
     // ---- 光る要素・オーバーレイ ----
     ctx.save();
@@ -326,6 +327,7 @@ export class Renderer {
     for (const p of view.players) this.drawPlayerOverlay(p, p.id === o.localId);
     this.drawZombieOverlays(zombiesSeen, dark, me);
     this.drawPingMarkers(fx);
+    this.drawDropBeacon(view);
     this.drawPopups(fx);
     ctx.restore();
 
@@ -339,13 +341,18 @@ export class Renderer {
     for (const p of view.players) {
       if (p.status === 'dead') continue;
       const down = p.status === 'down';
+      // 霧・嵐は見通しが悪い。スコープ付きの銃を構えていると照準方向の視界が伸びる
+      const wfog = view.weather === 'fog' ? 0.45 : view.weather === 'storm' ? 0.3 : view.weather === 'rain' ? 0.15 : 0;
+      const wmul = 1 - wfog * view.wx;
+      const held = heldWeapon(p);
+      const scope = held?.w.scope ? 1.3 : 1;
       viewers.push({
         x: p.x,
         y: p.y,
         aim: p.aim,
-        near: down ? 100 : 330 - dark * 180,
-        cone: down ? 0 : 820 - dark * 300,
-        half: down ? 0 : 0.72 - dark * 0.28,
+        near: down ? 100 : (330 - dark * 180) * (1 - wfog * 0.5 * view.wx),
+        cone: down ? 0 : (820 - dark * 300) * wmul * scope,
+        half: down ? 0 : (0.72 - dark * 0.28) * (scope > 1 ? 0.85 : 1),
       });
     }
     this.vision.update(this.world, viewers);
@@ -839,6 +846,155 @@ export class Renderer {
   }
 
   /** 暗闇の上に重ねる光の色（焚き火・松明の暖色、懐中電灯の白色） */
+  // ---------------- 天候 ----------------
+
+  private rain: { x: number; y: number; s: number }[] = [];
+  private lightning = 0;
+
+  /** 霧（白いもや）・雨（斜めの雨筋）・嵐（雨＋雷光）を画面に重ねる */
+  private drawWeather(view: ViewState, dark: number, dt: number): void {
+    const { ctx, w, h } = this;
+    const k = view.wx;
+    if (k <= 0.01) {
+      this.lightning = 0;
+      return;
+    }
+    if (view.weather === 'fog') {
+      // 流れるもや
+      const t = this.time * 0.03;
+      ctx.save();
+      for (let i = 0; i < 5; i++) {
+        const fx = ((i * 0.27 + t * (0.6 + i * 0.15)) % 1.4) - 0.2;
+        const fy = 0.15 + ((i * 0.37) % 0.8);
+        const g = ctx.createRadialGradient(fx * w, fy * h, 0, fx * w, fy * h, Math.max(w, h) * 0.45);
+        const a = (0.16 - dark * 0.08) * k;
+        g.addColorStop(0, `rgba(190,196,190,${a})`);
+        g.addColorStop(1, 'rgba(190,196,190,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+      }
+      ctx.fillStyle = `rgba(150,158,152,${(0.16 - dark * 0.1) * k})`;
+      ctx.fillRect(0, 0, w, h);
+      ctx.restore();
+      return;
+    }
+    // 雨・嵐
+    const storm = view.weather === 'storm';
+    ctx.fillStyle = `rgba(20,26,34,${(storm ? 0.22 : 0.12) * k})`;
+    ctx.fillRect(0, 0, w, h);
+    const want = Math.floor((storm ? 420 : 240) * k);
+    while (this.rain.length < want) this.rain.push({ x: Math.random() * w, y: Math.random() * h, s: 0.6 + Math.random() * 0.8 });
+    if (this.rain.length > want) this.rain.length = want;
+    const vx = storm ? -260 : -120;
+    const vy = 1100;
+    ctx.strokeStyle = `rgba(190,205,220,${0.28 * k})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const r of this.rain) {
+      r.x += vx * r.s * dt;
+      r.y += vy * r.s * dt;
+      if (r.y > h || r.x < -20) {
+        r.x = Math.random() * (w + 200);
+        r.y = -10;
+      }
+      ctx.moveTo(r.x, r.y);
+      ctx.lineTo(r.x + vx * 0.018 * r.s, r.y + vy * 0.018 * r.s);
+    }
+    ctx.stroke();
+    if (storm) {
+      this.lightning = Math.max(0, this.lightning - dt * 3);
+      if (Math.random() < dt * 0.12 * k) this.lightning = 1;
+      if (this.lightning > 0) {
+        ctx.fillStyle = `rgba(220,228,255,${this.lightning * 0.35 * (0.4 + dark)})`;
+        ctx.fillRect(0, 0, w, h);
+      }
+    }
+  }
+
+  // ---------------- 補給物資 ----------------
+
+  /** 投下地点の赤い発煙（霧の上に描くので遠くからでも見える） */
+  private drawDropBeacon(view: ViewState): void {
+    if (!view.drop) return;
+    const { ctx } = this;
+    const { x, y } = view.drop;
+    for (let i = 0; i < 9; i++) {
+      const ph = (this.time * 0.35 + i / 9) % 1;
+      const r = 8 + ph * 34;
+      ctx.fillStyle = `rgba(200,70,50,${0.32 * (1 - ph)})`;
+      ctx.beginPath();
+      ctx.arc(x + Math.sin(i * 2.1 + this.time) * 10 * ph + ph * 30, y - ph * 150, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const pulse = 0.6 + Math.sin(this.time * 9) * 0.4;
+    ctx.fillStyle = `rgba(255,90,60,${pulse})`;
+    ctx.beginPath();
+    ctx.arc(x, y - 4, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** 画面外の補給物資の方向 */
+  private drawDropIndicator(view: ViewState, me: PlayerSnap | undefined): void {
+    if (!view.drop || !me) return;
+    const { ctx, w, h } = this;
+    const sx = view.drop.x - this.cam.x + w / 2;
+    const sy = view.drop.y - this.cam.y + h / 2;
+    if (sx > 40 && sy > 40 && sx < w - 40 && sy < h - 40) return;
+    const cx = w / 2;
+    const cy = h / 2;
+    const ang = Math.atan2(sy - cy, sx - cx);
+    const rx = w / 2 - 70;
+    const ry = h / 2 - 150;
+    const k = Math.min(rx / Math.max(1e-3, Math.abs(Math.cos(ang))), ry / Math.max(1e-3, Math.abs(Math.sin(ang))));
+    const ex = cx + Math.cos(ang) * k;
+    const ey = cy + Math.sin(ang) * k;
+    ctx.save();
+    ctx.translate(ex, ey);
+    ctx.rotate(ang);
+    ctx.fillStyle = '#d0603e';
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(0, -7);
+    ctx.lineTo(0, 7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    const dist = Math.round(Math.hypot(view.drop.x - me.x, view.drop.y - me.y) / TILE);
+    ctx.font = 'bold 10px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.strokeText(`補給物資 ${dist}m`, ex - Math.cos(ang) * 30, ey - Math.sin(ang) * 18);
+    ctx.fillStyle = '#e8a080';
+    ctx.fillText(`補給物資 ${dist}m`, ex - Math.cos(ang) * 30, ey - Math.sin(ang) * 18);
+  }
+
+  // ---------------- イベントログ ----------------
+
+  /** 左上（チーム一覧の下）に最近の出来事を表示 */
+  private drawFeed(fx: Effects): void {
+    if (!fx.feed.length) return;
+    const { ctx } = this;
+    const x = 14;
+    let y = 22 + 40 * 3 + 16;
+    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    for (const f of fx.feed) {
+      const a = Math.min(1, f.life / 1.2, (9 - f.life) * 5);
+      ctx.globalAlpha = a;
+      const tw = Math.min(460, ctx.measureText(f.t).width + 16);
+      ctx.fillStyle = 'rgba(12,13,10,0.72)';
+      ctx.fillRect(x, y, tw, 20);
+      ctx.fillStyle = f.c;
+      ctx.fillRect(x, y, 3, 20);
+      ctx.fillText(f.t, x + 9, y + 4, 440);
+      y += 23;
+    }
+    ctx.globalAlpha = 1;
+  }
+
   private drawGlows(view: ViewState, dark: number): void {
     if (dark < 0.05) return;
     const { ctx } = this;
@@ -1035,6 +1191,8 @@ export class Renderer {
     this.drawClock(view, me);
     this.drawLocationToast(me, o.dt, !!fx.banner);
     this.drawAllyIndicators(view, o.localId, o.effects);
+    this.drawDropIndicator(view, me);
+    this.drawFeed(fx);
     this.drawTeam(view, o.localId);
     if (me) this.drawSelfPanel(view, me);
     this.drawHotbar(o, view);
@@ -1120,8 +1278,8 @@ export class Renderer {
     const drawCross = () => {
       ctx.beginPath();
       if (isGun) {
-        const sg = held?.id === 'shotgun';
-        const g = (sg ? 12 : 4) + (held ? effectiveStats(held.id, held.w).spread * 60 : 0) + this.bloom * 12;
+        const sg = held?.id === 'shotgun' && !held.w.ap;
+        const g = (sg && !held?.w.ap ? 12 : 4) + (held ? (effectiveStats(held.id, held.w).spread + (me?.heat ?? 0)) * 60 : 0) + this.bloom * 8;
         const len = 8;
         ctx.moveTo(cx - g - len, cy);
         ctx.lineTo(cx - g, cy);
@@ -1155,7 +1313,7 @@ export class Renderer {
       const mag = held.w.mag;
       const res = countItem(me.bag, st.ammo);
       ctx.fillStyle = mag === 0 ? '#c06050' : '#e6ebf5';
-      const txt = me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}`;
+      const txt = me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}${held.w.ap ? ' AP' : ''}`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.7)';
       ctx.strokeText(txt, cx + 16, cy + 16);
@@ -1172,9 +1330,9 @@ export class Renderer {
       if (key !== this.curLoc) {
         this.curLoc = key;
         if (loc) {
-          const danger = loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
-          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
-        }
+          const danger = loc.hot ? '汚染地帯：手強い個体が多いが、レア物資が眠っている' : loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
+          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.hot ? '#d090c8' : loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
+        } else this.locToast = null; // その場所を出たら古い表示は出さない
       }
     }
     if (!this.locToast) return;
@@ -1292,22 +1450,25 @@ export class Renderer {
         ctx.font = 'bold 10px "Segoe UI", sans-serif';
         ctx.lineWidth = 3;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        const label = down ? `${p.name} 助けて！ ${Math.ceil(p.downTimer)}s` : `${p.name} ${dist}m`;
+        const label = down ? `${p.name} 助けて！ ${dist}m・残り${Math.ceil(p.downTimer)}s` : `${p.name} ${dist}m`;
         ctx.strokeText(label, e.x, e.y + 24);
         ctx.fillStyle = '#fff';
         ctx.fillText(label, e.x, e.y + 24);
       } else {
         // 画面内のダウン中の仲間：頭上に大きな SOS
         const sx = p.x - this.cam.x + w / 2;
-        const sy = p.y - this.cam.y + h / 2 - 60;
+        const sy = p.y - this.cam.y + h / 2 - 84;
+        // すぐそばにいるときは画面下の「[E] 長押しで蘇生」と重複するので進捗だけ出す
+        if (me && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange && p.reviveProgress <= 0) continue;
         const pulse = 0.7 + Math.sin(this.time * 8) * 0.3;
         ctx.font = '900 16px "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.lineWidth = 4;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        ctx.strokeText('SOS [E]で蘇生', sx, sy);
-        ctx.fillStyle = `rgba(255,90,90,${pulse})`;
-        ctx.fillText('SOS [E]で蘇生', sx, sy);
+        const txt = p.reviveProgress > 0 ? `救助中… ${Math.round((p.reviveProgress / PLAYER.reviveTime) * 100)}%` : `SOS [E]長押しで蘇生 ${dist}m`;
+        ctx.strokeText(txt, sx, sy);
+        ctx.fillStyle = p.reviveProgress > 0 ? '#9fe08a' : `rgba(255,90,90,${pulse})`;
+        ctx.fillText(txt, sx, sy);
       }
     }
     // 画面外のピン
@@ -1348,7 +1509,8 @@ export class Renderer {
     const label = view.phase === 'day' ? '昼' : '夜';
     ctx.font = '900 22px "Segoe UI", sans-serif';
     ctx.fillStyle = view.phase === 'night' ? '#aab4c8' : '#e0cfa8';
-    ctx.fillText(`Day ${view.day} - ${formatClock(view.minute)}  ${icon} ${label}`, cxm, 16);
+    const wname = view.wx > 0.3 ? { clear: '', fog: ' 霧', rain: ' 雨', storm: ' 嵐' }[view.weather] : '';
+    ctx.fillText(`Day ${view.day} - ${formatClock(view.minute)}  ${icon} ${label}${wname}`, cxm, 16);
 
     // 時間バー（昼=黄 / 夜=青）
     const bx = x + 16;
@@ -1374,7 +1536,7 @@ export class Renderer {
         sub = '拠点（安全地帯）— 焚き火のそばで回復';
         col = '#9fc48a';
       } else if (loc) {
-        sub = `${loc.name}  ${'★'.repeat(loc.tier)}${loc.tier >= 3 ? ' 危険' : ''}`;
+        sub = `${loc.name}  ${'★'.repeat(loc.tier)}${loc.hot ? ' ☣ 汚染地帯' : loc.tier >= 3 ? ' 危険' : ''}`;
         col = loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8b870' : '#c3cbe0';
       } else if (view.phase === 'night') {
         sub = '野外（夜は徘徊者が増える）';
@@ -1503,7 +1665,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = '9px "Segoe UI", sans-serif';
     ctx.fillStyle = '#6f7a90';
-    ctx.fillText('[F]探索/ドア [Tab]持ち物 [R]リロード [C]クラフト [Q]食事 [H]回復', x + 10, y + ph - 7);
+    ctx.fillText('[F]探索/ドア [Tab]持ち物 [R]リロード [T]弾種 [C]クラフト [Q]食事 [H]回復', x + 10, y + ph - 7);
     void view;
   }
 
@@ -1549,7 +1711,7 @@ export class Renderer {
           const icon = !s ? (t.id === Tool.Primary ? 'rifle' : 'pistol') : s.id === 'pistol' ? 'pistol' : s.id === 'shotgun' ? 'shotgun' : 'rifle';
           drawSlotIcon(ctx, icon, cx, cy, locked);
           if (s) {
-            label = `${s.w.mag}/${countItem(me.bag, effectiveStats(s.id, s.w).ammo)}`;
+            label = `${s.w.mag}/${countItem(me.bag, effectiveStats(s.id, s.w).ammo)}${s.w.ap ? 'AP' : ''}`;
             warn = s.w.mag === 0;
           } else label = 'なし';
           break;
@@ -1601,7 +1763,7 @@ export class Renderer {
     // ロケーション（★の数で危険度）
     for (const loc of this.world.locations) {
       if (loc.kind === 'ruin') continue;
-      const col = loc.tier >= 3 ? '#c06050' : loc.tier === 2 ? '#c9a85a' : '#9fe08a';
+      const col = loc.hot ? '#d070c0' : loc.tier >= 3 ? '#c06050' : loc.tier === 2 ? '#c9a85a' : '#9fe08a';
       ctx.strokeStyle = col;
       ctx.lineWidth = 1;
       ctx.strokeRect(mx + loc.x * s - 1, my + loc.y * s - 1, loc.w * s + 2, loc.h * s + 2);
@@ -1609,7 +1771,7 @@ export class Renderer {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillStyle = col;
-      ctx.fillText('★'.repeat(loc.tier), mx + (loc.x + loc.w / 2) * s, my + loc.y * s - 1);
+      ctx.fillText(loc.hot ? '☣' : '★'.repeat(loc.tier), mx + (loc.x + loc.w / 2) * s, my + loc.y * s - 1);
     }
     const k = s / TILE;
     for (const ob of this.world.objects.values()) {
@@ -1627,6 +1789,12 @@ export class Renderer {
       if (!c) continue;
       ctx.fillStyle = c;
       ctx.fillRect(mx + ob.tx * s, my + ob.ty * s, s, s);
+    }
+    if (view.drop && Math.sin(this.time * 8) > -0.3) {
+      ctx.fillStyle = '#e05a3a';
+      ctx.beginPath();
+      ctx.arc(mx + view.drop.x * k, my + view.drop.y * k, 3.5, 0, Math.PI * 2);
+      ctx.fill();
     }
     for (const z of view.zombies) {
       if (!this.vision.isVisible(z.x, z.y)) continue;

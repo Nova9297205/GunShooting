@@ -2,6 +2,7 @@
 // 共通型定義（プレイヤー・ゾンビ・弾・オブジェクト・通信パケット）
 // ============================================================
 import type { Slot } from './game/items';
+import type { Facility, Profile } from './game/progression';
 
 export type { Slot, WeaponId } from './game/items';
 
@@ -38,6 +39,7 @@ export type ObjKind =
   | 'sandbag'
   | 'stash'
   | 'bag'
+  | 'drop'
   // 以下は旧バージョンの建築物（描画コードの互換用）
   | 'stone'
   | 'woodWall'
@@ -97,6 +99,10 @@ export interface MoveBody {
   stamina: number;
   /** スタミナ回復が始まるまでの待ち時間 */
   staminaDelay: number;
+  /** 最大スタミナ（持久力スキル） */
+  stmMax?: number;
+  /** スタミナ回復倍率（持久力スキル・興奮剤） */
+  stmRegen?: number;
 }
 
 export interface PlayerSnap extends MoveBody {
@@ -126,6 +132,10 @@ export interface PlayerSnap extends MoveBody {
   viewing: number;
   /** 拠点の倉庫を開いているか */
   storage: number;
+  /** スキル経験値 [探索, 持久力, 銃の扱い, 応急処置] */
+  xp: number[];
+  /** 連射で溜まる反動（ばらつきに加算） */
+  heat: number;
   ack: number;
 }
 
@@ -166,7 +176,10 @@ export interface ObjSnap {
 }
 
 /** イベントに付ける効果音の種類 */
-export type SoundKey = 'loot' | 'eat' | 'heal' | 'craft' | 'error' | 'day' | 'night' | 'horde' | 'clear';
+export type SoundKey = 'loot' | 'eat' | 'heal' | 'craft' | 'error' | 'day' | 'night' | 'horde' | 'clear' | 'level' | 'alarm';
+
+/** 天候 */
+export type Weather = 'clear' | 'fog' | 'rain' | 'storm';
 
 /** 一度きりの演出イベント */
 export type GameEvent =
@@ -190,7 +203,11 @@ export type GameEvent =
   | { k: 'ping'; id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go' }
   | { k: 'door'; x: number; y: number; open: boolean }
   | { k: 'search'; id: number; x: number; y: number; done: boolean }
-  | { k: 'alert'; x: number; y: number };
+  | { k: 'alert'; x: number; y: number }
+  /** 画面左のイベントログ（仲間のダウン・スキル上昇・補給物資など） */
+  | { k: 'feed'; t: string; c: string; id?: number; snd?: SoundKey }
+  /** 弾が装甲に弾かれた */
+  | { k: 'ricochet'; x: number; y: number };
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {
@@ -207,6 +224,13 @@ export interface ViewState {
   cont: Record<number, (Slot | null)[]>;
   /** 拠点の倉庫（共有倉庫と各プレイヤーの個人倉庫）。変化したときだけ届く */
   storage?: StorageState;
+  weather: Weather;
+  /** 天候の強さ 0..1（切り替わりをなめらかにする） */
+  wx: number;
+  /** 拠点設備のレベル */
+  base: Record<Facility, number>;
+  /** 補給物資の投下地点（なければ null） */
+  drop: { x: number; y: number } | null;
 }
 
 export interface StorageState {
@@ -227,6 +251,8 @@ export interface Snapshot extends ViewState {
 export interface LobbyPlayer {
   id: number; // スロット番号 (0: ホスト, 1-2: ゲスト)
   name: string;
+  /** 各自のブラウザに保存されたスキル経験値など */
+  prof?: Profile;
 }
 
 /** ゲーム開始時の初期情報 */
@@ -238,12 +264,12 @@ export interface StartInfo {
 
 export interface GameResult {
   day: number;
-  players: { id: number; name: string; kills: number; value: number }[];
+  players: { id: number; name: string; kills: number; value: number; xp: number[] }[];
 }
 
 // ---------------- 通信パケット ----------------
 
-export type GuestMessage = { type: 'hello'; name: string } | { type: 'input'; f: InputFrame };
+export type GuestMessage = { type: 'hello'; name: string; prof?: Profile } | { type: 'input'; f: InputFrame };
 
 export type HostMessage =
   | { type: 'welcome'; slot: number; players: LobbyPlayer[] }

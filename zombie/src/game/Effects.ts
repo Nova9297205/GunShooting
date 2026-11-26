@@ -85,6 +85,8 @@ export class Effects {
   decals: Decal[] = [];
   corpses: Corpse[] = [];
   banner: Banner | null = null;
+  /** 画面左のイベントログ */
+  feed: { t: string; c: string; life: number }[] = [];
   trauma = 0;
   hurt = 0;
   /** ヒットストップの残り秒（見た目だけ一瞬止める） */
@@ -278,6 +280,8 @@ export class Effects {
       this.banner.life -= dt;
       if (this.banner.life <= 0) this.banner = null;
     }
+    for (const f of this.feed) f.life -= dt;
+    this.feed = this.feed.filter((f) => f.life > 0);
   }
 
   /** ホストから届いた（またはローカルで発生した）イベントを演出に変換 */
@@ -380,6 +384,14 @@ export class Effects {
         break;
       case 'door':
         this.burst(ev.x, ev.y, '#8a8070', 5, 60, 0.6, 5, 'smoke', false);
+        break;
+      case 'feed':
+        this.feed.push({ t: ev.t, c: ev.c, life: 9 });
+        if (this.feed.length > 6) this.feed.shift();
+        break;
+      case 'ricochet':
+        // 装甲に弾かれた火花
+        this.burst(ev.x, ev.y, '#e8e0b0', 4, 260, 0.15, 1.4, 'spark', true);
         break;
       case 'tshot':
         this.turretAim.set(ev.id, { a: ev.a, flash: 0.06 });

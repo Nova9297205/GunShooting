@@ -53,6 +53,8 @@ export interface Location {
   w: number;
   h: number;
   tier: number;
+  /** 汚染地帯（毎回ランダムに1か所） */
+  hot?: boolean;
 }
 
 /** 屋根を持つ建物（中に入るまで屋根で覆う） */
@@ -264,7 +266,19 @@ export function generateWorld(seed: number): GeneratedWorld {
         if (x < 2 || y < 2 || x + w > MAP_W - 2 || y + h > MAP_H - 2) continue;
         if (!overlaps(x, y, w, h, 1)) return { x, y };
       }
-    return null;
+    // 近くに空きがなければ、地図全体から目標にいちばん近い空き地を探す（拠点のすぐそばは避ける）
+    let best: { x: number; y: number } | null = null;
+    let bd = Infinity;
+    for (let y = 2; y + h <= MAP_H - 2; y++)
+      for (let x = 2; x + w <= MAP_W - 2; x++) {
+        const d = (x + w / 2 - cx) ** 2 + (y + h / 2 - cy) ** 2;
+        if (d >= bd || Math.hypot(x + w / 2 - 40, y + h / 2 - 30) < 13) continue;
+        if (!overlaps(x, y, w, h, 1)) {
+          bd = d;
+          best = { x, y };
+        }
+      }
+    return best;
   };
 
   // ---- 建物を刻む：外壁・BSPで部屋割り・内壁のドア・外のドア・窓・家具 ----
@@ -433,27 +447,30 @@ export function generateWorld(seed: number): GeneratedWorld {
     locations.push({ name, kind, x: spot.x, y: spot.y, w, h, tier });
     return { ...spot, ...res };
   };
-  // 住宅街
-  for (const [cx, cy] of [
-    [11, 9],
-    [22, 9],
-    [16, 26],
-    [24, 39],
-    [52, 52],
-    [70, 52],
-    [52, 40],
-  ]) {
-    place('住宅', 'house', 1, cx, cy, ri(8, 10), ri(7, 8), T_WOOD, { minRoom: 3, doors: 2 });
-  }
-  place('スーパーマーケット', 'market', 2, 49, 9, 15, 10, T_TILE, { minRoom: 6, windows: 0.35, doors: 2, propRate: 0.55 });
-  place('病院', 'hospital', 2, 12, 38, 14, 10, T_TILE, { minRoom: 4, windows: 0.25, doors: 2, propRate: 0.45 });
-  place('ガソリンスタンド', 'gas', 2, 70, roadY - 4, 7, 5, T_TILE, { minRoom: 7, windows: 0.4, doors: 1 });
-  place('警察署', 'police', 3, 72, 7, 12, 10, T_FLOOR, { minRoom: 3, windows: 0.18, doors: 2, propRate: 0.45 });
+  // 毎回ちがう町並み：大きな施設の場所をシャッフルし、住宅の数と位置も変える
+  const shuffle = <T,>(a: T[]): T[] => {
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+  const bigSpots = shuffle([
+    [49, 9],
+    [12, 38],
+    [68, 40],
+    [20, 9],
+  ]);
+  place('スーパーマーケット', 'market', 2, bigSpots[0][0], bigSpots[0][1], 15, 10, T_TILE, { minRoom: 6, windows: 0.35, doors: 2, propRate: 0.55 });
+  place('病院', 'hospital', 2, bigSpots[1][0], bigSpots[1][1], 14, 10, T_TILE, { minRoom: 4, windows: 0.25, doors: 2, propRate: 0.45 });
+  place('ガソリンスタンド', 'gas', 2, rnd() < 0.5 ? 70 : 6, roadY - 4, 7, 5, T_TILE, { minRoom: 7, windows: 0.4, doors: 1 });
+  const policeSpot = rnd() < 0.6 ? [72, 7] : [8, 8];
+  place('警察署', 'police', 3, policeSpot[0], policeSpot[1], 12, 10, T_FLOOR, { minRoom: 3, windows: 0.18, doors: 2, propRate: 0.45 });
   // 軍事検問所（南西の角）：フェンスの敷地＋土嚢＋小屋
   {
     const w = 16;
-    const h = 11;
-    const spot = findSpot(9, 53, w, h, 6);
+    const h = 9;
+    const spot = rnd() < 0.5 ? findSpot(10, 53, w, h, 4) : findSpot(70, 53, w, h, 4);
     if (spot) {
       const { x, y } = spot;
       reserve(x - 1, y - 1, w + 2, h + 2);
@@ -467,10 +484,30 @@ export function generateWorld(seed: number): GeneratedWorld {
       setT(x + w - 1, y + 5, T_DIRT);
       locations.push({ name: '軍事検問所', kind: 'military', x, y, w, h, tier: 3 });
       makeBuilding(x + 2, y + 2, 6, 5, 'military', T_FLOOR, { minRoom: 3, doors: 1, windows: 0.2, propRate: 0.6 });
-      makeBuilding(x + 9, y + 4, 5, 5, 'military', T_FLOOR, { minRoom: 5, doors: 1, windows: 0.1, propRate: 0.7 });
-      for (let i = 0; i < 4; i++) addObj('sandbag', x + 6 + i, y + 2);
-      for (let i = 0; i < 3; i++) addObj('mcrate', x + 3 + i * 2, y + 8);
+      makeBuilding(x + 9, y + 2, 5, 5, 'military', T_FLOOR, { minRoom: 5, doors: 1, windows: 0.1, propRate: 0.7 });
+      for (let i = 0; i < 3; i++) addObj('sandbag', x + 14, y + 2 + i);
+      for (let i = 0; i < 3; i++) addObj('mcrate', x + 3 + i * 3, y + 7);
     }
+  }
+  // 住宅街
+  const houseSpots = shuffle([
+    [11, 9],
+    [22, 9],
+    [16, 26],
+    [24, 39],
+    [52, 52],
+    [70, 52],
+    [52, 40],
+    [58, 24],
+    [8, 24],
+    [36, 52],
+    [64, 10],
+  ]);
+  const houses = ri(6, 8);
+  let placedHouses = 0;
+  for (const [cx, cy] of houseSpots) {
+    if (placedHouses >= houses) break;
+    if (place('住宅', 'house', 1, cx, cy, ri(8, 10), ri(7, 8), T_WOOD, { minRoom: 3, doors: 2 })) placedHouses++;
   }
   // 廃屋（ランダム）
   for (let i = 0, made = 0; i < 80 && made < 5; i++) {
@@ -522,6 +559,15 @@ export function generateWorld(seed: number): GeneratedWorld {
     if ((t === T_GRASS || t === T_DIRT) && !reserved[idx(x, y)] && Math.hypot(x - 40, y - 30) > 12) {
       if (addObj(rnd() < 0.5 ? 'crate' : 'rubble', x, y)) placed++;
     }
+  }
+
+  // 汚染地帯：危険度2の施設のうち1つがランダムに危険度3になる（手強い敵とレア物資）
+  const mids = locations.filter((l) => l.tier === 2 && l.kind !== 'ruin');
+  if (mids.length) {
+    const hot = mids[Math.floor(rnd() * mids.length)];
+    hot.tier = 3;
+    hot.hot = true;
+    hot.name = `汚染された${hot.name}`;
   }
 
   return { terrain, objs, locations, buildings };

@@ -86,13 +86,15 @@ export interface ZombieStats {
   attackInterval: number;
   color: string;
   skin: string;
+  /** 装甲（通常弾のダメージ軽減率） */
+  armor: number;
 }
 
 export const ZOMBIE: Record<ZombieType, ZombieStats> = {
-  walker: { radius: 14, hp: 60, daySpeed: 42, nightSpeed: 88, damage: 10, wallDamage: 18, attackInterval: 1.0, color: '#565a4a', skin: '#8e9278' },
-  runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#5c5048', skin: '#a2968a' },
-  soldier: { radius: 14, hp: 150, daySpeed: 55, nightSpeed: 92, damage: 16, wallDamage: 30, attackInterval: 0.9, color: '#4a4f3c', skin: '#8a8c76' },
-  brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#46483e', skin: '#7a7e6a' },
+  walker: { radius: 14, hp: 60, daySpeed: 42, nightSpeed: 88, damage: 10, wallDamage: 18, attackInterval: 1.0, color: '#565a4a', skin: '#8e9278', armor: 0 },
+  runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#5c5048', skin: '#a2968a', armor: 0 },
+  soldier: { radius: 14, hp: 150, daySpeed: 55, nightSpeed: 92, damage: 16, wallDamage: 30, attackInterval: 0.9, color: '#4a4f3c', skin: '#8a8c76', armor: 0.4 },
+  brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#46483e', skin: '#7a7e6a', armor: 0.3 },
 };
 
 export const ZOMBIE_SENSE = {
@@ -130,6 +132,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
   sandbag: 400,
   stash: 1,
   bag: 1,
+  drop: 1,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -193,6 +196,8 @@ export interface Recipe {
   bench: boolean;
   cost: Partial<Record<ItemId, number>>;
   out: { id: ItemId; n: number };
+  /** 必要な作業台レベル（1〜3） */
+  lv?: number;
 }
 
 /** クラフトレシピ（素材はバックパックから消費し、完成品はバックパックへ） */
@@ -200,12 +205,18 @@ export const RECIPES: Recipe[] = [
   { id: 'bandage', name: '包帯', desc: '布から包帯を作る', bench: false, cost: { cloth: 2 }, out: { id: 'bandage', n: 1 } },
   { id: 'ammo9', name: '9mm弾 ×15', desc: 'ハンドガン・SMG 用', bench: true, cost: { gunpowder: 1, scrap: 1 }, out: { id: 'ammo9', n: 15 } },
   { id: 'ammo762', name: '7.62mm弾 ×10', desc: 'ライフル用', bench: true, cost: { gunpowder: 2, scrap: 2 }, out: { id: 'ammo762', n: 10 } },
-  { id: 'shells', name: '12ゲージ弾 ×6', desc: 'ショットガン用', bench: true, cost: { gunpowder: 2, scrap: 1 }, out: { id: 'shells', n: 6 } },
+  { id: 'shells', name: '12ゲージ散弾 ×6', desc: 'ショットガン用', bench: true, cost: { gunpowder: 2, scrap: 1 }, out: { id: 'shells', n: 6 } },
   { id: 'medkit', name: '救急キット', desc: '包帯と薬品を調合', bench: true, cost: { bandage: 2, chem: 1 }, out: { id: 'medkit', n: 1 } },
-  { id: 'suppressor', name: 'サプレッサー', desc: '銃声を抑えるアタッチメント', bench: true, cost: { parts: 2, scrap: 4 }, out: { id: 'suppressor', n: 1 } },
+  { id: 'grip', name: 'フォアグリップ', desc: '連射時の反動を大きく軽減', bench: true, cost: { parts: 1, scrap: 3 }, out: { id: 'grip', n: 1 } },
   { id: 'extmag', name: '拡張マガジン', desc: '装弾数 +60%', bench: true, cost: { parts: 2, scrap: 3 }, out: { id: 'extmag', n: 1 } },
-  { id: 'grip', name: 'フォアグリップ', desc: '反動・ばらつき軽減', bench: true, cost: { parts: 1, scrap: 3 }, out: { id: 'grip', n: 1 } },
-  { id: 'scope', name: 'スコープ', desc: '視界が伸び命中精度アップ', bench: true, cost: { parts: 1, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
+  { id: 'ammo9ap', name: '9mm徹甲弾 ×10', desc: '装甲を無視し1体貫通', bench: true, lv: 2, cost: { gunpowder: 2, scrap: 2, parts: 1 }, out: { id: 'ammo9ap', n: 10 } },
+  { id: 'ammo762ap', name: '7.62mm徹甲弾 ×8', desc: '装甲を無視し2体まで貫通', bench: true, lv: 2, cost: { gunpowder: 3, scrap: 2, parts: 1 }, out: { id: 'ammo762ap', n: 8 } },
+  { id: 'slug', name: 'スラッグ弾 ×5', desc: 'ショットガンの一粒弾', bench: true, lv: 2, cost: { gunpowder: 2, scrap: 2 }, out: { id: 'slug', n: 5 } },
+  { id: 'holo', name: 'ホロサイト', desc: '集弾率と反動を改善', bench: true, lv: 2, cost: { parts: 1, electronics: 1, scrap: 2 }, out: { id: 'holo', n: 1 } },
+  { id: 'stim', name: '興奮剤', desc: 'HP +15・スタミナ全快', bench: true, lv: 2, cost: { chem: 2, medkit: 1 }, out: { id: 'stim', n: 1 } },
+  { id: 'suppressor', name: 'サプレッサー', desc: '銃声を約1/3に抑える', bench: true, lv: 3, cost: { parts: 2, scrap: 4, tools: 1 }, out: { id: 'suppressor', n: 1 } },
+  { id: 'scope', name: '4倍スコープ', desc: '集弾率が大きく上がり視界が伸びる', bench: true, lv: 3, cost: { parts: 2, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
+  { id: 'tools', name: '工具セット', desc: '拠点強化の素材', bench: true, lv: 3, cost: { scrap: 10, parts: 2 }, out: { id: 'tools', n: 1 } },
 ];
 
 /** 作業台を使える距離(px) */

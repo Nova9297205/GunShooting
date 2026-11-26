@@ -6,6 +6,7 @@
 //   ・右クリック → 使う・装備   ・Shift+クリック → 足元に捨てる
 // ============================================================
 import { effectiveStats, ITEMS, type ItemCat, isWeapon } from '../game/items';
+import { levelOf, MAX_SKILL_LV, SKILLS, xpForLevel } from '../game/progression';
 import type { PlayerSnap, Slot, StorageState } from '../types';
 
 const ICON: Record<ItemCat, string> = {
@@ -23,11 +24,17 @@ export interface InvContext {
   /** 中身を見ている入れ物（名前と中身） */
   cont: { id: number; name: string; slots: (Slot | null)[] } | null;
   storage: StorageState | null;
+  /** 近くにいる仲間（直接手渡しできる） */
+  allies: { id: number; name: string }[];
+  /** 協力プレイ中か（手渡し欄を常に表示してレイアウトがずれないようにする） */
+  coop: boolean;
 }
 
 export class InventoryPanel {
   open = false;
   private tab: 'personal' | 'shared' = 'personal';
+  /** 手渡しモードの相手（-1 = なし） */
+  private giveTo = -1;
   private lastKey = '';
   private ctx: InvContext | null = null;
   private body: HTMLElement;
@@ -80,6 +87,7 @@ export class InventoryPanel {
         if (!s) return;
         if (e.shiftKey) this.onOp(`drop:${i}`);
         else if (right) this.onOp(`use:${i}`);
+        else if (this.giveTo >= 0 && c.allies.some((a) => a.id === this.giveTo)) this.onOp(`give:${this.giveTo}:${i}`);
         else if (c.cont) this.onOp(`put:${c.cont.id}:${i}`);
         else if (c.storage && c.me.storage) this.onOp(`st:put:${this.tab}:${i}`);
         else this.onOp(`use:${i}`);
@@ -100,6 +108,13 @@ export class InventoryPanel {
       case 'putall':
         this.onOp(`st:putall:${this.tab}`);
         break;
+      case 'give': {
+        const id = Number(btn.dataset.id);
+        this.giveTo = this.giveTo === id ? -1 : id;
+        this.lastKey = '';
+        this.update(c);
+        return;
+      }
       case 'tab':
         this.tab = btn.dataset.tab === 'shared' ? 'shared' : 'personal';
         this.lastKey = '';
@@ -114,18 +129,23 @@ export class InventoryPanel {
     let sub = s.n > 1 ? `<span class="n">${s.n}</span>` : '';
     if (s.w && isWeapon(s.id)) {
       const st = effectiveStats(s.id, s.w);
-      sub = `<span class="n">${s.w.mag}/${st.magSize}</span>`;
+      sub = `<span class="n">${s.w.mag}/${st.magSize}${s.w.ap ? ' AP' : ''}</span>`;
     }
-    const atts = s.w ? ['scope', 'suppressor', 'extmag', 'grip'].filter((a) => s.w![a as 'scope']).map((a) => ITEMS[a as 'scope'].name) : [];
-    const desc = `${d.name}${s.n > 1 ? ` ×${s.n}` : ''} — ${d.desc}${atts.length ? `（装着: ${atts.join('・')}）` : ''}　価値 ${d.value * s.n}`;
-    return `<div class="islot c-${d.cat}${extra}" data-act="${act}" data-i="${i}" data-desc="${desc}"><span class="ic">${ICON[d.cat]}</span><span class="nm">${d.name}</span>${sub}${atts.length ? '<span class="mod">+' + atts.length + '</span>' : ''}</div>`;
+    const atts = s.w ? ['scope', 'holo', 'suppressor', 'extmag', 'grip'].filter((a) => s.w![a as 'scope']).map((a) => ITEMS[a as 'scope'].name) : [];
+    const ws = s.w && isWeapon(s.id) ? effectiveStats(s.id, s.w) : null;
+    const wtxt = ws
+      ? `［威力 ${Math.round(ws.damage * ws.pellets)}・${Math.round(60 / ws.fireInterval)}発/分・精度 ${Math.round(Math.max(0, 1 - ws.spread * 5) * 100)}・反動 ${Math.round(ws.recoil * 1000)}・リロード ${ws.reloadTime.toFixed(1)}秒・音 ${Math.round(ws.noiseRadius)}${ws.armorPierce ? '・装甲貫通' : ''}］`
+      : '';
+    const desc = `${d.name}${s.n > 1 ? ` ×${s.n}` : ''} — ${d.desc}${wtxt}${atts.length ? `（装着: ${atts.join('・')}）` : ''}　価値 ${d.value * s.n}`;
+    return `<div class="islot c-${d.cat} r${d.rarity}${s.w?.ap ? ' ap' : ''}${extra}" data-act="${act}" data-i="${i}" data-desc="${desc}"><span class="ic">${ICON[d.cat]}</span><span class="nm">${d.name}</span>${sub}${atts.length ? '<span class="mod">+' + atts.length + '</span>' : ''}</div>`;
   }
 
   update(c: InvContext): void {
     this.ctx = c;
     if (!this.open) return;
     const st = c.me.storage && c.storage ? (this.tab === 'shared' ? c.storage.shared : c.storage.personal[c.me.id] ?? []) : null;
-    const key = JSON.stringify([c.me.bag, c.me.prim, c.me.sec, c.cont, st, this.tab]);
+    if (this.giveTo >= 0 && !c.allies.some((a) => a.id === this.giveTo)) this.giveTo = -1;
+    const key = JSON.stringify([c.me.xp, c.me.bag, c.me.prim, c.me.sec, c.cont, st, this.tab, c.allies, this.giveTo]);
     if (key === this.lastKey) return;
     this.lastKey = key;
 
@@ -154,7 +174,25 @@ export class InventoryPanel {
     this.body.innerHTML = `<div class="inv-main">
         <div class="eqrow">${equip('prim', 'メイン武器')}${equip('sec', 'サブ武器')}</div>
         <h4>バックパック <small>${used}/${c.me.bag.length}</small></h4>
+        ${
+          c.allies.length
+            ? `<div class="give-row"><span>仲間に手渡し:</span>${c.allies
+                .map((a) => `<button data-act="give" data-id="${a.id}" class="${this.giveTo === a.id ? 'on' : ''}">${this.giveTo === a.id ? '✔ ' : ''}${a.name}</button>`)
+                .join('')}${this.giveTo >= 0 ? '<small>アイテムをクリックで渡す</small>' : ''}</div>`
+            : c.coop
+              ? '<div class="give-row"><span>仲間に手渡し:</span><small>近くに仲間がいない（すぐそばまで近づくと渡せる）</small></div>'
+              : ''
+        }
         <div class="igrid g4">${bag}</div>
+        <h4>スキル <small>（ブラウザに保存され次回も引き継ぐ）</small></h4>
+        <div class="skills">${SKILLS.map((sk, i) => {
+          const xp = c.me.xp?.[i] ?? 0;
+          const lv = levelOf(xp);
+          const lo = xpForLevel(lv);
+          const hi = xpForLevel(lv + 1);
+          const r = lv >= MAX_SKILL_LV ? 1 : (xp - lo) / Math.max(1, hi - lo);
+          return `<div class="skill" data-desc="${sk.name} Lv${lv}：${sk.desc}（上げ方：${sk.how}）"><b>${sk.name}</b><span>Lv${lv}</span><i><u style="width:${Math.round(r * 100)}%"></u></i></div>`;
+        }).join('')}</div>
       </div>${right}`;
   }
 }

@@ -118,7 +118,7 @@ export function stepMovement(
   b.dashCd = Math.max(0, b.dashCd - dt);
   // スタミナ：消費後すこし待ってから回復
   if (b.staminaDelay > 0) b.staminaDelay = Math.max(0, b.staminaDelay - dt);
-  else b.stamina = Math.min(PLAYER.maxStamina, b.stamina + PLAYER.staminaRegen * dt);
+  else b.stamina = Math.min(b.stmMax ?? PLAYER.maxStamina, b.stamina + PLAYER.staminaRegen * (b.stmRegen ?? 1) * dt);
 
   let mx = f.mx;
   let my = f.my;

@@ -714,3 +714,118 @@ details.controls summary {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ---------------- クラフト：タブ・性能バー・強化 ---------------- */
+.ctabs {
+  margin-top: 0;
+}
+.craft .note {
+  font-size: 11px;
+  color: #9a9f88;
+  margin: 4px 0 8px;
+}
+.sbars {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 12px;
+  margin-top: 6px;
+}
+.sbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: #9a9f88;
+}
+.sbar i {
+  font-style: normal;
+  width: 64px;
+}
+.sbar b {
+  display: block;
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #8a9a5a, #c9b27a);
+}
+.pips {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.pips i {
+  width: 14px;
+  height: 5px;
+  border-radius: 2px;
+  background: #3a3d31;
+}
+.pips i.on {
+  background: #c9b27a;
+}
+.give-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: #a8a38c;
+}
+.give-row button {
+  appearance: none;
+  border: 1px solid #4f5a3a;
+  background: #262a1f;
+  color: #d6d0bb;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.give-row button.on {
+  background: #5a6a36;
+  color: #fff;
+}
+.islot.r1 { box-shadow: inset 0 -2px 0 #6a7a8a; }
+.islot.r2 { box-shadow: inset 0 -2px 0 #6a8ac0; border-color: #3e4a5e; }
+.islot.r3 { box-shadow: inset 0 -2px 0 #c9a050; border-color: #6a5a32; }
+.islot.ap .n { color: #e0a060; }
+.skills {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+  width: 263px;
+}
+.skill {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #d6d0bb;
+}
+.skill span {
+  color: #c9e08a;
+  font-weight: 800;
+}
+.skill i {
+  height: 4px;
+  background: #2a2d23;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.skill u {
+  display: block;
+  height: 100%;
+  background: #8aa05a;
+}
+.give-row {
+  min-height: 24px;
+}
+/* 説明文の長さでパネルの幅・高さが変わってマス目がずれないように */
+.inv-desc {
+  width: 0;
+  min-width: 100%;
+  min-height: 3em;
+  line-height: 1.5em;
+  overflow: hidden;
+}

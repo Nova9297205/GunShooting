@@ -352,6 +352,72 @@ export class VectorArt implements ArtSet {
         ctx.globalAlpha = 1;
         return true;
       }
+      case 'bag': {
+        // 落ちている袋（ダッフルバッグ）
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(cx + 3, cy + 6, 14, 8, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(((o.id * 37) % 10) / 10 - 0.5);
+        ctx.fillStyle = '#4a4a36';
+        roundRect(ctx, -13, -7, 26, 14, 6);
+        ctx.fill();
+        ctx.strokeStyle = '#2c2c20';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = '#5c5c44';
+        ctx.fillRect(-11, -5, 22, 3);
+        ctx.strokeStyle = '#8a7a50';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-5, -7);
+        ctx.quadraticCurveTo(0, -13, 5, -7);
+        ctx.stroke();
+        ctx.restore();
+        const pulse = 0.35 + Math.sin(t * 4 + o.id) * 0.25;
+        ctx.strokeStyle = `rgba(230,210,140,${pulse})`;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 17, 0, Math.PI * 2);
+        ctx.stroke();
+        return true;
+      }
+      case 'drop': {
+        // 補給物資：パラシュート付きの金属コンテナ
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(x + 6, y + 10, 34, 28);
+        if (o.ready) {
+          ctx.fillStyle = 'rgba(200,190,170,0.55)';
+          ctx.beginPath();
+          ctx.ellipse(x + 34, y + 30, 18, 9, 0.6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(80,70,60,0.6)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x + 24, y + 22);
+          ctx.lineTo(x + 34, y + 30);
+          ctx.moveTo(x + 30, y + 16);
+          ctx.lineTo(x + 40, y + 26);
+          ctx.stroke();
+        }
+        const lg = ctx.createLinearGradient(x, y + 4, x, y + 34);
+        lg.addColorStop(0, o.ready ? '#6d7a86' : '#4a525a');
+        lg.addColorStop(1, o.ready ? '#4a5660' : '#33393f');
+        ctx.fillStyle = lg;
+        roundRect(ctx, x + 2, y + 4, 36, 30, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#262c32';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = o.ready ? '#c0503a' : '#6b3a30';
+        ctx.fillRect(x + 2, y + 16, 36, 5);
+        ctx.fillStyle = '#e8e0c8';
+        ctx.fillRect(x + 16, y + 8, 8, 3);
+        ctx.fillRect(x + 18.5, y + 6, 3, 7);
+        return true;
+      }
       case 'mcrate': {
         ctx.fillStyle = 'rgba(0,0,0,0.35)';
         ctx.fillRect(x + 8, y + 12, 32, 26);
@@ -1416,7 +1482,7 @@ export class VectorArt implements ArtSet {
         ctx.fillRect(14 + rc, 2, 5, 7); // マガジン
         ctx.fillStyle = '#4b5563';
         ctx.fillRect(10 + rc, -4.5, 9, 2); // 照準器
-        if (held.id === 'hunting') {
+        if (held.id === 'hunting' || held.id === 'dmr') {
           // 狩猟ライフル：長い銃身と木製ストック
           ctx.fillStyle = '#6e4a2c';
           roundRect(ctx, 0 + rc, -3, 16, 6, 2);
@@ -1450,6 +1516,13 @@ export class VectorArt implements ArtSet {
         ctx.fill();
         ctx.fillStyle = 'rgba(150,200,220,0.7)';
         ctx.fillRect(19 + rc, -5, 1.5, 3);
+      }
+      if (held.w.holo) {
+        ctx.fillStyle = outline;
+        roundRect(ctx, 10 + rc, -6, 7, 4.5, 1);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(230,80,60,0.9)';
+        ctx.fillRect(13 + rc, -4.6, 1.5, 1.5);
       }
       if (held.w.extmag && gun !== 'shotgun') {
         ctx.fillStyle = '#1c1f24';

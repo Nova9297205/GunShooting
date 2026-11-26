@@ -14,6 +14,7 @@ import type {
   StartInfo,
 } from '../types';
 import { MAX_PLAYERS, NAME_MAX } from '../game/constants';
+import { loadProfile, type Profile, sanitizeProfile } from '../game/progression';
 
 const ID_PREFIX = 'deadnights2d-v1-';
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -104,7 +105,7 @@ export class NetworkManager {
   snapInterval = 0;
 
   private peer: Peer | null = null;
-  private conns = new Map<number, { conn: DataConnection; name: string }>();
+  private conns = new Map<number, { conn: DataConnection; name: string; prof: Profile }>();
   private hostConn: DataConnection | null = null;
   private handlers: Partial<NetHandlers> = {};
   private destroyed = false;
@@ -120,7 +121,7 @@ export class NetworkManager {
     this.role = 'host';
     this.localId = 0;
     this.hostName = sanitizeName(name, 0);
-    this.players = [{ id: 0, name: this.hostName }];
+    this.players = [{ id: 0, name: this.hostName, prof: loadProfile() }];
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = genCode();
       try {
@@ -160,7 +161,7 @@ export class NetworkManager {
           }
         }
         if (slot < 0) return reject('ルームが満員です（最大3人）');
-        this.conns.set(slot, { conn, name: sanitizeName(msg.name, slot) });
+        this.conns.set(slot, { conn, name: sanitizeName(msg.name, slot), prof: sanitizeProfile(msg.prof) });
         this.rebuildLobby();
         conn.send({ type: 'welcome', slot, players: this.players } satisfies HostMessage);
         this.broadcastLobby();
@@ -182,7 +183,7 @@ export class NetworkManager {
 
   private rebuildLobby(): void {
     const ids = [...this.conns.keys()].sort();
-    this.players = [{ id: 0, name: this.hostName }, ...ids.map((id) => ({ id, name: this.conns.get(id)!.name }))];
+    this.players = [{ id: 0, name: this.hostName, prof: loadProfile() }, ...ids.map((id) => ({ id, name: this.conns.get(id)!.name, prof: this.conns.get(id)!.prof }))];
   }
 
   private broadcastLobby(): void {
@@ -238,7 +239,7 @@ export class NetworkManager {
       this.hostConn = conn;
       let lastSnapAt = 0;
 
-      conn.on('open', () => conn.send({ type: 'hello', name } satisfies GuestMessage));
+      conn.on('open', () => conn.send({ type: 'hello', name, prof: loadProfile() } satisfies GuestMessage));
       const asm = new ChunkAssembler();
       conn.on('data', (raw) => {
         const data = asm.feed(raw);
