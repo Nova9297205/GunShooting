@@ -15,8 +15,10 @@ import type {
   ObjSnap,
   PlayerSnap,
   Snapshot,
+  SoundKey,
   Stash,
   TimePhase,
+  WeaponId,
   ViewState,
   ZombieSnap,
   ZombieType,
@@ -27,10 +29,8 @@ import {
   BREAKABLE_KINDS,
   BUILD_COST,
   CAMPFIRE_TILE,
-  CRAFT,
   CYCLE_SECONDS,
   DAY_SECONDS,
-  GUN,
   HORDE_EVERY,
   MAP_H,
   MAP_W,
@@ -44,14 +44,22 @@ import {
   START_MINUTE,
   T_WALL,
   TILE,
-  TOOL_BUILD,
+  USABLE_SLOTS,
+  CHEST_ITEMS,
+  BARBED,
+  BENCH_RANGE,
+  RECIPES,
+  TURRET,
+  WEAPONS,
+  MUZZLE,
+  BLUEPRINTS,
   WORLD_H,
   WORLD_W,
   ZOMBIE,
   ZOMBIE_SENSE,
 } from './constants';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
-import { BUILD_ID_START, generateWorld, objIsSolid, TileWorld } from './world';
+import { BUILD_ID_START, generateWorld, locationAt, objIsSolid, TileWorld } from './world';
 
 interface SimPlayer extends PlayerSnap {
   queue: InputFrame[];
@@ -64,6 +72,10 @@ interface SimPlayer extends PlayerSnap {
   buildCd: number;
   repairCd: number;
   warnCd: number;
+  bp: number;
+  alt: boolean;
+  useCd: number;
+  reloadW: WeaponId | '';
   /** 最後に入力が届いてからの秒数（タブが裏に回った等で入力が止まったら押しっぱなしを解除） */
   idle: number;
 }
@@ -85,10 +97,15 @@ interface SimZombie extends ZombieSnap {
 
 interface SimObj extends ObjSnap {
   regrowT: number;
+  /** タレット：設置者と射撃クールダウン */
+  owner?: number;
+  cd?: number;
 }
 
 interface SimBullet {
   id: number;
+  dmg: number;
+  knock: number;
   owner: number;
   x: number;
   y: number;
@@ -128,8 +145,12 @@ class MinHeap {
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (k[p] <= k[i]) break;
-      [k[p], k[i]] = [k[i], k[p]];
-      [v[p], v[i]] = [v[i], v[p]];
+      const tk = k[p];
+      k[p] = k[i];
+      k[i] = tk;
+      const tv = v[p];
+      v[p] = v[i];
+      v[i] = tv;
       i = p;
     }
   }
@@ -150,8 +171,12 @@ class MinHeap {
         if (l < k.length && k[l] < k[m]) m = l;
         if (r < k.length && k[r] < k[m]) m = r;
         if (m === i) break;
-        [k[m], k[i]] = [k[i], k[m]];
-        [v[m], v[i]] = [v[i], v[m]];
+        const tk = k[m];
+        k[m] = k[i];
+        k[i] = tk;
+        const tv = v[m];
+        v[m] = v[i];
+        v[i] = tv;
         i = m;
       }
     }
@@ -177,6 +202,8 @@ export class HostSimulation {
   zombies: SimZombie[] = [];
   bullets: SimBullet[] = [];
   stash: Stash = { wood: 30, scrap: 12 };
+  /** 拠点の共有チェスト */
+  chest: Record<string, number> = {};
 
   day = 1;
   cycleT: number;
@@ -191,7 +218,8 @@ export class HostSimulation {
   private removed: number[] = [];
   private nextId = 1;
   private nextBuildId = BUILD_ID_START;
-  private flow = new Float32Array(MAP_W * MAP_H);
+  // Float64 で保持する（Float32 だとヒープのキーとの丸め誤差で同じノードが何度も再投入され、計算が爆発する）
+  private flow = new Float64Array(MAP_W * MAP_H);
   private flowTimer = 0;
   private spawnTimer = 2;
   private hordeQuota = 0;
@@ -202,6 +230,7 @@ export class HostSimulation {
     const gen = generateWorld(seed);
     this.world = new TileWorld<SimObj>(gen.terrain);
     for (const o of gen.objs) this.world.setObj({ ...o, regrowT: 0 });
+    this.world.locations = gen.locations;
     this.cycleT = ((START_MINUTE - 360) * DAY_SECONDS) / 840;
 
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -222,7 +251,7 @@ export class HostSimulation {
         downTimer: 0,
         reviveProgress: 0,
         tool: Tool.Gun,
-        inv: { ammo: 48, mag: GUN.magSize, gunpowder: 2, food: 2, medkit: 1 },
+        inv: { ammo: 36, mag: WEAPONS.pistol.magSize, shells: 0, smag: 0, gun: 0, shotgun: 0, gunpowder: 2, food: 2, medkit: 1, cloth: 1, herb: 1, parts: 0, kit: 0, axe: 0 },
         reloadT: 0,
         shots: 0,
         swings: 0,
@@ -233,6 +262,8 @@ export class HostSimulation {
         dashCd: 0,
         dashDx: 0,
         dashDy: 0,
+        stamina: PLAYER.maxStamina,
+        staminaDelay: 0,
         queue: [],
         fire: false,
         revive: false,
@@ -244,12 +275,27 @@ export class HostSimulation {
         repairCd: 0,
         warnCd: 0,
         idle: 0,
+        bp: 0,
+        alt: false,
+        useCd: 0,
+        reloadW: '',
       });
     });
-    this.events.push({ k: 'banner', t: 'DAY 1', s: '物資を集めて拠点を強化しよう。5日目の夜に大襲撃が来る…', c: '#ffe2a8' });
+    for (const loc of this.world.locations) if (loc.tier >= 3) for (let i = 0; i < 6; i++) this.spawnGuard(loc);
+    this.events.push({ k: 'banner', t: 'DAY 1', s: '物資を集めて拠点を強化しよう。5日目の夜に大襲撃が来る…', c: '#ffe2a8', snd: 'day' });
   }
 
   // ======================== 外部API ========================
+
+  /** 開発用：任意のオブジェクトを設置（監査スクリプト用） */
+  debugPlace(kind: BuildKind, tx: number, ty: number): void {
+    if (!(kind in OBJ_HP) || !this.world.inBounds(tx, ty) || this.world.solid(tx, ty) || this.world.objAt(tx, ty)) return;
+    const hp = OBJ_HP[kind];
+    const o: SimObj = { id: this.nextBuildId++, kind, tx, ty, hp, maxHp: hp, ready: 1, regrowT: 0 };
+    this.world.setObj(o);
+    this.changed.add(o.id);
+    this.flowTimer = Math.min(this.flowTimer, 0.1);
+  }
 
   queueInput(playerId: number, f: InputFrame): void {
     const p = this.players.find((pl) => pl.id === playerId);
@@ -297,6 +343,7 @@ export class HostSimulation {
       minute: Math.floor(this.minute()),
       phase: this.phase,
       stash: { ...this.stash },
+      chest: { ...this.chest },
       hordeLeft: this.phase === 'horde' ? this.hordeQuota - this.hordeSpawned + this.zombies.filter((z) => z.horde).length : 0,
       players: this.players.map((p) => ({
         id: p.id,
@@ -323,6 +370,8 @@ export class HostSimulation {
         dashCd: p.dashCd,
         dashDx: p.dashDx,
         dashDy: p.dashDy,
+        stamina: Math.round(p.stamina * 10) / 10,
+        staminaDelay: Math.round(p.staminaDelay * 100) / 100,
       })),
       zombies: this.zombies.map((z) => ({
         id: z.id,
@@ -372,6 +421,7 @@ export class HostSimulation {
     for (const z of this.zombies) this.updateZombie(z, dt);
     this.separateZombies();
     this.updateBullets(dt);
+    this.updateTurrets(dt);
     this.updateObjects(dt);
     this.zombies = this.zombies.filter((z) => !z.dead);
     this.bullets = this.bullets.filter((b) => !b.dead);
@@ -399,14 +449,15 @@ export class HostSimulation {
 
     if (prevPhase !== this.phase) {
       if (this.phase === 'horde') {
-        const mult = 1 + 0.45 * (this.players.length - 1);
+        // 人数ごとの大襲撃の規模（ボットによる自動テストで調整：3人は資材を分け合うぶん控えめ）
+        const mult = [1, 0.92, 1.9, 2.35][Math.min(3, this.players.length)];
         const n = this.day / HORDE_EVERY;
-        this.hordeQuota = Math.round((26 + 16 * (n - 1)) * mult);
+        this.hordeQuota = Math.round((30 + 20 * (n - 1)) * mult);
         this.hordeSpawned = 0;
         this.spawnTimer = 1.5;
-        this.events.push({ k: 'banner', t: '大襲撃 - HORDE NIGHT', s: 'ゾンビの大群が押し寄せてくる！朝 6:00 まで生き延びろ', c: '#ff3b3b' });
+        this.events.push({ k: 'banner', t: '大襲撃 - HORDE NIGHT', s: 'ゾンビの大群が押し寄せてくる！朝 6:00 まで生き延びろ', c: '#ff3b3b', snd: 'horde' });
       } else if (this.phase === 'night') {
-        this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: 'ゾンビが活発になった。懐中電灯で周囲を照らせ', c: '#9fb7ff' });
+        this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: 'ゾンビが活発になった。懐中電灯で周囲を照らせ', c: '#9fb7ff', snd: 'night' });
       } else {
         this.onDawn(prevPhase === 'horde');
       }
@@ -415,7 +466,7 @@ export class HostSimulation {
 
   private onDawn(hordeCleared: boolean): void {
     if (hordeCleared) {
-      this.events.push({ k: 'banner', t: '大襲撃クリア！', s: `DAY ${this.day} の朝を迎えた。生き延びたぞ！`, c: '#7dffb0' });
+      this.events.push({ k: 'banner', t: '大襲撃クリア！', s: `DAY ${this.day} の朝を迎えた。生き延びたぞ！`, c: '#7dffb0', snd: 'clear' });
       // 残ったホードゾンビは朝日で燃え尽きる
       for (const z of this.zombies) {
         if (!z.horde) continue;
@@ -426,7 +477,7 @@ export class HostSimulation {
       const sub = isHordeDay(this.day)
         ? '今夜は大襲撃！ 拠点を固めろ'
         : `大襲撃まであと ${HORDE_EVERY - (this.day % HORDE_EVERY)} 日`;
-      this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: sub, c: '#ffe2a8' });
+      this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: sub, c: '#ffe2a8', snd: 'day' });
     }
     // 戦闘不能者はキャンプファイアで復帰
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -460,20 +511,25 @@ export class HostSimulation {
       p.revive = f.revive;
       p.tx = f.tx;
       p.ty = f.ty;
-      if (f.tool >= 0 && f.tool <= 5 && f.tool !== p.tool) {
+      if (f.tool >= 0 && f.tool < USABLE_SLOTS && f.tool !== p.tool) {
         p.tool = f.tool;
-        if (p.tool !== Tool.Gun) p.reloadT = 0;
+        p.reloadT = 0; // 持ち替えたらリロード中断
       }
+      p.bp = Math.max(0, Math.min(BLUEPRINTS.length - 1, f.bp | 0));
+      p.alt = !!f.alt;
       if (p.status !== 'alive') continue;
       if (f.interact) this.interact(p);
       if (f.reload) this.startReload(p);
-      if (f.craft) this.craftAmmo(p);
+      if (f.craft) this.craft(p, f.craft);
+      if (f.chest) this.chestOp(p, f.chest);
+      if (f.ping) this.ping(p, f.tx, f.ty);
       if (f.eat) this.useFood(p, true);
       if (f.heal) this.useMedkit(p, true);
     }
     if (p.queue.length > 0) p.idle = 0;
     else if ((p.idle += dt) > 0.3) {
       p.fire = false;
+      p.alt = false;
       p.revive = false;
     }
     p.queue.length = 0;
@@ -509,10 +565,15 @@ export class HostSimulation {
       p.reloadT -= dt;
       if (p.reloadT <= 0) {
         p.reloadT = 0;
-        const need = GUN.magSize - p.inv.mag;
-        const take = Math.min(need, p.inv.ammo);
-        p.inv.mag += take;
-        p.inv.ammo -= take;
+        if (p.reloadW === 'shotgun') {
+          const take = Math.min(WEAPONS.shotgun.magSize - p.inv.smag, p.inv.shells);
+          p.inv.smag += take;
+          p.inv.shells -= take;
+        } else if (p.reloadW) {
+          const take = Math.min(WEAPONS[p.reloadW].magSize - p.inv.mag, p.inv.ammo);
+          p.inv.mag += Math.max(0, take);
+          p.inv.ammo -= Math.max(0, take);
+        }
       }
     }
 
@@ -520,91 +581,227 @@ export class HostSimulation {
     p.swingCd = Math.max(0, p.swingCd - dt);
     p.buildCd = Math.max(0, p.buildCd - dt);
     p.repairCd = Math.max(0, p.repairCd - dt);
+    p.useCd = Math.max(0, p.useCd - dt);
 
+    // 建築ツールの右クリック＝修理
+    if (p.tool === Tool.Build && p.alt) {
+      if (p.repairCd <= 0) {
+        this.repair(p);
+        p.repairCd = REPAIR.interval;
+      }
+      return;
+    }
     if (!p.fire) {
       if (p.fireCd < 0) p.fireCd = 0;
       return;
     }
     switch (p.tool) {
-      case Tool.Gun:
-        this.fireGun(p);
-        break;
-      case Tool.Axe:
+      case Tool.Melee:
         if (p.swingCd <= 0) {
           this.swingAxe(p);
           p.swingCd = AXE.interval;
         }
         break;
-      case Tool.Repair:
-        if (p.repairCd <= 0) {
-          this.repair(p);
-          p.repairCd = REPAIR.interval;
+      case Tool.Gun:
+      case Tool.Shotgun: {
+        const w = this.weaponOf(p);
+        if (w) this.fireWeapon(p, w);
+        else if (p.warnCd <= 0) {
+          this.pop(p, 'ショットガンを持っていない（物資から入手）', '#ff8080');
+          p.warnCd = 1.5;
         }
         break;
-      default: {
-        const kind = TOOL_BUILD[p.tool];
-        if (kind && p.buildCd <= 0) {
-          this.build(p, kind);
+      }
+      case Tool.Build:
+        if (p.buildCd <= 0) {
+          this.build(p, BLUEPRINTS[p.bp].kind);
           p.buildCd = 0.22;
         }
-      }
+        break;
+      case Tool.Food:
+        if (p.useCd <= 0) {
+          this.useFood(p, true);
+          p.useCd = 0.7;
+        }
+        break;
+      case Tool.Medkit:
+        if (p.useCd <= 0) {
+          this.useMedkit(p, true);
+          p.useCd = 0.7;
+        }
+        break;
     }
   }
 
-  private pop(p: SimPlayer, t: string, c: string): void {
-    this.events.push({ k: 'pop', x: p.x, y: p.y - 30, t, c, id: p.id });
+  /** 選択中のスロットの射撃武器 */
+  private weaponOf(p: SimPlayer): WeaponId | null {
+    if (p.tool === Tool.Gun) return p.inv.gun >= 1 ? 'rifle' : 'pistol';
+    if (p.tool === Tool.Shotgun && p.inv.shotgun) return 'shotgun';
+    return null;
   }
 
-  private fireGun(p: SimPlayer): void {
+  private pop(p: SimPlayer, t: string, c: string, s?: SoundKey): void {
+    // 赤い警告メッセージにはエラー音を付ける
+    this.events.push({ k: 'pop', x: p.x, y: p.y - 30, t, c, id: p.id, s: s ?? (c === '#ff8080' ? 'error' : undefined) });
+  }
+
+  private fireWeapon(p: SimPlayer, wid: WeaponId): void {
     if (p.reloadT > 0) return;
-    if (p.inv.mag <= 0) {
-      if (p.inv.ammo > 0) this.startReload(p);
+    const w = WEAPONS[wid];
+    const sg = wid === 'shotgun';
+    const mag = () => (sg ? p.inv.smag : p.inv.mag);
+    const reserve = () => (sg ? p.inv.shells : p.inv.ammo);
+    if (mag() <= 0) {
+      if (reserve() > 0) this.startReload(p);
       else if (p.warnCd <= 0) {
-        this.pop(p, '弾切れ！ 火薬で[C]クラフト', '#ff8080');
+        this.pop(p, sg ? 'シェルがない！ [C]で作成（火薬2）' : '弾切れ！ [C]で弾薬を作成（火薬2）', '#ff8080');
         p.warnCd = 1.5;
       }
       return;
     }
-    while (p.fireCd <= 0 && p.inv.mag > 0) {
-      const a = p.aim + (Math.random() - 0.5) * 2 * GUN.spread;
-      this.bullets.push({
-        id: this.nextId++,
-        owner: p.id,
-        x: p.x + Math.cos(p.aim) * GUN.muzzle,
-        y: p.y + Math.sin(p.aim) * GUN.muzzle,
-        vx: Math.cos(a) * GUN.bulletSpeed,
-        vy: Math.sin(a) * GUN.bulletSpeed,
-        life: GUN.bulletLife,
-        dead: false,
-      });
-      p.inv.mag--;
+    while (p.fireCd <= 0 && mag() > 0) {
+      for (let i = 0; i < w.pellets; i++) {
+        const a = p.aim + (Math.random() - 0.5) * 2 * w.spread;
+        const sp = w.bulletSpeed * (sg ? 0.85 + Math.random() * 0.3 : 1);
+        this.bullets.push({
+          id: this.nextId++,
+          owner: p.id,
+          dmg: w.damage,
+          knock: w.knock,
+          x: p.x + Math.cos(p.aim) * MUZZLE,
+          y: p.y + Math.sin(p.aim) * MUZZLE,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp,
+          life: w.bulletLife * (sg ? 0.8 + Math.random() * 0.4 : 1),
+          dead: false,
+        });
+      }
+      if (sg) p.inv.smag--;
+      else p.inv.mag--;
       p.shots++;
-      p.fireCd += GUN.fireInterval;
-      this.makeNoise(p.x, p.y, GUN.noiseRadius);
+      p.fireCd += w.fireInterval;
+      this.makeNoise(p.x, p.y, w.noiseRadius);
     }
-    if (p.inv.mag <= 0 && p.inv.ammo > 0) this.startReload(p);
+    if (mag() <= 0 && reserve() > 0) this.startReload(p);
   }
 
   private startReload(p: SimPlayer): void {
-    if (p.tool !== Tool.Gun || p.reloadT > 0 || p.inv.mag >= GUN.magSize) return;
-    if (p.inv.ammo <= 0) {
+    const wid = this.weaponOf(p);
+    if (!wid || p.reloadT > 0) return;
+    const sg = wid === 'shotgun';
+    if ((sg ? p.inv.smag : p.inv.mag) >= WEAPONS[wid].magSize) return;
+    if ((sg ? p.inv.shells : p.inv.ammo) <= 0) {
       if (p.warnCd <= 0) {
-        this.pop(p, '予備弾薬がない', '#ff8080');
+        this.pop(p, sg ? '予備のシェルがない' : '予備弾薬がない', '#ff8080');
         p.warnCd = 1.5;
       }
       return;
     }
-    p.reloadT = GUN.reloadTime;
+    p.reloadT = WEAPONS[wid].reloadTime;
+    p.reloadW = wid;
   }
 
-  private craftAmmo(p: SimPlayer): void {
-    if (p.inv.gunpowder < CRAFT.gunpowder) {
-      this.pop(p, `火薬が足りない（${CRAFT.gunpowder}個必要）`, '#ff8080');
+  private pingCd = new Map<number, number>();
+
+  /** ピン：近くに敵がいれば「敵」、物資なら「物資」、それ以外は「ここ」 */
+  private ping(p: SimPlayer, tx: number, ty: number): void {
+    const now = this.time;
+    if ((this.pingCd.get(p.id) ?? -9) > now - 0.8) return;
+    this.pingCd.set(p.id, now);
+    const x = (tx + 0.5) * TILE;
+    const y = (ty + 0.5) * TILE;
+    let t: 'enemy' | 'loot' | 'go' = 'go';
+    if (this.zombies.some((z) => Math.hypot(z.x - x, z.y - y) < 90)) t = 'enemy';
+    else {
+      for (let dy = -1; dy <= 1 && t === 'go'; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const o = this.world.objAt(tx + dx, ty + dy);
+          if (o && o.ready && (o.kind === 'crate' || o.kind === 'mcrate' || o.kind === 'box')) t = 'loot';
+        }
+    }
+    this.events.push({ k: 'ping', id: p.id, x, y, t });
+  }
+
+  /** 共有チェストへの出し入れ（チェストの近くでのみ） */
+  private chestOp(p: SimPlayer, op: string): void {
+    const near = [...this.world.objects.values()].some(
+      (o) => o.kind === 'chest' && Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) <= BENCH_RANGE,
+    );
+    if (!near) return;
+    const [dir, item, amountStr] = op.split(':');
+    if (!CHEST_ITEMS.some((c) => c.id === item)) return;
+    const inv = p.inv as unknown as Record<string, number>;
+    const amount = Math.max(1, Math.min(999, Number(amountStr) || 1));
+    if (dir === 'd') {
+      const n = Math.min(amount, inv[item] ?? 0);
+      if (n <= 0) return;
+      inv[item] -= n;
+      this.chest[item] = (this.chest[item] ?? 0) + n;
+    } else if (dir === 'w') {
+      const n = Math.min(amount, this.chest[item] ?? 0);
+      if (n <= 0) return;
+      this.chest[item] -= n;
+      inv[item] = (inv[item] ?? 0) + n;
+    }
+  }
+
+  /** 作業台の近くにいるか */
+  private nearBench(p: SimPlayer): boolean {
+    for (const o of this.world.objects.values()) {
+      if (o.kind !== 'bench') continue;
+      if (Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) <= BENCH_RANGE) return true;
+    }
+    return false;
+  }
+
+  private craft(p: SimPlayer, id: string): void {
+    const r = RECIPES.find((x) => x.id === id);
+    if (!r) return;
+    if (r.bench && !this.nearBench(p)) {
+      this.pop(p, '作業台の近くでないと作れない', '#ff8080');
       return;
     }
-    p.inv.gunpowder -= CRAFT.gunpowder;
-    p.inv.ammo += CRAFT.ammo;
-    this.pop(p, `弾薬 +${CRAFT.ammo}`, '#ffd84d');
+    if ((id === 'rifle' && p.inv.gun >= 1) || (id === 'shotgun' && p.inv.shotgun) || (id === 'axe' && p.inv.axe)) {
+      this.pop(p, 'すでに持っている', '#cccccc');
+      return;
+    }
+    const have = (m: string) => (m === 'wood' || m === 'scrap' ? this.stash[m] : (p.inv as unknown as Record<string, number>)[m]);
+    for (const [m, n] of Object.entries(r.cost)) {
+      if (have(m) < (n ?? 0)) {
+        this.pop(p, '素材が足りない', '#ff8080');
+        return;
+      }
+    }
+    for (const [m, n] of Object.entries(r.cost)) {
+      if (m === 'wood' || m === 'scrap') this.stash[m] -= n ?? 0;
+      else (p.inv as unknown as Record<string, number>)[m] -= n ?? 0;
+    }
+    switch (id) {
+      case 'ammo':
+        p.inv.ammo += 10;
+        break;
+      case 'shells':
+        p.inv.shells += 6;
+        break;
+      case 'medkit':
+        p.inv.medkit += 1;
+        break;
+      case 'kit':
+        p.inv.kit += 1;
+        break;
+      case 'rifle':
+        p.inv.gun = 1;
+        p.inv.mag = Math.min(p.inv.mag, WEAPONS.rifle.magSize);
+        break;
+      case 'shotgun':
+        p.inv.shotgun = 1;
+        p.inv.smag = WEAPONS.shotgun.magSize;
+        break;
+      case 'axe':
+        p.inv.axe = 1;
+        break;
+    }
+    this.pop(p, `${r.name} を作成！`, '#ffd84d', 'craft');
   }
 
   private useFood(p: SimPlayer, explicit: boolean): boolean {
@@ -619,7 +816,7 @@ export class HostSimulation {
     p.inv.food--;
     p.hunger = Math.min(100, p.hunger + PLAYER.foodValue);
     p.hp = Math.min(p.maxHp, p.hp + 5);
-    this.pop(p, `空腹 +${PLAYER.foodValue}`, '#ffcf6b');
+    this.pop(p, `空腹 +${PLAYER.foodValue}`, '#ffcf6b', 'eat');
     return true;
   }
 
@@ -634,7 +831,7 @@ export class HostSimulation {
     }
     p.inv.medkit--;
     p.hp = Math.min(p.maxHp, p.hp + PLAYER.medkitValue);
-    this.pop(p, `HP +${PLAYER.medkitValue}`, '#7dffb0');
+    this.pop(p, `HP +${PLAYER.medkitValue}`, '#7dffb0', 'heal');
     return true;
   }
 
@@ -647,13 +844,27 @@ export class HostSimulation {
     for (let ty = pty - 2; ty <= pty + 2; ty++)
       for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
         const o = this.world.objAt(tx, ty);
-        if (!o || !o.ready || (o.kind !== 'crate' && o.kind !== 'box')) continue;
+        if (!o) continue;
+        const lootable = o.ready && (o.kind === 'crate' || o.kind === 'box' || o.kind === 'mcrate');
+        const turret = o.kind === 'turret' && o.ready < TURRET.maxAmmo;
+        if (!lootable && !turret) continue;
         const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y);
         if (d < bd) {
           bd = d;
           best = o;
         }
       }
+    if (best && best.kind === 'turret') {
+      const n = Math.min(TURRET.maxAmmo - best.ready, p.inv.ammo);
+      if (n <= 0) this.pop(p, '補充する弾薬がない', '#ff8080');
+      else {
+        p.inv.ammo -= n;
+        best.ready += n;
+        this.changed.add(best.id);
+        this.pop(p, `タレットに弾薬 +${n}`, '#ffd84d', 'craft');
+      }
+      return;
+    }
     if (best) {
       this.loot(p, best);
       return;
@@ -664,38 +875,82 @@ export class HostSimulation {
     if (!this.useMedkit(p, false) && !this.useFood(p, false)) this.pop(p, '近くに調べるものがない', '#aaaaaa');
   }
 
+  /** クレートのランク：軍用=3、ロケーションのランク、なければ中心からの距離 */
+  private lootTier(o: SimObj): number {
+    if (o.kind === 'mcrate') return 3;
+    if (o.kind === 'box') return 0;
+    const loc = locationAt(this.world.locations, o.tx, o.ty);
+    if (loc) return loc.tier;
+    return Math.hypot(o.tx - 40, o.ty - 30) > 26 ? 2 : 1;
+  }
+
   private loot(p: SimPlayer, o: SimObj): void {
     o.ready = 0;
-    o.regrowT = o.kind === 'crate' ? REGROW.crate : 0;
+    const tier = this.lootTier(o);
+    o.regrowT = o.kind === 'mcrate' ? REGROW.mcrate : o.kind === 'crate' ? REGROW.crate + tier * 40 : 0;
     this.changed.add(o.id);
     const parts: string[] = [];
-    const add = (label: string, n: number, apply: () => void) => {
+    const R = Math.random;
+    const roll = (chance: number, min: number, max: number) => (R() < chance ? min + Math.floor(R() * (max - min + 1)) : 0);
+    const give = (label: string, n: number, apply: (n: number) => void) => {
       if (n <= 0) return;
-      apply();
+      apply(n);
       parts.push(`${label}+${n}`);
     };
-    const R = Math.random;
-    const rich = o.kind === 'box' ? 1.5 : 1;
-    const ammo = R() < 0.6 ? Math.round((8 + R() * 14) * rich) : 0;
-    const gp = R() < 0.45 ? 1 + Math.floor(R() * 3) : 0;
-    const food = R() < 0.55 * rich ? 1 + (R() < 0.3 ? 1 : 0) : 0;
-    const med = R() < 0.22 * rich ? 1 : 0;
-    const wood = R() < 0.6 ? 3 + Math.floor(R() * 6) : 0;
-    const scrap = R() < 0.5 ? 2 + Math.floor(R() * 4) : 0;
-    add('弾薬', ammo, () => (p.inv.ammo += ammo));
-    add('火薬', gp, () => (p.inv.gunpowder += gp));
-    add('食料', food, () => (p.inv.food += food));
-    add('救急', med, () => (p.inv.medkit += med));
-    add('木材', wood, () => (this.stash.wood += wood));
-    add('鉄', scrap, () => (this.stash.scrap += scrap));
+    const inv = p.inv;
+    // ランク別の物資テーブル（遠く危険な場所ほど武器系・レア素材）
+    if (tier === 0) {
+      // 拠点の収納箱（毎朝補充）
+      give('食料', roll(0.8, 1, 2), (n) => (inv.food += n));
+      give('布', roll(0.5, 1, 2), (n) => (inv.cloth += n));
+      give('薬草', roll(0.4, 1, 1), (n) => (inv.herb += n));
+      give('弾薬', roll(0.4, 4, 8), (n) => (inv.ammo += n));
+    } else if (tier === 1) {
+      give('食料', roll(0.4, 1, 1), (n) => (inv.food += n));
+      give('布', roll(0.4, 1, 3), (n) => (inv.cloth += n));
+      give('薬草', roll(0.35, 1, 2), (n) => (inv.herb += n));
+      give('木材', roll(0.45, 2, 5), (n) => (this.stash.wood += n));
+      give('弾薬', roll(0.25, 3, 6), (n) => (inv.ammo += n));
+      give('火薬', roll(0.2, 1, 1), (n) => (inv.gunpowder += n));
+      give('救急', roll(0.04, 1, 1), (n) => (inv.medkit += n));
+    } else if (tier === 2) {
+      give('弾薬', roll(0.5, 5, 10), (n) => (inv.ammo += n));
+      give('火薬', roll(0.5, 1, 3), (n) => (inv.gunpowder += n));
+      give('鉄', roll(0.5, 2, 5), (n) => (this.stash.scrap += n));
+      give('シェル', roll(0.25, 2, 5), (n) => (inv.shells += n));
+      give('布', roll(0.25, 1, 2), (n) => (inv.cloth += n));
+      give('食料', roll(0.25, 1, 1), (n) => (inv.food += n));
+      give('武器パーツ', roll(0.1, 1, 1), (n) => (inv.parts += n));
+      give('救急', roll(0.08, 1, 1), (n) => (inv.medkit += n));
+    } else {
+      give('弾薬', roll(0.75, 10, 18), (n) => (inv.ammo += n));
+      give('シェル', roll(0.5, 4, 8), (n) => (inv.shells += n));
+      give('火薬', roll(0.6, 2, 4), (n) => (inv.gunpowder += n));
+      give('武器パーツ', roll(0.6, 1, 2), (n) => (inv.parts += n));
+      give('救急', roll(0.25, 1, 1), (n) => (inv.medkit += n));
+      if (!inv.shotgun && R() < 0.22) {
+        inv.shotgun = 1;
+        inv.smag = WEAPONS.shotgun.magSize;
+        parts.unshift('★ショットガン入手！ [3]');
+      }
+    }
     if (parts.length === 0) {
-      p.inv.food += 1;
+      inv.food += 1;
       parts.push('食料+1');
     }
-    this.events.push({ k: 'pop', x: (o.tx + 0.5) * TILE, y: o.ty * TILE - 6, t: parts.join('  '), c: '#ffe08a', id: p.id });
+    this.events.push({ k: 'pop', x: (o.tx + 0.5) * TILE, y: o.ty * TILE - 6, t: parts.join('  '), c: tier >= 3 ? '#ffb86b' : '#ffe08a', id: p.id, s: 'loot' });
   }
 
   private swingAxe(p: SimPlayer): void {
+    if (p.stamina < PLAYER.meleeStamina) {
+      if (p.warnCd <= 0) {
+        this.pop(p, 'スタミナ切れ！', '#ffb347');
+        p.warnCd = 1;
+      }
+      return;
+    }
+    p.stamina -= PLAYER.meleeStamina;
+    p.staminaDelay = PLAYER.staminaDelay;
     p.swings++;
     this.makeNoise(p.x, p.y, AXE.noiseRadius);
     // ゾンビへの近接攻撃
@@ -708,7 +963,8 @@ export class HostSimulation {
       const d = Math.hypot(dx, dy);
       if (d > AXE.range + r) continue;
       if (Math.abs(angleDiff(p.aim, Math.atan2(dy, dx))) > AXE.arc / 2 && d > r + PLAYER.radius) continue;
-      this.damageZombie(z, AXE.damage, p.id, dx, dy, 260);
+      this.events.push({ k: 'hit', x: z.x - (dx / (d || 1)) * r * 0.6, y: z.y - (dy / (d || 1)) * r * 0.6, o: p.id, a: Math.atan2(dy, dx), m: 1 });
+      this.damageZombie(z, AXE.damage * (p.inv.axe ? 1.6 : 1), p.id, dx, dy, 260);
       hits++;
     }
     if (hits > 0) return;
@@ -724,7 +980,7 @@ export class HostSimulation {
   }
 
   private harvest(p: SimPlayer, o: SimObj): void {
-    o.hp -= AXE.harvestDamage;
+    o.hp -= AXE.harvestDamage * (p.inv.axe ? 2 : 1);
     this.changed.add(o.id);
     const x = (o.tx + 0.5) * TILE;
     const y = (o.ty + 0.5) * TILE;
@@ -764,7 +1020,14 @@ export class HostSimulation {
     const cy = (ty + 0.5) * TILE;
     if (Math.hypot(cx - p.x, cy - p.y) > PLAYER.buildRange) return;
     if (this.world.terrainAt(tx, ty) === T_WALL || this.world.objAt(tx, ty)) return;
-    if (kind !== 'spike') {
+    if (kind === 'turret' && p.inv.kit <= 0) {
+      if (p.warnCd <= 0) {
+        this.pop(p, 'タレットキットが必要（作業台でクラフト）', '#ff8080');
+        p.warnCd = 1.2;
+      }
+      return;
+    }
+    if (kind === 'woodWall' || kind === 'ironWall' || kind === 'turret') {
       for (const pl of this.players) if (pl.status !== 'dead' && circleOverlapsTile(pl.x, pl.y, PLAYER.radius, tx, ty)) return;
       for (const z of this.zombies) if (circleOverlapsTile(z.x, z.y, ZOMBIE[z.type].radius, tx, ty)) return;
     }
@@ -780,17 +1043,23 @@ export class HostSimulation {
     this.stash.scrap -= cost.scrap;
     const hp = OBJ_HP[kind];
     const o: SimObj = { id: this.nextBuildId++, kind, tx, ty, hp, maxHp: hp, ready: 1, regrowT: 0 };
+    if (kind === 'turret') {
+      p.inv.kit--;
+      o.ready = TURRET.startAmmo;
+      o.owner = p.id;
+      o.cd = 0;
+    }
     this.world.setObj(o);
     this.changed.add(o.id);
     p.builds++;
     this.events.push({ k: 'build', x: cx, y: cy, kind });
-    this.flowTimer = 0; // 経路を即再計算
+    this.flowTimer = Math.min(this.flowTimer, 0.1); // 経路を即再計算
   }
 
   private repair(p: SimPlayer): void {
     let target = this.world.objAt(p.tx, p.ty);
     const ok = (o: SimObj | undefined) =>
-      !!o && (BREAKABLE_KINDS.has(o.kind) || o.kind === 'spike') && o.hp < o.maxHp;
+      !!o && (BREAKABLE_KINDS.has(o.kind) || o.kind === 'spike' || o.kind === 'barbed' || o.kind === 'torch') && o.hp < o.maxHp;
     if (!ok(target)) {
       // カーソル位置になければ正面のタイル
       const tx = Math.floor((p.x + Math.cos(p.aim) * 36) / TILE);
@@ -802,7 +1071,7 @@ export class HostSimulation {
     const cx = (o.tx + 0.5) * TILE;
     const cy = (o.ty + 0.5) * TILE;
     if (Math.hypot(cx - p.x, cy - p.y) > PLAYER.buildRange * 0.7) return;
-    const useScrap = o.kind === 'ironWall' || o.kind === 'stone';
+    const useScrap = o.kind === 'ironWall' || o.kind === 'stone' || o.kind === 'barbed' || o.kind === 'turret';
     if (useScrap ? this.stash.scrap < 1 : this.stash.wood < 1) {
       if (p.warnCd <= 0) {
         this.pop(p, useScrap ? '修理に鉄スクラップが必要' : '修理に木材が必要', '#ff8080');
@@ -882,7 +1151,7 @@ export class HostSimulation {
     const o = this.world.objAt(i % MAP_W, Math.floor(i / MAP_W));
     if (!o) return 1;
     if (BREAKABLE_KINDS.has(o.kind)) return 3 + o.hp / 35;
-    if (o.kind === 'spike') return 5;
+    if (o.kind === 'spike' || o.kind === 'barbed') return 5;
     return objIsSolid(o) ? -1 : 1;
   }
 
@@ -899,7 +1168,7 @@ export class HostSimulation {
       flow[i] = 0;
       heap.push(0, i);
     }
-    const cost = new Float32Array(MAP_W * MAP_H).fill(-2);
+    const cost = new Float64Array(MAP_W * MAP_H).fill(-2);
     const getCost = (i: number) => {
       if (cost[i] === -2) cost[i] = this.enterCost(i);
       return cost[i];
@@ -945,18 +1214,29 @@ export class HostSimulation {
         const pos = this.findSpawn(anchor.x + Math.cos(ang) * 820, anchor.y + Math.sin(ang) * 820, 160, 600);
         if (!pos) break;
         const r = Math.random();
-        const bruteRate = Math.min(0.2, 0.06 + 0.012 * this.day);
+        const bruteRate = Math.min(0.24, 0.08 + 0.014 * this.day);
         const type: ZombieType = r < bruteRate ? 'brute' : r < 0.45 ? 'runner' : 'walker';
         this.spawnZombie(type, pos.x, pos.y, true);
         this.hordeSpawned++;
       }
-      this.spawnTimer = Math.max(0.5, 1.6 - this.day * 0.05);
+      this.spawnTimer = Math.max(0.35, 1.25 - this.day * 0.05) / (1 + 0.25 * (this.players.length - 1));
       return;
     }
 
+    // 誰もいない★3ロケーションには見張りを補充
+    if (Math.random() < 0.1) {
+      for (const loc of this.world.locations) {
+        if (loc.tier < 3) continue;
+        const cx = (loc.x + loc.w / 2) * TILE;
+        const cy = (loc.y + loc.h / 2) * TILE;
+        if (this.players.some((p) => Math.hypot(p.x - cx, p.y - cy) < 700)) continue;
+        const guards = this.zombies.filter((z) => Math.hypot(z.x - cx, z.y - cy) < 360).length;
+        if (guards < 5) this.spawnGuard(loc);
+      }
+    }
     const roaming = this.zombies.filter((z) => !z.horde).length;
     const night = this.phase !== 'day';
-    const target = Math.min(55, night ? 14 + this.day * 3 : 8 + this.day * 2) * (1 + 0.25 * (this.players.length - 1));
+    const target = Math.min(60, night ? 14 + this.day * 3 : 8 + this.day * 2) * (1 + 0.4 * (this.players.length - 1));
     if (roaming < target && this.zombies.length < MAX_ZOMBIES) {
       const pos = this.findSpawn(Math.random() * WORLD_W, Math.random() * WORLD_H, 2000, night ? 520 : 680);
       if (pos) {
@@ -987,8 +1267,22 @@ export class HostSimulation {
     return null;
   }
 
+  /** ★3ロケーションの見張りゾンビ */
+  private spawnGuard(loc: { x: number; y: number; w: number; h: number }): void {
+    for (let t = 0; t < 10; t++) {
+      const tx = loc.x + 1 + Math.floor(Math.random() * (loc.w - 2));
+      const ty = loc.y + 1 + Math.floor(Math.random() * (loc.h - 2));
+      if (this.world.solid(tx, ty)) continue;
+      const r = Math.random();
+      this.spawnZombie(r < 0.15 ? 'brute' : r < 0.45 ? 'runner' : 'walker', (tx + 0.5) * TILE, (ty + 0.5) * TILE, false);
+      return;
+    }
+  }
+
   private spawnZombie(type: ZombieType, x: number, y: number, horde: boolean): void {
-    const hp = ZOMBIE[type].hp * (1 + 0.08 * (this.day - 1));
+    // 大襲撃のゾンビは人数が多いほどタフになる（火力の増加分を相殺）
+    const teamMul = horde ? 1 + 0.1 * (this.players.length - 1) : 1;
+    const hp = ZOMBIE[type].hp * (1 + 0.08 * (this.day - 1)) * teamMul;
     this.zombies.push({
       id: this.nextId++,
       type,
@@ -1095,6 +1389,23 @@ export class HostSimulation {
 
     // ---- スパイク罠 ----
     const tile = this.world.objAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE));
+    if (tile && tile.kind === 'barbed' && tile.hp > 0) {
+      speed *= BARBED.slow;
+      const dmg = BARBED.dps * dt;
+      z.spikeAcc += dmg;
+      z.hp -= dmg;
+      tile.hp -= BARBED.wearPerSec * dt;
+      this.changed.add(tile.id);
+      if (tile.hp <= 0) this.destroyObj(tile);
+      if (z.spikeAcc >= 10) {
+        this.events.push({ k: 'dmg', x: z.x, y: z.y - st.radius, v: Math.round(z.spikeAcc), p: false });
+        z.spikeAcc = 0;
+      }
+      if (z.hp <= 0) {
+        this.killZombie(z, -1);
+        return;
+      }
+    }
     if (tile && tile.kind === 'spike' && tile.hp > 0) {
       speed *= SPIKE.slow;
       const dmg = SPIKE.dps * dt;
@@ -1229,19 +1540,21 @@ export class HostSimulation {
     z.ky += (dirY / l) * knock * resist;
     if (!z.horde) z.aggroT = ZOMBIE_SENSE.aggroMemory;
     this.events.push({ k: 'dmg', x: z.x, y: z.y - ZOMBIE[z.type].radius, v: Math.round(dmg), p: false });
-    if (z.hp <= 0) this.killZombie(z, owner);
+    if (z.hp <= 0) this.killZombie(z, owner, dirX / l, dirY / l);
   }
 
-  private killZombie(z: SimZombie, owner: number): void {
+  private killZombie(z: SimZombie, owner: number, dx = 0, dy = 0): void {
     z.dead = true;
     const killer = this.players.find((p) => p.id === owner);
     if (killer) killer.kills++;
-    this.events.push({ k: 'kill', x: z.x, y: z.y, r: ZOMBIE[z.type].radius });
+    this.events.push({ k: 'kill', x: z.x, y: z.y, r: ZOMBIE[z.type].radius, o: owner, t: z.type, id: z.id, a: z.angle, dx: Math.round(dx * 100) / 100, dy: Math.round(dy * 100) / 100 });
     // まれに物資をドロップ（拾う手間を省き直接付与）
     if (killer && Math.random() < 0.12) {
-      const ammo = 4 + Math.floor(Math.random() * 6);
-      killer.inv.ammo += ammo;
-      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: `弾薬+${ammo}`, c: '#ffe08a', id: killer.id });
+      const sg = killer.inv.shotgun && Math.random() < 0.35;
+      const n = sg ? 2 + Math.floor(Math.random() * 3) : 4 + Math.floor(Math.random() * 6);
+      if (sg) killer.inv.shells += n;
+      else killer.inv.ammo += n;
+      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: sg ? `シェル+${n}` : `弾薬+${n}`, c: '#ffe08a', id: killer.id, s: 'loot' });
     }
   }
 
@@ -1267,8 +1580,8 @@ export class HostSimulation {
           const r = ZOMBIE[z.type].radius + 3;
           if ((z.x - b.x) ** 2 + (z.y - b.y) ** 2 < r * r) {
             b.dead = true;
-            this.events.push({ k: 'hit', x: b.x, y: b.y, o: b.owner });
-            this.damageZombie(z, GUN.damage, b.owner, b.vx, b.vy, 90);
+            this.events.push({ k: 'hit', x: b.x, y: b.y, o: b.owner, a: Math.atan2(b.vy, b.vx) });
+            this.damageZombie(z, b.dmg, b.owner, b.vx, b.vy, b.knock);
             break;
           }
         }
@@ -1285,7 +1598,47 @@ export class HostSimulation {
     this.changed.delete(o.id);
     this.removed.push(o.id);
     this.events.push({ k: 'break', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });
-    this.flowTimer = 0;
+    this.flowTimer = Math.min(this.flowTimer, 0.1);
+  }
+
+  /** 自動タレット：射程内で視線の通る最寄りのゾンビを撃つ */
+  private updateTurrets(dt: number): void {
+    for (const o of this.world.objects.values()) {
+      if (o.kind !== 'turret') continue;
+      o.cd = Math.max(0, (o.cd ?? 0) - dt);
+      if (o.cd > 0 || o.ready <= 0) continue;
+      const x = (o.tx + 0.5) * TILE;
+      const y = (o.ty + 0.5) * TILE;
+      let best: SimZombie | null = null;
+      let bd = TURRET.range;
+      for (const z of this.zombies) {
+        if (z.dead) continue;
+        const d = Math.hypot(z.x - x, z.y - y);
+        if (d < bd && this.world.lineClear(x, y, z.x, z.y)) {
+          bd = d;
+          best = z;
+        }
+      }
+      if (!best) continue;
+      const a = Math.atan2(best.y - y, best.x - x) + (Math.random() - 0.5) * 0.05;
+      this.bullets.push({
+        id: this.nextId++,
+        owner: o.owner ?? -1,
+        dmg: TURRET.damage,
+        knock: 70,
+        x: x + Math.cos(a) * 22,
+        y: y + Math.sin(a) * 22,
+        vx: Math.cos(a) * 1050,
+        vy: Math.sin(a) * 1050,
+        life: 0.45,
+        dead: false,
+      });
+      o.ready--;
+      o.cd = TURRET.fireInterval;
+      this.changed.add(o.id);
+      this.events.push({ k: 'tshot', x, y, a, id: o.id });
+      this.makeNoise(x, y, TURRET.noise);
+    }
   }
 
   private objTimer = 0;
@@ -1295,23 +1648,24 @@ export class HostSimulation {
     const step = this.objTimer;
     this.objTimer = 0;
     for (const o of this.world.objects.values()) {
-      const depleted = ((o.kind === 'tree' || o.kind === 'car') && o.hp <= 0) || (o.kind === 'crate' && !o.ready);
+      const depleted = ((o.kind === 'tree' || o.kind === 'car') && o.hp <= 0) || ((o.kind === 'crate' || o.kind === 'mcrate') && !o.ready);
       if (!depleted || o.regrowT <= 0) continue;
       o.regrowT -= step;
       if (o.regrowT > 0) continue;
       // 誰かが上に立っていたら少し待つ
       const blocked =
         o.kind !== 'crate' &&
+        o.kind !== 'mcrate' &&
         (this.players.some((p) => circleOverlapsTile(p.x, p.y, PLAYER.radius, o.tx, o.ty)) ||
           this.zombies.some((z) => circleOverlapsTile(z.x, z.y, ZOMBIE[z.type].radius, o.tx, o.ty)));
       if (blocked) {
         o.regrowT = 3;
         continue;
       }
-      if (o.kind === 'crate') o.ready = 1;
+      if (o.kind === 'crate' || o.kind === 'mcrate') o.ready = 1;
       else o.hp = o.maxHp;
       this.changed.add(o.id);
-      if (o.kind !== 'crate') this.flowTimer = 0;
+      if (o.kind !== 'crate' && o.kind !== 'mcrate') this.flowTimer = Math.min(this.flowTimer, 0.1);
     }
   }
 }

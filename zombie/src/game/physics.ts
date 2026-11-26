@@ -116,6 +116,9 @@ export function stepMovement(
   const dt = clamp(rawDt, 0, 0.1);
   if (status === 'dead') return;
   b.dashCd = Math.max(0, b.dashCd - dt);
+  // スタミナ：消費後すこし待ってから回復
+  if (b.staminaDelay > 0) b.staminaDelay = Math.max(0, b.staminaDelay - dt);
+  else b.stamina = Math.min(PLAYER.maxStamina, b.stamina + PLAYER.staminaRegen * dt);
 
   let mx = f.mx;
   let my = f.my;
@@ -125,7 +128,7 @@ export function stepMovement(
     my /= len;
   }
 
-  if (f.dash && status === 'alive' && b.dashCd <= 0) {
+  if (f.dash && status === 'alive' && b.dashCd <= 0 && b.stamina >= PLAYER.dashStamina) {
     let dx = Math.cos(f.aim);
     let dy = Math.sin(f.aim);
     if (len > 0.01) {
@@ -137,6 +140,8 @@ export function stepMovement(
     b.dashDy = dy;
     b.dashTime = PLAYER.dashTime;
     b.dashCd = PLAYER.dashCooldown;
+    b.stamina -= PLAYER.dashStamina;
+    b.staminaDelay = PLAYER.staminaDelay;
   }
 
   let vx: number;
