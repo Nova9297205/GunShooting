@@ -3,8 +3,8 @@ import type { ItemId } from './items';
 
 // ---------------- ワールド / 通信 ----------------
 export const TILE = 40;
-export const MAP_W = 240; // タイル数（広大なオープンワールド）
-export const MAP_H = 180;
+export const MAP_W = 360; // タイル数（広大なオープンワールド：18×14 チャンク）
+export const MAP_H = 280;
 /** チャンク（区画）の一辺のタイル数。描画・シミュレーションはチャンク単位で動的に管理する */
 export const CHUNK = 20;
 export const CHUNKS_X = MAP_W / CHUNK;
@@ -245,8 +245,8 @@ export const STORAGE_SHARED = 40;
 export const STORAGE_PERSONAL = 24;
 
 /** 拠点の敷地（タイル座標）：フェンスで囲まれた安全地帯（ゾンビは入ってこない） */
-export const SAFEHOUSE = { x: 111, y: 81, w: 18, h: 17 };
-export const CAMPFIRE_TILE = { x: 124, y: 93 };
 /** 拠点（地図の中心）のタイル座標：危険度は拠点からの距離で決まる */
-export const BASE_TX = 120;
-export const BASE_TY = 90;
+export const BASE_TX = MAP_W / 2;
+export const BASE_TY = MAP_H / 2;
+export const SAFEHOUSE = { x: BASE_TX - 9, y: BASE_TY - 9, w: 18, h: 17 };
+export const CAMPFIRE_TILE = { x: BASE_TX + 4, y: BASE_TY + 3 };

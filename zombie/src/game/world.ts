@@ -50,7 +50,7 @@ export function objIsSolid(o: ObjSnap): boolean {
 /** 名前付きロケーション（探索先）。tier が高いほど遠く危険でレア物資が出る */
 export interface Location {
   name: string;
-  kind: 'house' | 'market' | 'hospital' | 'police' | 'military' | 'gas' | 'base' | 'ruin';
+  kind: 'house' | 'market' | 'hospital' | 'police' | 'military' | 'gas' | 'base' | 'ruin' | 'warehouse';
   x: number;
   y: number;
   w: number;
@@ -68,9 +68,42 @@ export interface Landmark {
   name: string;
 }
 
+/** 危険度の境目（拠点からの距離・タイル）：★1｜★2｜★3｜★4 */
+export const TIER_RINGS = [44, 88, 132] as const;
+
 /** 拠点からの距離（タイル）で決まる危険度 1〜4 */
 export function tierAtDistance(d: number): number {
-  return d < 34 ? 1 : d < 62 ? 2 : d < 90 ? 3 : 4;
+  return d < TIER_RINGS[0] ? 1 : d < TIER_RINGS[1] ? 2 : d < TIER_RINGS[2] ? 3 : 4;
+}
+
+// ---------------- 地区（街区のまとまり） ----------------
+export type DistrictKind = 'residential' | 'commercial' | 'industrial' | 'civic' | 'military' | 'forest' | 'wild';
+export const DISTRICT_INFO: Record<DistrictKind, { name: string; color: string; loot: string }> = {
+  residential: { name: '住宅街', color: '#9fbf7a', loot: '食料・布・日用品' },
+  commercial: { name: '商業地区', color: '#d8b862', loot: '食料・薬・弾薬が少し' },
+  industrial: { name: '工業地区', color: '#a8a090', loot: '素材・工具・部品' },
+  civic: { name: '市街中心部', color: '#7fa6d0', loot: '病院の薬・警察の武器と弾' },
+  military: { name: '軍用地', color: '#d8644a', loot: '軍用の武器・弾薬（重装の感染兵）' },
+  forest: { name: '森林', color: '#5f8a48', loot: '見通しが悪い・山小屋が点在' },
+  wild: { name: '荒野', color: '#a08a5a', loot: '廃墟と放置車両' },
+};
+/** 幹線道路で区切られた1区画と、その区画が属する地区 */
+export interface DistrictBlock {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  kind: DistrictKind;
+  tier: number;
+  /** 地区の名前（例：「北東の住宅街」）。同じ地区の区画は同じ名前 */
+  name: string;
+  /** 地図に地区名を書く区画（地区の中心に近いもの） */
+  label?: boolean;
+}
+
+export function districtAt(ds: DistrictBlock[], tx: number, ty: number): DistrictBlock | null {
+  for (const d of ds) if (tx >= d.x && ty >= d.y && tx < d.x + d.w && ty < d.y + d.h) return d;
+  return null;
 }
 
 /** 拠点から見た方角（8方位） */
@@ -102,6 +135,7 @@ export class TileWorld<T extends ObjSnap = ObjSnap> {
   locations: Location[] = [];
   buildings: Building[] = [];
   landmarks: Landmark[] = [];
+  districts: DistrictBlock[] = [];
   objects = new Map<number, T>();
   private grid: Int32Array; // タイル → オブジェクトID（0 = なし）
 
@@ -205,6 +239,7 @@ export interface GeneratedWorld {
   locations: Location[];
   buildings: Building[];
   landmarks: Landmark[];
+  districts: DistrictBlock[];
 }
 
 /** ゲスト用：シードから同じ世界（地形とオブジェクト）を再生成する */
@@ -224,6 +259,7 @@ const PROPS: Record<string, [ObjKind, number][]> = {
   gas: [['shelf', 4], ['fridge', 2], ['desk', 1], ['crate', 1]],
   base: [],
   ruin: [['crate', 2], ['shelf', 1], ['rubble', 3]],
+  warehouse: [['crate', 5], ['shelf', 4], ['locker', 1], ['desk', 1], ['cabinet', 0.5]],
 };
 
 export function generateWorld(seed: number): GeneratedWorld {
@@ -278,7 +314,7 @@ export function generateWorld(seed: number): GeneratedWorld {
   const hLines = [roadY];
   const vLines = [roadX];
   for (const d of [-1, 1])
-    for (let k = 1; k < 4; k++) {
+    for (let k = 1; k < 6; k++) {
       const y = roadY + d * (k * 40 + ri(-4, 4));
       if (y > 4 && y < MAP_H - 6) hLines.push(y);
       const x = roadX + d * (k * 40 + ri(-4, 4));
@@ -375,7 +411,13 @@ export function generateWorld(seed: number): GeneratedWorld {
     split(x + 1, y + 1, w - 2, h - 2, 0);
     // 外のドア
     const nDoors = opts.doors ?? 2;
-    const sides = [0, 1, 2, 3].sort(() => rnd() - 0.5);
+    // 乱数を返す比較関数での sort は、ブラウザによって比較の回数（＝乱数の消費）が変わり
+    // ホストとゲストで生成結果がずれるので、決まった回数だけ乱数を使うシャッフルにする
+    const sides = [0, 1, 2, 3];
+    for (let i = 3; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [sides[i], sides[j]] = [sides[j], sides[i]];
+    }
     for (let d = 0; d < nDoors; d++) {
       const side = sides[d % 4];
       for (let tries = 0; tries < 12; tries++) {
@@ -495,11 +537,17 @@ export function generateWorld(seed: number): GeneratedWorld {
     return { ...spot, ...res };
   };
   /** 軍の検問所・基地：フェンスの敷地＋土嚢＋小屋 */
-  const checkpoint = (cx: number, cy: number, tier: number, big: boolean) => {
+  const checkpoint = (cx: number, cy: number, tier: number, bigWanted: boolean): boolean => {
+    let big = bigWanted;
+    let spot = findSpot(cx, cy, big ? 22 : 16, big ? 13 : 9, 14);
+    if (!spot && big) {
+      // 大きな基地が入らなければ検問所にする
+      big = false;
+      spot = findSpot(cx, cy, 16, 9, 14);
+    }
+    if (!spot) return false;
     const w = big ? 22 : 16;
     const h = big ? 13 : 9;
-    const spot = findSpot(cx, cy, w, h, 6);
-    if (!spot) return false;
     const { x, y } = spot;
     reserve(x - 1, y - 1, w + 2, h + 2);
     for (let yy = y; yy < y + h; yy++)
@@ -521,54 +569,235 @@ export function generateWorld(seed: number): GeneratedWorld {
     return true;
   };
   const landmarks: Landmark[] = [];
-  // 区画（幹線で区切られた四角。地図の外周の帯も含む）ごとに中身を決める
+  // ---- 地区（ゾーニング）：地図に「地区の種」をまき、各区画は近い種の地区になる ----
+  //   → 隣り合う区画が同じ地区にまとまり、チャンクをまたいで住宅街・工業地区・森などが続く
+  const KIND_WEIGHTS: Record<number, [DistrictKind, number][]> = {
+    1: [['residential', 5], ['commercial', 2.5], ['forest', 1.5], ['wild', 1], ['industrial', 0.8]],
+    2: [['residential', 3], ['commercial', 2.5], ['industrial', 2], ['civic', 2], ['forest', 1.5], ['wild', 1]],
+    3: [['industrial', 2], ['civic', 2], ['military', 1.2], ['residential', 1.5], ['commercial', 1], ['forest', 1.5], ['wild', 1.4]],
+    4: [['military', 1.6], ['industrial', 1.4], ['civic', 1], ['forest', 1.8], ['wild', 2], ['residential', 1], ['commercial', 0.6]],
+  };
+  // 危険度ごとの「山札」から引く（重みの比率どおりに偏りなく配られる）
+  const decks: Record<number, DistrictKind[]> = {};
+  const pickKind = (tier: number): DistrictKind => {
+    let deck = decks[tier];
+    if (!deck || deck.length === 0) {
+      deck = [];
+      for (const [k, w] of KIND_WEIGHTS[tier]) for (let i = 0; i < Math.round(w * 2); i++) deck.push(k);
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        [deck[i], deck[j]] = [deck[j], deck[i]];
+      }
+      decks[tier] = deck;
+    }
+    return deck.pop()!;
+  };
+  // 種は少し揺らした格子に置く（地区の大きさがそろう）
+  const seeds: { x: number; y: number; kind: DistrictKind; name: string }[] = [];
+  const GX = 7;
+  const GY = 5;
+  for (let gy = 0; gy < GY; gy++)
+    for (let gx = 0; gx < GX; gx++) {
+      const x = Math.floor(((gx + 0.15 + rnd() * 0.7) / GX) * MAP_W);
+      const y = Math.floor(((gy + 0.15 + rnd() * 0.7) / GY) * MAP_H);
+      seeds.push({ x, y, kind: pickKind(tierAtDistance(distOf(x, y))), name: '' });
+    }
+  // 拠点のまわりは住宅街、深部には必ず軍用地がある
+  seeds.push({ x: BASE_TX + ri(-20, 20), y: BASE_TY + ri(-20, 20), kind: 'residential', name: '' });
+  if (!seeds.some((q) => q.kind === 'military')) {
+    const far = [...seeds].sort((p, q) => distOf(q.x, q.y) - distOf(p.x, p.y))[0];
+    far.kind = 'military';
+  }
+  if (!seeds.some((q) => q.kind === 'civic')) seeds.find((q) => tierAtDistance(distOf(q.x, q.y)) === 2)!.kind = 'civic';
+  const usedNames = new Map<string, number>();
+  const districts: DistrictBlock[] = [];
+  const distGrid = new Int8Array(MAP_W * MAP_H).fill(-1);
+  const KIND_IDX: DistrictKind[] = ['residential', 'commercial', 'industrial', 'civic', 'military', 'forest', 'wild'];
   const hB = [-3, ...hLines, MAP_H + 1];
   const vB = [-3, ...vLines, MAP_W + 1];
+  const blocks: { x0: number; y0: number; x1: number; y1: number; seed: (typeof seeds)[number]; db: DistrictBlock }[] = [];
   for (let a = 0; a + 1 < hB.length; a++)
     for (let b = 0; b + 1 < vB.length; b++) {
-      const x0 = Math.max(3, vB[b] + 3);
-      const x1 = Math.min(MAP_W - 4, vB[b + 1] - 2);
-      const y0 = Math.max(3, hB[a] + 3);
-      const y1 = Math.min(MAP_H - 4, hB[a + 1] - 2);
-      if (x1 - x0 < 12 || y1 - y0 < 10) continue;
-      const bcx = (x0 + x1) / 2;
-      const bcy = (y0 + y1) / 2;
-      const d = distOf(bcx, bcy);
-      if (d < 16) continue; // 拠点の区画
-      const tier = tierAtDistance(d);
-      const rx = () => ri(x0 + 6, Math.max(x0 + 6, x1 - 6));
-      const ry = () => ri(y0 + 5, Math.max(y0 + 5, y1 - 5));
-      // 区画の広さに応じて 2〜4 回、何かを置く
-      const rounds = Math.max(1, Math.min(4, Math.floor(((x1 - x0) * (y1 - y0)) / 380)));
-      for (let round = 0; round < rounds; round++) {
-      const r = rnd();
-      // 何を置くか（遠いほど軍事施設・警察が増え、近いほど住宅が多い）
-      if (tier === 1) {
-        if (r < 0.6) for (let k = 0; k < ri(2, 4); k++) place('住宅', 'house', 1, rx(), ry(), ri(8, 10), ri(7, 8), T_WOOD, { minRoom: 3, doors: 2 });
-        else if (r < 0.8) place('ガソリンスタンド', 'gas', 1, rx(), ry(), 7, 5, T_TILE, { minRoom: 7, windows: 0.4, doors: 1 });
-        else place('廃屋', 'ruin', 1, rx(), ry(), ri(6, 8), ri(5, 7), T_FLOOR, { minRoom: 3, doors: 2, windows: 0.3 });
-      } else if (tier === 2) {
-        if (r < 0.25) place('スーパーマーケット', 'market', 2, rx(), ry(), 15, 10, T_TILE, { minRoom: 6, windows: 0.35, doors: 2, propRate: 0.55 });
-        else if (r < 0.45) place('病院', 'hospital', 2, rx(), ry(), 14, 10, T_TILE, { minRoom: 4, windows: 0.25, doors: 2, propRate: 0.45 });
-        else if (r < 0.75) for (let k = 0; k < ri(2, 3); k++) place('住宅', 'house', 2, rx(), ry(), ri(8, 10), ri(7, 8), T_WOOD, { minRoom: 3, doors: 2 });
-        else place('ガソリンスタンド', 'gas', 2, rx(), ry(), 7, 5, T_TILE, { minRoom: 7, windows: 0.4, doors: 1 });
-        if (rnd() < 0.35) place('廃屋', 'ruin', 2, rx(), ry(), ri(6, 8), ri(5, 7), T_FLOOR, { minRoom: 3, doors: 2, windows: 0.3 });
-      } else if (tier === 3) {
-        if (r < 0.35) place('警察署', 'police', 3, rx(), ry(), 12, 10, T_FLOOR, { minRoom: 3, windows: 0.18, doors: 2, propRate: 0.45 });
-        else if (r < 0.6) checkpoint(rx(), ry(), 3, false);
-        else if (r < 0.8) place('病院', 'hospital', 3, rx(), ry(), 14, 10, T_TILE, { minRoom: 4, windows: 0.25, doors: 2, propRate: 0.5 });
-        else place('スーパーマーケット', 'market', 3, rx(), ry(), 15, 10, T_TILE, { minRoom: 6, windows: 0.35, doors: 2, propRate: 0.6 });
-        if (rnd() < 0.5) place('廃屋', 'ruin', 3, rx(), ry(), ri(6, 8), ri(5, 7), T_FLOOR, { minRoom: 3, doors: 2, windows: 0.3 });
-      } else {
-        if (r < 0.45) checkpoint(rx(), ry(), 4, true);
-        else if (r < 0.75) place('警察署', 'police', 4, rx(), ry(), 12, 10, T_FLOOR, { minRoom: 3, windows: 0.18, doors: 2, propRate: 0.55 });
-        else place('廃墟', 'ruin', 4, rx(), ry(), ri(7, 9), ri(6, 8), T_FLOOR, { minRoom: 3, doors: 2, windows: 0.3, propRate: 0.5 });
+      const bx0 = Math.max(0, vB[b] + 2);
+      const bx1 = Math.min(MAP_W - 1, vB[b + 1] - 1);
+      const by0 = Math.max(0, hB[a] + 2);
+      const by1 = Math.min(MAP_H - 1, hB[a + 1] - 1);
+      const bcx = (bx0 + bx1) / 2;
+      const bcy = (by0 + by1) / 2;
+      let seed = seeds[0];
+      let bd = Infinity;
+      for (const q of seeds) {
+        const dd = (q.x - bcx) ** 2 + (q.y - bcy) ** 2;
+        if (dd < bd) {
+          bd = dd;
+          seed = q;
+        }
       }
+      const tier = tierAtDistance(distOf(bcx, bcy));
+      // 危険度に合わない地区は置き換える（拠点の隣に軍用地は置かない）
+      let kind = seed.kind;
+      if (kind === 'military' && tier <= 2) kind = tier === 1 ? 'wild' : 'industrial';
+      if (distOf(bcx, bcy) < 16) kind = 'residential';
+      if (!seed.name) {
+        const base = `${directionName(seed.x, seed.y)}の${DISTRICT_INFO[seed.kind].name}`;
+        const n = (usedNames.get(base) ?? 0) + 1;
+        usedNames.set(base, n);
+        seed.name = n === 1 ? base : `${base} 第${n}`;
       }
-      // 目印：遠い区画には煙・炎、中間には給水塔
-      if (tier >= 3 && rnd() < 0.45) landmarks.push({ x: rx(), y: ry(), kind: rnd() < 0.5 ? 'smoke' : 'fire', name: tier >= 4 ? '深部の黒煙' : '燃える残骸' });
-      else if (tier === 2 && rnd() < 0.25) landmarks.push({ x: rx(), y: ry(), kind: 'water', name: '給水塔' });
+      const name = kind === seed.kind ? seed.name : `${directionName(bcx, bcy)}の${DISTRICT_INFO[kind].name}`;
+      const db: DistrictBlock = { x: bx0, y: by0, w: bx1 - bx0 + 1, h: by1 - by0 + 1, kind, tier, name };
+      districts.push(db);
+      blocks.push({ x0: bx0, y0: by0, x1: bx1, y1: by1, seed, db });
+      const ki = KIND_IDX.indexOf(kind);
+      for (let y = by0; y <= by1; y++) distGrid.fill(ki, y * MAP_W + bx0, y * MAP_W + bx1 + 1);
     }
+  // 地図に名前を書く区画：同じ名前の区画のうち、まとまりの中心に近いもの
+  {
+    const groups = new Map<string, DistrictBlock[]>();
+    for (const d of districts) groups.set(d.name, [...(groups.get(d.name) ?? []), d]);
+    for (const g of groups.values()) {
+      const cx = g.reduce((a, d) => a + d.x + d.w / 2, 0) / g.length;
+      const cy = g.reduce((a, d) => a + d.y + d.h / 2, 0) / g.length;
+      let best = g[0];
+      for (const d of g) if (Math.hypot(d.x + d.w / 2 - cx, d.y + d.h / 2 - cy) < Math.hypot(best.x + best.w / 2 - cx, best.y + best.h / 2 - cy)) best = d;
+      if (best.w > 14 && best.h > 10) best.label = true;
+    }
+  }
+
+  // ---- 区画の中身：地区の種類 × 危険度で施設を選ぶ ----
+  const house = (tier: number, cx: number, cy: number) => place('住宅', 'house', tier, cx, cy, ri(8, 10), ri(7, 8), T_WOOD, { minRoom: 3, doors: 2 });
+  const shop = (tier: number, cx: number, cy: number) => place('商店', 'market', tier, cx, cy, ri(8, 10), 7, T_TILE, { minRoom: 8, windows: 0.4, doors: 1, propRate: 0.5 });
+  const market = (tier: number, cx: number, cy: number) => place('スーパーマーケット', 'market', tier, cx, cy, 15, 10, T_TILE, { minRoom: 6, windows: 0.35, doors: 2, propRate: 0.55 + tier * 0.02 });
+  const gas = (tier: number, cx: number, cy: number) => place('ガソリンスタンド', 'gas', tier, cx, cy, 7, 5, T_TILE, { minRoom: 7, windows: 0.4, doors: 1 });
+  const ruin = (tier: number, cx: number, cy: number) => place(tier >= 4 ? '廃墟' : '廃屋', 'ruin', tier, cx, cy, ri(6, 9), ri(5, 8), T_FLOOR, { minRoom: 3, doors: 2, windows: 0.3, propRate: tier >= 4 ? 0.5 : 0.38 });
+  const hospital = (tier: number, cx: number, cy: number, small = false) =>
+    place(small ? '診療所' : '病院', 'hospital', tier, cx, cy, small ? 10 : 14, small ? 8 : 10, T_TILE, { minRoom: 4, windows: 0.25, doors: 2, propRate: 0.45 + tier * 0.03 });
+  const police = (tier: number, cx: number, cy: number) => place('警察署', 'police', tier, cx, cy, 12, 10, T_FLOOR, { minRoom: 3, windows: 0.18, doors: 2, propRate: 0.45 + tier * 0.03 });
+  const warehouse = (tier: number, cx: number, cy: number, factory = false) =>
+    place(factory ? '工場' : '倉庫', 'warehouse', tier, cx, cy, factory ? 18 : 16, factory ? 12 : 10, T_FLOOR, { minRoom: factory ? 5 : 8, windows: 0.08, doors: 2, propRate: 0.5, roof: 3 });
+  /** 柵で囲った資材置き場（中に木箱が積んである） */
+  const yard = (cx: number, cy: number) => {
+    const w = ri(9, 12);
+    const h = ri(6, 8);
+    const spot = findSpot(cx, cy, w, h, 8);
+    if (!spot) return;
+    const { x, y } = spot;
+    reserve(x - 1, y - 1, w + 2, h + 2);
+    for (let yy = y; yy < y + h; yy++)
+      for (let xx = x; xx < x + w; xx++) {
+        const edge = xx === x || yy === y || xx === x + w - 1 || yy === y + h - 1;
+        setT(xx, yy, edge ? T_FENCE : T_DIRT);
+      }
+    setT(x + Math.floor(w / 2), y + h - 1, T_DIRT);
+    setT(x + Math.floor(w / 2) + 1, y + h - 1, T_DIRT);
+    for (let k = 0; k < ri(4, 7); k++) addObj(rnd() < 0.85 ? 'crate' : 'rubble', ri(x + 1, x + w - 2), ri(y + 1, y + h - 3));
+  };
+  /** 駐車場（舗装の上に放置車両） */
+  const parking = (cx: number, cy: number) => {
+    const w = ri(8, 11);
+    const h = ri(5, 6);
+    const spot = findSpot(cx, cy, w, h, 8);
+    if (!spot) return;
+    road(spot.x, spot.y, spot.x + w - 1, spot.y + h - 1);
+    for (let k = 0; k < ri(2, 5); k++) addObj('car', ri(spot.x, spot.x + w - 1), ri(spot.y, spot.y + h - 1));
+  };
+  /** 森の小道（土の道。区画を横切って幹線どうしをつなぐ） */
+  const trail = (x0: number, y0: number, x1: number, y1: number) => {
+    let x = x0;
+    let y = y0;
+    for (let i = 0; i < 400 && (x !== x1 || y !== y1); i++) {
+      setT(x, y, T_DIRT);
+      if (inMap(x, y)) reserved[idx(x, y)] = 1;
+      if (x !== x1 && (y === y1 || rnd() < 0.55)) x += Math.sign(x1 - x);
+      else y += Math.sign(y1 - y);
+    }
+  };
+
+  for (const { x0: bx0, y0: by0, x1: bx1, y1: by1, db } of blocks) {
+    const x0 = Math.max(3, bx0 + 1);
+    const x1 = Math.min(MAP_W - 4, bx1 - 1);
+    const y0 = Math.max(3, by0 + 1);
+    const y1 = Math.min(MAP_H - 4, by1 - 1);
+    if (x1 - x0 < 12 || y1 - y0 < 10) continue;
+    const d = distOf((x0 + x1) / 2, (y0 + y1) / 2);
+    if (d < 16) continue; // 拠点の区画
+    const { tier, kind } = db;
+    const rx = () => ri(x0 + 6, Math.max(x0 + 6, x1 - 6));
+    const ry = () => ri(y0 + 5, Math.max(y0 + 5, y1 - 5));
+    const rounds = Math.max(1, Math.min(4, Math.floor(((x1 - x0) * (y1 - y0)) / 380)));
+    // 住宅街・商業地区には区画の中を通る生活道路（幹線につながる）
+    if ((kind === 'residential' || kind === 'commercial' || kind === 'civic') && x1 - x0 > 26 && y1 - y0 > 22) {
+      const sy = ri(y0 + 9, y1 - 10);
+      road(bx0, sy, bx1, sy + 1);
+      if (rnd() < 0.6) {
+        const sx = ri(x0 + 10, x1 - 11);
+        road(sx, by0, sx + 1, by1);
+      }
+    }
+    if (kind === 'forest' || kind === 'wild') {
+      if (rnd() < 0.7) trail(bx0, ri(y0, y1), bx1, ri(y0, y1));
+    }
+    for (let round = 0; round < rounds; round++) {
+      const r = rnd();
+      switch (kind) {
+        case 'residential':
+          for (let k = 0; k < ri(2, 4); k++) house(tier, rx(), ry());
+          if (r < 0.25) shop(tier, rx(), ry());
+          else if (r < 0.35 && tier >= 2) ruin(tier, rx(), ry());
+          break;
+        case 'commercial':
+          if (r < 0.35) market(tier, rx(), ry());
+          else if (r < 0.65) for (let k = 0; k < 2; k++) shop(tier, rx(), ry());
+          else if (r < 0.82) gas(tier, rx(), ry());
+          else house(tier, rx(), ry());
+          if (rnd() < 0.4) parking(rx(), ry());
+          break;
+        case 'industrial':
+          if (r < 0.45) warehouse(tier, rx(), ry());
+          else if (r < 0.65) warehouse(tier, rx(), ry(), true);
+          else if (r < 0.85) yard(rx(), ry());
+          else gas(tier, rx(), ry());
+          if (rnd() < 0.3) parking(rx(), ry());
+          break;
+        case 'civic':
+          if (r < 0.35) hospital(tier, rx(), ry());
+          else if (r < 0.65) police(tier, rx(), ry());
+          else if (r < 0.8) hospital(tier, rx(), ry(), true);
+          else shop(tier, rx(), ry());
+          if (rnd() < 0.3) parking(rx(), ry());
+          break;
+        case 'military':
+          if (round === 0 || r < 0.45) checkpoint(rx(), ry(), tier, tier >= 4 || rnd() < 0.3);
+          else if (r < 0.75) police(tier, rx(), ry());
+          else if (r < 0.9) warehouse(tier, rx(), ry());
+          else ruin(tier, rx(), ry());
+          break;
+        case 'forest':
+          if (round === 0 && r < 0.55) place('山小屋', 'house', tier, rx(), ry(), ri(6, 7), ri(5, 6), T_WOOD, { minRoom: 3, doors: 1, windows: 0.3, propRate: 0.5, roof: 2 });
+          break;
+        case 'wild':
+          if (r < 0.5) ruin(tier, rx(), ry());
+          else if (r < 0.62) gas(tier, rx(), ry());
+          else if (r < 0.75) parking(rx(), ry());
+          break;
+      }
+    }
+    // 目印：遠い区画には煙・炎、工業地区の煙突、住宅街の給水塔
+    if (tier >= 3 && rnd() < 0.4) landmarks.push({ x: rx(), y: ry(), kind: rnd() < 0.5 ? 'smoke' : 'fire', name: tier >= 4 ? '深部の黒煙' : '燃える残骸' });
+    else if (kind === 'industrial' && rnd() < 0.4) landmarks.push({ x: rx(), y: ry(), kind: 'smoke', name: '工場の煙' });
+    else if ((kind === 'residential' || kind === 'commercial') && rnd() < 0.3) landmarks.push({ x: rx(), y: ry(), kind: 'water', name: '給水塔' });
+  }
+  // 荒野は土の斑が多く、工業地区の地面は踏み固められた土
+  for (let i = 0; i < 900; i++) {
+    const cx = ri(0, MAP_W - 1);
+    const cy = ri(0, MAP_H - 1);
+    const k = distGrid[idx(cx, cy)];
+    if (k !== 6 && k !== 2) continue;
+    const r = ri(2, 6);
+    for (let y = cy - r; y <= cy + r; y++)
+      for (let x = cx - r; x <= cx + r; x++)
+        if (inMap(x, y) && !reserved[idx(x, y)] && terrain[idx(x, y)] === T_GRASS && (x - cx) ** 2 + (y - cy) ** 2 <= r * r && rnd() < 0.75) setT(x, y, T_DIRT);
+  }
   // 廃屋に瓦礫を散らす
   for (const l of locations) {
     if (l.kind !== 'ruin') continue;
@@ -618,7 +847,22 @@ export function generateWorld(seed: number): GeneratedWorld {
       if (t !== T_GRASS && t !== T_DIRT) continue;
       if (distOf(x, y) < 14) continue;
       const fz = forest(x, y);
-      const dens = fz > 0.62 ? 0.35 : fz > 0.52 ? 0.08 : 0.012;
+      // 地区ごとの木の密度：森林は深く、市街地はまばら（庭木程度）
+      const dk = distGrid[idx(x, y)];
+      const dens =
+        dk === 5
+          ? fz > 0.45
+            ? 0.42
+            : 0.2
+          : dk === 0 || dk === 1 || dk === 3
+            ? 0.006
+            : dk === 2 || dk === 4
+              ? 0.003
+              : fz > 0.62
+                ? 0.35
+                : fz > 0.52
+                  ? 0.08
+                  : 0.012;
       if (rnd() < dens) addObj('tree', x, y);
     }
   // ---- 野外の木箱・瓦礫 ----
@@ -642,7 +886,7 @@ export function generateWorld(seed: number): GeneratedWorld {
   }
   void CHUNK;
 
-  return { terrain, objs, locations, buildings, landmarks };
+  return { terrain, objs, locations, buildings, landmarks, districts };
 }
 
 /** オブジェクトIDの開始値（実行中に作るオブジェクト用。生成オブジェクトと衝突しない値） */

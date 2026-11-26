@@ -149,7 +149,10 @@ interface SimBullet {
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 const r2 = (v: number) => Math.round(v * 100) / 100;
-const MAX_ZOMBIES = 220;
+/** 全体の安全上限（3人がバラバラに探索しても、それぞれの周りに出せる数） */
+const MAX_ZOMBIES = 400;
+/** 1人のまわり（アクティブな 5×5 チャンク）に置けるゾンビの上限。先に動いた場所が全体の枠を使い切らないように */
+const REGION_MAX = 140;
 /** プレイヤーのいるチャンクから何チャンク先までをアクティブにするか（チェビシェフ距離） */
 const ACTIVE_R = 2;
 /** 天候ごとの効果：ゾンビの視覚距離・音の届く距離 */
@@ -316,6 +319,7 @@ export class HostSimulation {
     this.world.locations = gen.locations;
     this.world.buildings = gen.buildings;
     this.world.landmarks = gen.landmarks;
+    this.world.districts = gen.districts;
     this.cycleT = ((START_MINUTE - 360) * DAY_SECONDS) / 840;
 
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -1671,19 +1675,34 @@ export class HostSimulation {
     const x0 = cx * CHUNK;
     const y0 = cy * CHUNK;
     const minDist = initial ? 420 : 560;
+    let room = REGION_MAX - this.regionCount(i);
     for (const loc of this.world.locations) {
       if (loc.kind === 'base') continue;
       const lcx = loc.x + loc.w / 2;
       const lcy = loc.y + loc.h / 2;
       if (lcx < x0 || lcy < y0 || lcx >= x0 + CHUNK || lcy >= y0 + CHUNK) continue;
       const n = this.locTarget(loc);
-      for (let k = 0; k < n && this.zombies.length < MAX_ZOMBIES; k++) this.spawnIn(loc, minDist);
+      for (let k = 0; k < n && this.zombies.length < MAX_ZOMBIES && room > 0; k++, room--) this.spawnIn(loc, minDist);
     }
     const mid = Math.hypot(x0 + CHUNK / 2 - BASE_TX, y0 + CHUNK / 2 - BASE_TY);
     const tier = tierAtDistance(mid);
     const edge = edgeDistance(x0 + CHUNK / 2, y0 + CHUNK / 2) < EDGE_BAND ? 2 : 0;
     const wanderers = mid < 16 ? 0 : tier + edge + (this.phase === 'night' ? 1 : 0);
-    for (let k = 0; k < wanderers && this.zombies.length < MAX_ZOMBIES; k++) this.spawnOutdoorIn(i, minDist);
+    for (let k = 0; k < wanderers && this.zombies.length < MAX_ZOMBIES && room > 0; k++, room--) this.spawnOutdoorIn(i, minDist);
+  }
+
+  /** チャンク i のまわり（±ACTIVE_R チャンク）にいるゾンビの数 */
+  private regionCount(i: number): number {
+    const cx = i % CHUNKS_X;
+    const cy = (i - cx) / CHUNKS_X;
+    const W = CHUNK * TILE;
+    const x0 = (cx - ACTIVE_R) * W;
+    const y0 = (cy - ACTIVE_R) * W;
+    const x1 = (cx + ACTIVE_R + 1) * W;
+    const y1 = (cy + ACTIVE_R + 1) * W;
+    let n = 0;
+    for (const z of this.zombies) if (!z.dead && z.x >= x0 && z.y >= y0 && z.x < x1 && z.y < y1) n++;
+    return n;
   }
 
 
@@ -1713,7 +1732,9 @@ export class HostSimulation {
   private spawnOutdoor(minDist: number): void {
     const act: number[] = [];
     for (let i = 0; i < this.chunkActive.length; i++) if (this.chunkActive[i]) act.push(i);
-    if (act.length) this.spawnOutdoorIn(act[Math.floor(Math.random() * act.length)], minDist);
+    if (!act.length) return;
+    const i = act[Math.floor(Math.random() * act.length)];
+    if (this.regionCount(i) < REGION_MAX) this.spawnOutdoorIn(i, minDist);
   }
 
   private spawnOutdoorIn(chunk: number, minDist: number): void {
@@ -1752,7 +1773,7 @@ export class HostSimulation {
       const x1 = (loc.x + loc.w) * TILE;
       const y1 = (loc.y + loc.h) * TILE;
       const inside = this.zombies.filter((z) => z.x > x0 && z.y > y0 && z.x < x1 && z.y < y1).length;
-      if (inside < this.locTarget(loc) * 0.7 && Math.random() < 0.35) this.spawnIn(loc);
+      if (inside < this.locTarget(loc) * 0.7 && Math.random() < 0.35 && this.regionCount(this.chunkOf(cx, cy)) < REGION_MAX) this.spawnIn(loc);
     }
     const outdoor = this.zombies.filter((z) => this.zActive(z) && !this.world.buildingAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE))).length;
     // アクティブな範囲の広さに比例（仲間と離れて探索していると、それぞれの周りに湧く）

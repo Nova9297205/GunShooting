@@ -518,7 +518,10 @@ export class TerrainCache {
 
   /** 欲しいチャンク（pri が小さいほど優先）を登録 */
   want(list: { cx: number; cy: number; pri: number }[]): void {
-    this.wanted = list.filter((w) => !this.done.has(`${w.cx},${w.cy}`)).sort((a, b) => a.pri - b.pri);
+    // 欲しいものの総数がキャッシュの容量を超えると、焼いては捨てるを繰り返して重くなる。
+    // 優先度の高いものから容量-4個までに絞る（見えているチャンクは常に最優先）
+    const top = list.sort((a, b) => a.pri - b.pri).slice(0, this.max - 4);
+    this.wanted = top.filter((w) => !this.done.has(`${w.cx},${w.cy}`));
   }
 
   get size(): number {

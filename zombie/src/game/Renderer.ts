@@ -17,6 +17,7 @@ import {
   MAP_W,
   PLAYER,
   PLAYER_COLORS,
+  T_ROAD,
   T_WALL,
   T_WINDOW,
   TILE,
@@ -33,7 +34,7 @@ import { type Viewer, Vision } from './vision';
 import { locationAt, type TileWorld } from './world';
 import { roofCanvas } from './RoofArt';
 import type { TerrainCache } from './TerrainArt';
-import { directionName, EDGE_BAND, edgeDistance, tierAtDistance } from './world';
+import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -380,13 +381,9 @@ export class Renderer {
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
     // （地図の端は柵で塞がず、外側の遠景と汚染の霞につなげる）
-    const visible: ObjSnap[] = [];
-    for (const ob of this.world.objects.values()) {
-      const x = ob.tx * TILE;
-      const y = ob.ty * TILE;
-      if (x < vx0 || y < vy0 || x > vx1 || y > vy1) continue;
-      visible.push(ob);
-    }
+    // 画面内のオブジェクトはタイルの格子から引く（ワールドが広くても一定の負荷）
+    this.vrect = [vx0, vy0, vx1, vy1];
+    const visible = this.objsIn(Math.ceil(vx0 / TILE), Math.ceil(vy0 / TILE), Math.floor(vx1 / TILE), Math.floor(vy1 / TILE));
     // 壁の落ち影（重なっても濃くならないよう1つのパスでまとめて塗る）
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
@@ -903,9 +900,29 @@ export class Renderer {
 
   // ---------------- ライティング ----------------
 
+  /** 画面の範囲（ワールド座標）。光源などの検索に使う */
+  private vrect = [0, 0, 0, 0];
+
+  /** タイルの矩形の中にあるオブジェクト（上の行から順に） */
+  private objsIn(tx0: number, ty0: number, tx1: number, ty1: number): ObjSnap[] {
+    const out: ObjSnap[] = [];
+    const x0 = Math.max(0, tx0);
+    const y0 = Math.max(0, ty0);
+    const x1 = Math.min(MAP_W - 1, tx1);
+    const y1 = Math.min(MAP_H - 1, ty1);
+    for (let ty = y0; ty <= y1; ty++)
+      for (let tx = x0; tx <= x1; tx++) {
+        const ob = this.world.objAt(tx, ty);
+        if (ob) out.push(ob);
+      }
+    return out;
+  }
+
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
     const out: { x: number; y: number; r: number; warm: number }[] = [];
-    for (const ob of this.world.objects.values()) {
+    // 画面の外でも光が届く範囲（約10タイル）までの焚き火・松明
+    const [vx0, vy0, vx1, vy1] = this.vrect;
+    for (const ob of this.objsIn(Math.floor(vx0 / TILE) - 10, Math.floor(vy0 / TILE) - 10, Math.ceil(vx1 / TILE) + 10, Math.ceil(vy1 / TILE) + 10)) {
       if (ob.kind === 'campfire') {
         const flick = 1 + Math.sin(this.time * 11) * 0.03 + Math.sin(this.time * 7.3 + 1) * 0.04;
         out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 300 * flick, warm: 1 });
@@ -1566,6 +1583,8 @@ export class Renderer {
   }
 
   /** ロケーションに入ったときの表示（例：「警察署 ★★★ 危険」） */
+  private curDist: string | null = null;
+
   private drawLocationToast(me: PlayerSnap | undefined, dt: number, bannerShown: boolean): void {
     if (me) {
       const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
@@ -1576,6 +1595,16 @@ export class Renderer {
           const danger = loc.hot ? '汚染地帯：手強い個体が多いが、レア物資が眠っている' : loc.tier >= 4 ? '最深部：重装の感染兵士が群れる。最高級の物資と、帰り道の危険' : loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
           this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.hot ? '#d090c8' : loc.tier >= 4 ? '#e05a40' : loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
         } else this.locToast = null; // その場所を出たら古い表示は出さない
+      }
+      // 地区（住宅街・工業地区など）が変わったら、屋外にいるときだけ知らせる
+      const dist = districtAt(this.world.districts, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
+      const dkey = dist?.name ?? null;
+      if (dkey !== this.curDist) {
+        this.curDist = dkey;
+        if (dist && !loc) {
+          const info = DISTRICT_INFO[dist.kind];
+          this.locToast = { text: `${dist.name}  ${'★'.repeat(dist.tier)}`, sub: `地区：${info.loot}`, color: info.color, life: 3.5 };
+        }
       }
     }
     if (!this.locToast) return;
@@ -1816,7 +1845,9 @@ export class Renderer {
         col = '#93b77c';
         tag = 'SAFE';
       } else {
-        sub = loc ? loc.name : edge ? '外縁の汚染帯' : `野外 ${'★'.repeat(tier)}`;
+        const dist = districtAt(this.world.districts, tx, ty);
+        const onRoad = this.world.terrainAt(tx, ty) === T_ROAD;
+        sub = loc ? loc.name : edge ? '外縁の汚染帯' : dist ? `${dist.name} ${'★'.repeat(tier)}` : `${onRoad ? '幹線道路' : '野外'} ${'★'.repeat(tier)}`;
         col = edge || loc?.hot ? '#c8d070' : tier >= 4 ? '#e05a40' : tier >= 3 ? '#e07a5e' : tier === 2 ? '#e0b862' : '#bdb79e';
         // 拠点はどっち？（拠点から見た自分の方角の逆）
         const back = directionName(BASE_TX * 2 - tx, BASE_TY * 2 - ty);
@@ -2410,14 +2441,14 @@ export class Renderer {
   private drawWorldMap(view: ViewState, localId: number): void {
     const { ctx, w, h } = this;
     if (!this.miniCanvas) return;
-    const s = Math.min((w - 120) / MAP_W, (h - 150) / MAP_H);
+    const s = Math.min((w - 120) / MAP_W, (h - 166) / MAP_H);
     const mw = MAP_W * s;
     const mh = MAP_H * s;
     const mx = Math.round(w / 2 - mw / 2);
-    const my = Math.round(h / 2 - mh / 2 + 10);
+    const my = Math.round(h / 2 - mh / 2 + 2);
     ctx.fillStyle = 'rgba(8,9,7,0.72)';
     ctx.fillRect(0, 0, w, h);
-    panel(ctx, mx - 10, my - 34, mw + 20, mh + 58);
+    panel(ctx, mx - 10, my - 34, mw + 20, mh + 74);
     ctx.font = `10px ${MONO}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -2436,15 +2467,22 @@ export class Renderer {
     ctx.imageSmoothingEnabled = true;
     const X = (tx: number) => mx + tx * s;
     const Y = (ty: number) => my + ty * s;
+    // 地区の色分け（地図に載っている情報なので、未探索でも分かる）
+    for (const d of this.world.districts) {
+      ctx.globalAlpha = 0.17;
+      ctx.fillStyle = DISTRICT_INFO[d.kind].color;
+      ctx.fillRect(X(d.x), Y(d.y), d.w * s, d.h * s);
+    }
+    ctx.globalAlpha = 1;
     // 危険度の輪
     ctx.save();
     ctx.beginPath();
     ctx.rect(mx, my, mw, mh);
     ctx.clip();
     const rings: [number, string][] = [
-      [34, '★★'],
-      [62, '★★★'],
-      [90, '★★★★'],
+      [TIER_RINGS[0], '★★'],
+      [TIER_RINGS[1], '★★★'],
+      [TIER_RINGS[2], '★★★★'],
     ];
     for (const [r, label] of rings) {
       ctx.strokeStyle = 'rgba(224,163,58,0.35)';
@@ -2466,6 +2504,24 @@ export class Renderer {
     ctx.fillRect(mx, my + B, B, mh - 2 * B);
     ctx.fillRect(mx + mw - B, my + B, B, mh - 2 * B);
     ctx.restore();
+    // 地区名
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `bold ${s >= 2.5 ? 12 : 10}px ${UI}`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(8,9,7,0.85)';
+    for (const d of this.world.districts) {
+      if (!d.label) continue;
+      const label = d.name.replace(/^.*?の/, '').replace(/ 第\d+$/, '');
+      const cx = X(d.x + d.w / 2);
+      const cy = Y(d.y + d.h / 2);
+      ctx.globalAlpha = 0.8;
+      ctx.strokeText(label, cx, cy);
+      ctx.fillStyle = DISTRICT_INFO[d.kind].color;
+      ctx.fillText(label, cx, cy);
+    }
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1;
     // 施設（探索済みは名前つき）
     for (const loc of this.world.locations) {
       if (loc.kind === 'base') continue;
@@ -2490,6 +2546,16 @@ export class Renderer {
       ctx.fillStyle = '#e05a3a';
       ctx.fillRect(mx + view.drop.x * k - 4, my + view.drop.y * k - 4, 8, 8);
     }
+    // 仲間のピン（集合場所・敵・物資）
+    if (this.fx)
+      for (const p of this.fx.pings) {
+        ctx.strokeStyle = p.t === 'enemy' ? '#e0583e' : p.t === 'loot' ? '#e0b862' : (PLAYER_COLORS[p.id] ?? '#fff');
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(mx + p.x * k, my + p.y * k, 6 + Math.sin(this.time * 6) * 2, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
     for (const p of view.players) {
       if (p.status === 'dead') continue;
       const px = mx + p.x * k;
@@ -2510,7 +2576,16 @@ export class Renderer {
     ctx.font = `10px ${UI}`;
     ctx.textAlign = 'left';
     ctx.fillStyle = '#bdb79e';
-    ctx.fillText('⌂ 拠点　▲ 通信塔　● 煙・炎　■ 補給物資　点線の輪＝危険度の境目', mx, my + mh + 14);
+    ctx.fillText('⌂ 拠点　▲ 通信塔　● 煙・炎　■ 補給物資　◯ ピン　点線の輪＝危険度の境目', mx, my + mh + 14);
+    let lx = mx;
+    for (const kd of Object.keys(DISTRICT_INFO) as (keyof typeof DISTRICT_INFO)[]) {
+      const info = DISTRICT_INFO[kd];
+      ctx.fillStyle = info.color;
+      ctx.fillRect(lx, my + mh + 26, 10, 8);
+      ctx.fillStyle = '#bdb79e';
+      ctx.fillText(info.name, lx + 14, my + mh + 30);
+      lx += ctx.measureText(info.name).width + 30;
+    }
   }
 
   /** 遠くから見える目印（霧の上に描く）：煙の柱・炎・通信塔の赤いランプ・給水塔 */

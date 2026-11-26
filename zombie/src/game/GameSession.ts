@@ -119,6 +119,7 @@ export class GameSession {
       this.world.locations = gen.locations;
       this.world.buildings = gen.buildings;
       this.world.landmarks = gen.landmarks;
+      this.world.districts = gen.districts;
       for (const ob of gen.objs) this.world.setObj({ ...ob });
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
     }
@@ -749,9 +750,15 @@ export class GameSession {
   }
 
   private nearBench(pos: { x: number; y: number }): boolean {
-    for (const ob of this.world.objects.values()) {
-      if (ob.kind === 'bench' && Math.hypot((ob.tx + 0.5) * TILE - pos.x, (ob.ty + 0.5) * TILE - pos.y) <= BENCH_RANGE) return true;
-    }
+    // 周りのタイルだけを調べる（毎フレーム呼ばれるので、ワールド全体は走査しない）
+    const r = Math.ceil(BENCH_RANGE / TILE) + 1;
+    const ptx = Math.floor(pos.x / TILE);
+    const pty = Math.floor(pos.y / TILE);
+    for (let ty = pty - r; ty <= pty + r; ty++)
+      for (let tx = ptx - r; tx <= ptx + r; tx++) {
+        const ob = this.world.objAt(tx, ty);
+        if (ob && ob.kind === 'bench' && Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) <= BENCH_RANGE) return true;
+      }
     return false;
   }
 

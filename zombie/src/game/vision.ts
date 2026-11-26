@@ -20,6 +20,20 @@ export interface Viewer {
 }
 
 const FOG_UNSEEN = 238;
+
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+function clipRect(r: Rect): Rect {
+  const x0 = Math.max(0, r.x);
+  const y0 = Math.max(0, r.y);
+  const x1 = Math.min(MAP_W, r.x + r.w);
+  const y1 = Math.min(MAP_H, r.y + r.h);
+  return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+}
 const FOG_MEMORY = 120;
 
 export class Vision {
@@ -46,8 +60,19 @@ export class Vision {
     this.img = this.fogCtx.createImageData(MAP_W, MAP_H);
   }
 
+  /** 前回の更新で触れた範囲（タイル座標の矩形）。今回はそこと今回の範囲だけを書き直す */
+  private prevRects: Rect[] = [];
+  private dirty: Rect[] = [{ x: 0, y: 0, w: MAP_W, h: MAP_H }];
+
   update(world: TileWorld, viewers: Viewer[]): void {
-    this.visible.fill(0);
+    // 広い世界でも負荷が変わらないよう、視界の届く範囲（＋前回の範囲）だけを処理する
+    const cur: Rect[] = viewers.map((v) => {
+      const r = Math.ceil(Math.max(v.near, v.cone) / TILE) + 2;
+      return clipRect({ x: Math.floor(v.x / TILE) - r, y: Math.floor(v.y / TILE) - r, w: r * 2 + 1, h: r * 2 + 1 });
+    });
+    const rects = [...this.prevRects, ...cur, ...this.dirty].filter((r) => r.w > 0 && r.h > 0);
+    this.dirty = [];
+    for (const rc of this.prevRects) for (let y = rc.y; y < rc.y + rc.h; y++) this.visible.fill(0, y * MAP_W + rc.x, y * MAP_W + rc.x + rc.w);
     for (const v of viewers) {
       // 周囲（全方向）
       const nNear = 96;
@@ -56,23 +81,40 @@ export class Vision {
       const step = (0.6 * TILE) / v.cone;
       for (let a = -v.half; a <= v.half; a += step) this.cast(world, v.x, v.y, v.aim + a, v.cone);
     }
-    // 霧テクスチャを更新
+    this.prevRects = cur;
+    // 霧テクスチャを更新（触れた範囲だけ）
     const d = this.img.data;
-    for (let i = 0; i < MAP_W * MAP_H; i++) {
-      const a = this.visible[i] ? 0 : this.explored[i] ? FOG_MEMORY : FOG_UNSEEN;
-      const k = i * 4;
-      d[k] = 6;
-      d[k + 1] = 7;
-      d[k + 2] = 8;
-      d[k + 3] = a;
+    const up = this.fogUpCtx;
+    const S = this.fog.width / MAP_W;
+    for (const rc of rects) {
+      for (let y = rc.y; y < rc.y + rc.h; y++)
+        for (let x = rc.x; x < rc.x + rc.w; x++) {
+          const i = y * MAP_W + x;
+          const a = this.visible[i] ? 0 : this.explored[i] ? FOG_MEMORY : FOG_UNSEEN;
+          const k = i * 4;
+          d[k] = 6;
+          d[k + 1] = 7;
+          d[k + 2] = 8;
+          d[k + 3] = a;
+        }
+      this.fogCtx.putImageData(this.img, 0, 0, rc.x, rc.y, rc.w, rc.h);
     }
-    this.fogCtx.putImageData(this.img, 0, 0);
-    this.fogUpCtx.clearRect(0, 0, this.fog.width, this.fog.height);
-    this.fogUpCtx.drawImage(this.raw, 0, 0, this.fog.width, this.fog.height);
+    for (const rc of rects) {
+      // 拡大時のなめらかさが境目で途切れないよう、1タイル外側まで含めて描き、内側だけに切り抜く
+      const e = clipRect({ x: rc.x - 1, y: rc.y - 1, w: rc.w + 2, h: rc.h + 2 });
+      up.save();
+      up.beginPath();
+      up.rect(rc.x * S, rc.y * S, rc.w * S, rc.h * S);
+      up.clip();
+      up.clearRect(rc.x * S, rc.y * S, rc.w * S, rc.h * S);
+      up.drawImage(this.raw, e.x, e.y, e.w, e.h, e.x * S, e.y * S, e.w * S, e.h * S);
+      up.restore();
+    }
   }
 
   markExplored(x: number, y: number, w: number, h: number): void {
     for (let ty = y; ty < y + h; ty++) for (let tx = x; tx < x + w; tx++) if (tx >= 0 && ty >= 0 && tx < MAP_W && ty < MAP_H) this.explored[ty * MAP_W + tx] = 1;
+    this.dirty.push(clipRect({ x, y, w, h }));
   }
 
   isVisible(x: number, y: number): boolean {
