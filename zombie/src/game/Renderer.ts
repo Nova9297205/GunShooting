@@ -4,7 +4,7 @@
 // ============================================================
 import type { GameMode, ObjSnap, PlayerSnap, ViewState, ZombieSnap } from '../types';
 import { Tool } from '../types';
-import { type ArtSet, type PlayerAnim, VectorArt, type ZombieAnim } from './Art';
+import { type ArtSet, type PlayerAnim, type TallQuery, VectorArt, type ZombieAnim } from './Art';
 import {
   BREAKABLE_KINDS,
   BUILD_COST,
@@ -16,10 +16,9 @@ import {
   MAP_W,
   PLAYER,
   PLAYER_COLORS,
-  T_FLOOR,
-  T_ROAD,
   T_WALL,
   TILE,
+  TORCH_LIGHT,
   TOOL_BUILD,
   TOOLS,
   WORLD_H,
@@ -29,6 +28,9 @@ import {
 import type { Effects } from './Effects';
 import { circleOverlapsTile, clamp } from './physics';
 import type { TileWorld } from './world';
+
+/** 落ち影と側面を持つ「高い」建築物 */
+const WALL_KINDS: ReadonlySet<ObjSnap['kind']> = new Set<ObjSnap['kind']>(['stone', 'woodWall', 'ironWall']);
 
 export interface RenderOptions {
   localId: number;
@@ -54,13 +56,41 @@ export interface AnimHooks {
   reload(p: PlayerSnap): void;
 }
 
+/**
+ * 時刻ごとの環境光キーフレーム [分, 暗さ, 色味R, G, B, 色味の強さ]
+ * 朝焼け → 昼 → 夕方の黄金色 → 夕焼け → 紫の薄暮 → 青い夜 と色温度が変化する
+ */
+const AMBIENT: [number, number, number, number, number, number][] = [
+  [0, 0.92, 70, 90, 160, 0.3],
+  [300, 0.9, 80, 90, 170, 0.3],
+  [360, 0.62, 255, 140, 120, 0.22], // 夜明け（ピンク）
+  [420, 0.15, 255, 190, 140, 0.14],
+  [480, 0, 255, 235, 210, 0.04],
+  [900, 0, 255, 245, 230, 0.02], // 昼
+  [990, 0, 255, 200, 120, 0.1], // 午後の黄金色
+  [1080, 0.08, 255, 150, 70, 0.2], // 夕焼け
+  [1150, 0.42, 200, 100, 120, 0.24],
+  [1200, 0.72, 120, 90, 170, 0.28], // 紫の薄暮
+  [1260, 0.92, 70, 90, 160, 0.3], // 夜
+  [1440, 0.92, 70, 90, 160, 0.3],
+];
+
+export function ambientAt(m: number): { dark: number; r: number; g: number; b: number; a: number } {
+  for (let i = 0; i < AMBIENT.length - 1; i++) {
+    const k0 = AMBIENT[i];
+    const k1 = AMBIENT[i + 1];
+    if (m >= k0[0] && m <= k1[0]) {
+      const t = (m - k0[0]) / (k1[0] - k0[0] || 1);
+      const L = (j: number) => k0[j] + (k1[j] - k0[j]) * t;
+      return { dark: L(1), r: L(2), g: L(3), b: L(4), a: L(5) };
+    }
+  }
+  return { dark: 0.92, r: 70, g: 90, b: 160, a: 0.3 };
+}
+
 /** 時刻（分）から暗さ 0..1 を求める */
 export function darknessAt(m: number): number {
-  if (m >= 420 && m < 1080) return 0; // 7:00-18:00
-  if (m >= 1080 && m < 1200) return ((m - 1080) / 120) * 0.55; // 夕暮れ
-  if (m >= 1200 && m < 1260) return 0.55 + ((m - 1200) / 60) * 0.38;
-  if (m >= 1260 || m < 300) return 0.93; // 夜
-  return 0.93 * (1 - (m - 300) / 120); // 5:00-7:00 夜明け
+  return ambientAt(m).dark;
 }
 
 export function formatClock(m: number): string {
@@ -110,29 +140,11 @@ export class Renderer {
   }
 
   /** 地形をオフスクリーンキャンバスに一度だけ描き込む */
+  /** 地形をオフスクリーンキャンバスに一度だけ描き込む */
   private bakeTerrain(): void {
-    const c = document.createElement('canvas');
-    c.width = WORLD_W;
-    c.height = WORLD_H;
-    const g = c.getContext('2d')!;
-    const w = this.world;
-    for (let ty = 0; ty < MAP_H; ty++)
-      for (let tx = 0; tx < MAP_W; tx++) {
-        this.art.drawTerrainTile(g, w.terrainAt(tx, ty), tx, ty, (dx, dy) => w.terrainAt(tx + dx, ty + dy));
-      }
-    this.terrainCanvas = c;
-
-    const m = document.createElement('canvas');
-    m.width = MAP_W * 2;
-    m.height = MAP_H * 2;
-    const mg = m.getContext('2d')!;
-    for (let ty = 0; ty < MAP_H; ty++)
-      for (let tx = 0; tx < MAP_W; tx++) {
-        const t = w.terrainAt(tx, ty);
-        mg.fillStyle = t === T_WALL ? '#7a7068' : t === T_ROAD ? '#3a3a3e' : t === T_FLOOR ? '#5a5650' : '#2c4026';
-        mg.fillRect(tx * 2, ty * 2, 2, 2);
-      }
-    this.miniCanvas = m;
+    const baked = this.art.bakeTerrain(this.world);
+    this.terrainCanvas = baked.canvas;
+    this.miniCanvas = baked.mini;
   }
 
   screenToWorld(sx: number, sy: number): { x: number; y: number } {
@@ -142,7 +154,7 @@ export class Renderer {
   private getPAnim(id: number): PlayerAnim {
     let a = this.pAnim.get(id);
     if (!a) {
-      a = { recoil: 0, recoilV: 0, flash: 0, flashSeed: 0, lastShots: -1, swing: 0, lastSwings: -1, walk: 0, lastX: NaN, lastY: NaN };
+      a = { recoil: 0, recoilV: 0, flash: 0, flashSeed: 0, lastShots: -1, swing: 0, lastSwings: -1, walk: 0, lastX: NaN, lastY: NaN, move: 0 };
       this.pAnim.set(id, a);
     }
     return a;
@@ -220,8 +232,19 @@ export class Renderer {
       if (x < vx0 || y < vy0 || x > vx1 || y > vy1) continue;
       visible.push(ob);
     }
+    // 壁の落ち影（重なっても濃くならないよう1つのパスでまとめて塗る）
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    for (const ob of visible) if (WALL_KINDS.has(ob.kind)) ctx.rect(ob.tx * TILE + 7, ob.ty * TILE + 10, TILE, TILE);
+    ctx.fill();
     const tall: ObjSnap[] = [];
-    for (const ob of visible) if (!this.art.drawLowObject(ctx, ob, this.time)) tall.push(ob);
+    for (const ob of visible) {
+      if (!this.art.drawLowObject(ctx, ob, this.time, this.tallQuery(ob.tx, ob.ty))) tall.push(ob);
+      // 焚き火・松明から舞い上がる火の粉
+      if ((ob.kind === 'campfire' || ob.kind === 'torch') && Math.random() < dt * (ob.kind === 'campfire' ? 9 : 3)) {
+        fx.burst((ob.tx + 0.5) * TILE + (Math.random() - 0.5) * 10, (ob.ty + 0.5) * TILE - 6, '#ffb060', 1, 40, 1.4, 1.4, 'dot', true, -Math.PI / 2, 0.9);
+      }
+    }
 
     this.drawBuildGhost(o, me);
     this.drawBullets(view, o);
@@ -229,6 +252,7 @@ export class Renderer {
     for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time);
     this.drawParticles(fx, false);
+    this.drawCloudShadows(view.minute, vx0, vy0, vx1, vy1);
     this.drawStructureBars(visible);
     ctx.restore();
 
@@ -249,10 +273,44 @@ export class Renderer {
     this.drawHUD(view, o, me, dark);
   }
 
+  /** 隣のタイルに高い壁（廃墟の壁・建築壁）があるか */
+  private tallQuery(tx: number, ty: number): TallQuery {
+    return (dx, dy) => {
+      const x = tx + dx;
+      const y = ty + dy;
+      if (this.world.terrainAt(x, y) === T_WALL) return true;
+      const ob = this.world.objAt(x, y);
+      return !!ob && WALL_KINDS.has(ob.kind);
+    };
+  }
+
+  /** 昼間にゆっくり流れる雲の影 */
+  private drawCloudShadows(minute: number, x0: number, y0: number, x1: number, y1: number): void {
+    const amb = ambientAt(minute);
+    const k = 1 - Math.min(1, amb.dark * 2.5);
+    if (k <= 0.02) return;
+    const { ctx } = this;
+    const span = WORLD_W + 1200;
+    for (let i = 0; i < 7; i++) {
+      const cx = ((i * 977 + this.time * (10 + i * 2)) % span) - 600;
+      const cy = (i * 541) % WORLD_H;
+      const r = 260 + (i % 3) * 120;
+      if (cx + r < x0 || cx - r > x1 || cy + r < y0 || cy - r > y1) continue;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      g.addColorStop(0, `rgba(10,20,30,${0.14 * k})`);
+      g.addColorStop(0.6, `rgba(10,20,30,${0.08 * k})`);
+      g.addColorStop(1, 'rgba(10,20,30,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, r * 1.4, r, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   private getZAnim(z: ZombieSnap): ZombieAnim {
     let a = this.zAnim.get(z.id);
     if (!a) {
-      a = { lastAtk: z.atk, lunge: 0, walk: Math.random() * 6, lastX: z.x, lastY: z.y };
+      a = { lastAtk: z.atk, lunge: 0, walk: Math.random() * 6, lastX: z.x, lastY: z.y, move: 0 };
       this.zAnim.set(z.id, a);
     }
     return a;
@@ -286,6 +344,7 @@ export class Renderer {
       if (!Number.isNaN(a.lastX)) {
         const mv = Math.hypot(p.x - a.lastX, p.y - a.lastY);
         a.walk += mv * 0.18;
+        a.move += (Math.min(1, mv / Math.max(1e-3, dt) / 160) - a.move) * Math.min(1, dt * 10);
         if (p.dashTime > 0 && p.status === 'alive') o.effects.burst(p.x, p.y, '#cfc6b0', 1, 40, 0.4, 4, 'dot', false);
       }
       a.lastX = p.x;
@@ -300,7 +359,9 @@ export class Renderer {
         a.lastAtk = z.atk;
       }
       a.lunge = Math.max(0, a.lunge - dt * 4);
-      a.walk += Math.hypot(z.x - a.lastX, z.y - a.lastY) * 0.2;
+      const zm = Math.hypot(z.x - a.lastX, z.y - a.lastY);
+      a.walk += zm * 0.2;
+      a.move += (Math.min(1, zm / Math.max(1e-3, dt) / 60) - a.move) * Math.min(1, dt * 8);
       a.lastX = z.x;
       a.lastY = z.y;
     }
@@ -361,7 +422,7 @@ export class Renderer {
       (kind === 'spike' || !circleOverlapsTile(me.x, me.y, PLAYER.radius, tx, ty));
     const ghost: ObjSnap = { id: -1, kind: kind!, tx, ty, hp: 1, maxHp: 1, ready: 1 };
     ctx.globalAlpha = 0.45;
-    if (!this.art.drawLowObject(ctx, ghost, this.time)) this.art.drawTallObject(ctx, ghost, this.time);
+    if (!this.art.drawLowObject(ctx, ghost, this.time, () => false)) this.art.drawTallObject(ctx, ghost, this.time);
     ctx.globalAlpha = 1;
     ctx.fillStyle = valid ? 'rgba(90,255,140,0.18)' : 'rgba(255,70,70,0.25)';
     ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
@@ -468,103 +529,141 @@ export class Renderer {
 
   // ---------------- ライティング ----------------
 
+  private lightSources(): { x: number; y: number; r: number; warm: number }[] {
+    const out: { x: number; y: number; r: number; warm: number }[] = [];
+    for (const ob of this.world.objects.values()) {
+      if (ob.kind === 'campfire') {
+        const flick = 1 + Math.sin(this.time * 11) * 0.03 + Math.sin(this.time * 7.3 + 1) * 0.04;
+        out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 300 * flick, warm: 1 });
+      } else if (ob.kind === 'torch') {
+        const flick = 1 + Math.sin(this.time * 13 + ob.id) * 0.04 + Math.sin(this.time * 8.1 + ob.id * 2) * 0.04;
+        out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: TORCH_LIGHT * flick, warm: 0.8 });
+      }
+    }
+    return out;
+  }
+
   private drawLighting(view: ViewState, dark: number, ox: number, oy: number): void {
     const horde = view.phase === 'horde';
     const { ctx } = this;
-    // 夕焼け・朝焼けの色味
-    const m = view.minute;
-    const warm = m >= 1020 && m < 1230 ? Math.sin(((m - 1020) / 210) * Math.PI) : m >= 300 && m < 450 ? Math.sin(((m - 300) / 150) * Math.PI) * 0.6 : 0;
-    if (warm > 0) {
-      ctx.fillStyle = `rgba(255,120,40,${warm * 0.14})`;
+    const amb = ambientAt(view.minute);
+    if (horde) {
+      // 大襲撃の夜は血のような赤
+      amb.r = 255;
+      amb.g = 120;
+      amb.b = 110;
+      amb.a = 0.16;
+    }
+    // ---- 色温度（乗算で全体に色味をつける） ----
+    if (amb.a > 0.005) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'multiply';
+      const mix = (c: number) => Math.round(255 + (c - 255) * amb.a * 2.2);
+      ctx.fillStyle = `rgb(${mix(amb.r)},${mix(amb.g)},${mix(amb.b)})`;
       ctx.fillRect(0, 0, this.w, this.h);
+      ctx.restore();
     }
-    if (dark <= 0.01) return;
+    if (dark > 0.01) {
+      const l = this.lightCtx;
+      const s = 0.5; // ライトマップの縮尺
+      l.setTransform(1, 0, 0, 1, 0, 0);
+      l.globalCompositeOperation = 'source-over';
+      l.clearRect(0, 0, this.lightCanvas.width, this.lightCanvas.height);
+      l.fillStyle = horde ? `rgba(30,4,8,${dark})` : `rgba(5,8,24,${dark})`;
+      l.fillRect(0, 0, this.lightCanvas.width, this.lightCanvas.height);
+      l.globalCompositeOperation = 'destination-out';
+      l.setTransform(s, 0, 0, s, ox * s, oy * s);
 
-    const l = this.lightCtx;
-    const s = 0.5; // ライトマップの縮尺
-    l.setTransform(1, 0, 0, 1, 0, 0);
-    l.globalCompositeOperation = 'source-over';
-    l.clearRect(0, 0, this.lightCanvas.width, this.lightCanvas.height);
-    l.fillStyle = horde ? `rgba(22,2,4,${dark})` : `rgba(4,7,18,${dark})`;
-    l.fillRect(0, 0, this.lightCanvas.width, this.lightCanvas.height);
-    l.globalCompositeOperation = 'destination-out';
-    l.setTransform(s, 0, 0, s, ox * s, oy * s);
+      const hole = (x: number, y: number, r: number, a: number) => {
+        const g = l.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, `rgba(0,0,0,${a})`);
+        g.addColorStop(0.45, `rgba(0,0,0,${a * 0.75})`);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        l.fillStyle = g;
+        l.beginPath();
+        l.arc(x, y, r, 0, Math.PI * 2);
+        l.fill();
+      };
+      /** 懐中電灯：角度の異なる扇を重ねて縁を柔らかくする */
+      const cone = (x: number, y: number, ang: number, len: number) => {
+        const layers: [number, number][] = [
+          [0.2, 0.5],
+          [0.3, 0.28],
+          [0.42, 0.18],
+          [0.56, 0.1],
+        ];
+        for (const [half, a] of layers) {
+          const g = l.createRadialGradient(x, y, 6, x, y, len);
+          g.addColorStop(0, `rgba(0,0,0,${a})`);
+          g.addColorStop(0.5, `rgba(0,0,0,${a * 0.85})`);
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          l.fillStyle = g;
+          l.beginPath();
+          l.moveTo(x, y);
+          l.arc(x, y, len, ang - half, ang + half);
+          l.closePath();
+          l.fill();
+        }
+      };
 
-    const hole = (x: number, y: number, r: number, a: number) => {
-      const g = l.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, `rgba(0,0,0,${a})`);
-      g.addColorStop(0.6, `rgba(0,0,0,${a * 0.6})`);
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      l.fillStyle = g;
-      l.beginPath();
-      l.arc(x, y, r, 0, Math.PI * 2);
-      l.fill();
-    };
+      for (const p of view.players) {
+        if (p.status === 'dead') continue;
+        hole(p.x, p.y, p.status === 'down' ? 85 : 120, 0.92);
+        if (p.status !== 'alive') continue;
+        cone(p.x + Math.cos(p.aim) * 12, p.y + Math.sin(p.aim) * 12, p.aim, 500);
+        const a = this.pAnim.get(p.id);
+        if (a && a.flash > 0) hole(p.x + Math.cos(p.aim) * 30, p.y + Math.sin(p.aim) * 30, 230, 0.95);
+      }
+      for (const ls of this.lightSources()) hole(ls.x, ls.y, ls.r, 1);
 
-    for (const p of view.players) {
-      if (p.status === 'dead') continue;
-      hole(p.x, p.y, p.status === 'down' ? 80 : 115, 0.95);
-      if (p.status !== 'alive') continue;
-      // 照準方向への扇状ライト（懐中電灯）
-      const len = 460;
-      const half = 0.42;
-      const g = l.createRadialGradient(p.x, p.y, 10, p.x, p.y, len);
-      g.addColorStop(0, 'rgba(0,0,0,1)');
-      g.addColorStop(0.55, 'rgba(0,0,0,0.85)');
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      l.fillStyle = g;
-      l.beginPath();
-      l.moveTo(p.x, p.y);
-      l.arc(p.x, p.y, len, p.aim - half, p.aim + half);
-      l.closePath();
-      l.fill();
-      const a = this.pAnim.get(p.id);
-      if (a && a.flash > 0) hole(p.x + Math.cos(p.aim) * 30, p.y + Math.sin(p.aim) * 30, 200, 0.9);
+      ctx.save();
+      ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(this.lightCanvas, 0, 0, this.w, this.h);
+      ctx.restore();
     }
-    for (const ob of this.world.objects.values()) {
-      if (ob.kind !== 'campfire') continue;
-      const flick = 1 + Math.sin(this.time * 11) * 0.03 + Math.sin(this.time * 7.3) * 0.03;
-      hole((ob.tx + 0.5) * TILE, (ob.ty + 0.5) * TILE, 280 * flick, 1);
-    }
-
-    ctx.save();
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(this.lightCanvas, 0, 0, this.w, this.h);
-    ctx.restore();
+    // ---- 周辺減光（常時うっすら＋夜は強め） ----
+    const v = ctx.createRadialGradient(this.w / 2, this.h / 2, Math.min(this.w, this.h) * 0.42, this.w / 2, this.h / 2, Math.max(this.w, this.h) * 0.78);
+    v.addColorStop(0, 'rgba(0,0,0,0)');
+    v.addColorStop(1, `rgba(0,0,0,${0.28 + dark * 0.25})`);
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, this.w, this.h);
   }
 
-  /** 暗闇の上に重ねる光の色（焚き火の暖色・懐中電灯の色） */
+  /** 暗闇の上に重ねる光の色（焚き火・松明の暖色、懐中電灯の白色） */
   private drawGlows(view: ViewState, dark: number): void {
     if (dark < 0.05) return;
     const { ctx } = this;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    for (const ob of this.world.objects.values()) {
-      if (ob.kind !== 'campfire') continue;
-      const x = (ob.tx + 0.5) * TILE;
-      const y = (ob.ty + 0.5) * TILE;
-      const r = 230 + Math.sin(this.time * 9) * 8;
-      const g = ctx.createRadialGradient(x, y, 0, x, y, r);
-      g.addColorStop(0, `rgba(255,140,50,${0.28 * dark})`);
-      g.addColorStop(1, 'rgba(255,100,30,0)');
+    for (const ls of this.lightSources()) {
+      const r = ls.r * 0.85;
+      const g = ctx.createRadialGradient(ls.x, ls.y, 0, ls.x, ls.y, r);
+      g.addColorStop(0, `rgba(255,150,60,${0.3 * dark * ls.warm})`);
+      g.addColorStop(0.5, `rgba(255,110,40,${0.12 * dark * ls.warm})`);
+      g.addColorStop(1, 'rgba(255,90,30,0)');
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.arc(ls.x, ls.y, r, 0, Math.PI * 2);
       ctx.fill();
     }
     for (const p of view.players) {
       if (p.status !== 'alive') continue;
-      const len = 420;
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, len);
-      g.addColorStop(0, `rgba(255,240,200,${0.1 * dark})`);
-      g.addColorStop(1, 'rgba(255,240,200,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
-      ctx.arc(p.x, p.y, len, p.aim - 0.4, p.aim + 0.4);
-      ctx.closePath();
-      ctx.fill();
+      for (const [half, a] of [
+        [0.22, 0.07],
+        [0.4, 0.04],
+      ] as const) {
+        const len = 460;
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, len);
+        g.addColorStop(0, `rgba(255,244,210,${a * dark})`);
+        g.addColorStop(1, 'rgba(255,244,210,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.arc(p.x, p.y, len, p.aim - half, p.aim + half);
+        ctx.closePath();
+        ctx.fill();
+      }
     }
     ctx.restore();
   }
@@ -685,10 +784,8 @@ export class Renderer {
       const pulse = 0.55 + Math.sin(this.time * 2.4) * 0.15;
       const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
       g.addColorStop(0, 'rgba(180,0,0,0)');
-      g.addColorStop(1, `rgba(200,0,0,${0.45 * pulse})`);
+      g.addColorStop(1, `rgba(200,0,0,${0.38 * pulse})`);
       ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-      ctx.fillStyle = 'rgba(120,0,0,0.08)';
       ctx.fillRect(0, 0, w, h);
     }
     if (fx.hurt > 0) {
@@ -1011,7 +1108,7 @@ export class Renderer {
       else if (ob.kind === 'ironWall') c = '#b8c4d4';
       else if (ob.kind === 'stone') c = '#9a968f';
       else if (ob.kind === 'spike') c = '#8a6a3a';
-      else if (ob.kind === 'campfire') c = '#ff9a3d';
+      else if (ob.kind === 'campfire' || ob.kind === 'torch') c = '#ff9a3d';
       else if (ob.kind === 'crate' && ob.ready) c = '#ffe08a';
       if (!c) continue;
       ctx.fillStyle = c;

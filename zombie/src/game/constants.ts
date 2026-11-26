@@ -23,6 +23,8 @@ export const DAY_SECONDS = 90;
 /** 20:00〜06:00 の夜（実時間秒） */
 export const NIGHT_SECONDS = 45;
 export const CYCLE_SECONDS = DAY_SECONDS + NIGHT_SECONDS;
+/** 松明の明かりの半径(px) */
+export const TORCH_LIGHT = 200;
 /** 何日ごとに大襲撃（ホード）が来るか */
 export const HORDE_EVERY = 5;
 /** ゲーム開始時刻（分） */
@@ -111,6 +113,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
   woodWall: 320,
   ironWall: 950,
   spike: 160,
+  torch: 60,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -134,6 +137,7 @@ export const BUILD_COST: Record<BuildKind, { wood: number; scrap: number }> = {
   woodWall: { wood: 5, scrap: 0 },
   ironWall: { wood: 0, scrap: 6 },
   spike: { wood: 4, scrap: 0 },
+  torch: { wood: 2, scrap: 0 },
 };
 
 export const SPIKE = {
@@ -161,12 +165,14 @@ export const TOOLS = [
   { id: 3, key: '4', name: '鉄の壁', short: 'IRON' },
   { id: 4, key: '5', name: 'ウッドスパイク', short: 'SPIKE' },
   { id: 5, key: '6', name: '修理', short: 'FIX' },
+  { id: 6, key: '7', name: '松明（明かり）', short: 'TORCH' },
 ] as const;
 
 export const TOOL_BUILD: Record<number, BuildKind | undefined> = {
   2: 'woodWall',
   3: 'ironWall',
   4: 'spike',
+  6: 'torch',
 };
 
 // ---------------- 地形 ----------------

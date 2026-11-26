@@ -7,7 +7,7 @@ import { audio } from './game/Audio';
 import { HostSimulation } from './game/Engine';
 import { GameSession } from './game/GameSession';
 import { NetworkManager, sanitizeName } from './network/NetworkManager';
-import type { GameMode, GameResult, LobbyPlayer, StartInfo } from './types';
+import type { BuildKind, GameMode, GameResult, LobbyPlayer, StartInfo } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const NAME_KEY = 'deadnights2d.name';
@@ -121,7 +121,7 @@ function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[]): void {
   const info: StartInfo = { players, seed, objs: sim.initialObjs() };
   if (m === 'host') net?.startGame(info);
   // 開発時のみ：コンソールから時間を進めるなどのデバッグ用
-  if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio });
+  if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio, __place: (k: BuildKind, x: number, y: number) => sim.debugPlace(k, x, y) });
   startSession(m, info, 0, sim);
 }
 

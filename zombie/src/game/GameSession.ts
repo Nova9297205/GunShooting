@@ -346,8 +346,10 @@ export class GameSession {
   private handleToolKeys(): void {
     for (let i = 0; i < TOOLS.length; i++) if (this.input.consume(`Digit${i + 1}`)) this.localTool = i;
     if (this.input.consume('KeyB')) {
-      // 建築ツール（3〜6）を順に切り替え
-      this.localTool = this.localTool < Tool.WoodWall || this.localTool >= Tool.Repair ? Tool.WoodWall : this.localTool + 1;
+      // 建築ツール（木の壁→鉄の壁→スパイク→松明→修理）を順に切り替え
+      const cycle: number[] = [Tool.WoodWall, Tool.IronWall, Tool.Spike, Tool.Torch, Tool.Repair];
+      const i = cycle.indexOf(this.localTool);
+      this.localTool = cycle[(i + 1) % cycle.length];
     }
     const wheel = this.input.consumeWheel();
     if (wheel) this.localTool = (this.localTool + (wheel > 0 ? 1 : -1) + TOOLS.length) % TOOLS.length;

@@ -22,9 +22,10 @@ export type ObjKind =
   | 'stone'
   | 'woodWall'
   | 'ironWall'
-  | 'spike';
+  | 'spike'
+  | 'torch';
 
-export type BuildKind = 'woodWall' | 'ironWall' | 'spike';
+export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch';
 
 /** ホットバーのツール番号 */
 export const Tool = {
@@ -34,6 +35,7 @@ export const Tool = {
   IronWall: 3,
   Spike: 4,
   Repair: 5,
+  Torch: 6,
 } as const;
 
 /** 1フレーム分の操作入力（ゲスト→ホストへ送信） */

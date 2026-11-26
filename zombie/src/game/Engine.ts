@@ -46,6 +46,7 @@ import {
   T_WALL,
   TILE,
   TOOL_BUILD,
+  TOOLS,
   WORLD_H,
   WORLD_W,
   ZOMBIE,
@@ -251,6 +252,16 @@ export class HostSimulation {
   }
 
   // ======================== 外部API ========================
+
+  /** 開発用：任意のオブジェクトを設置（監査スクリプト用） */
+  debugPlace(kind: BuildKind, tx: number, ty: number): void {
+    if (!(kind in OBJ_HP) || !this.world.inBounds(tx, ty) || this.world.solid(tx, ty) || this.world.objAt(tx, ty)) return;
+    const hp = OBJ_HP[kind];
+    const o: SimObj = { id: this.nextBuildId++, kind, tx, ty, hp, maxHp: hp, ready: 1, regrowT: 0 };
+    this.world.setObj(o);
+    this.changed.add(o.id);
+    this.flowTimer = 0;
+  }
 
   queueInput(playerId: number, f: InputFrame): void {
     const p = this.players.find((pl) => pl.id === playerId);
@@ -461,7 +472,7 @@ export class HostSimulation {
       p.revive = f.revive;
       p.tx = f.tx;
       p.ty = f.ty;
-      if (f.tool >= 0 && f.tool <= 5 && f.tool !== p.tool) {
+      if (f.tool >= 0 && f.tool < TOOLS.length && f.tool !== p.tool) {
         p.tool = f.tool;
         if (p.tool !== Tool.Gun) p.reloadT = 0;
       }
@@ -766,7 +777,7 @@ export class HostSimulation {
     const cy = (ty + 0.5) * TILE;
     if (Math.hypot(cx - p.x, cy - p.y) > PLAYER.buildRange) return;
     if (this.world.terrainAt(tx, ty) === T_WALL || this.world.objAt(tx, ty)) return;
-    if (kind !== 'spike') {
+    if (kind === 'woodWall' || kind === 'ironWall') {
       for (const pl of this.players) if (pl.status !== 'dead' && circleOverlapsTile(pl.x, pl.y, PLAYER.radius, tx, ty)) return;
       for (const z of this.zombies) if (circleOverlapsTile(z.x, z.y, ZOMBIE[z.type].radius, tx, ty)) return;
     }
