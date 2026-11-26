@@ -3,7 +3,7 @@
 // ============================================================
 
 /** 押した瞬間だけ拾いたいキー */
-const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'Escape', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
+const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'KeyG', 'Escape', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
 
 export class InputController {
   private keys = new Set<string>();
@@ -122,6 +122,10 @@ export class InputController {
       this.clickQueued = true;
     }
     if (e.button === 2) this.altDown = true;
+    if (e.button === 1) {
+      e.preventDefault();
+      this.edges.add('KeyG'); // 中クリックでもピン
+    }
     this.onMouseMove(e);
   };
 

@@ -597,6 +597,13 @@ export class AudioManager {
       case 'tshot':
         this.turretShot(ev.x, ev.y);
         break;
+      case 'ping': {
+        const t = this.ctx!.currentTime;
+        const [a, b] = ev.t === 'enemy' ? [880, 660] : ev.t === 'loot' ? [988, 1318] : [784, 1046];
+        this.tone({ type: 'triangle', f: a, dur: 0.12, g: 0.12, t });
+        this.tone({ type: 'triangle', f: b, dur: 0.18, g: 0.12, t: t + 0.1 });
+        break;
+      }
       case 'pop':
         // 自分宛ての通知音だけ鳴らす
         if (ev.s && ev.id === localId) this.ui(ev.s);

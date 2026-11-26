@@ -45,6 +45,7 @@ import {
   T_WALL,
   TILE,
   USABLE_SLOTS,
+  CHEST_ITEMS,
   BARBED,
   BENCH_RANGE,
   RECIPES,
@@ -144,8 +145,12 @@ class MinHeap {
     while (i > 0) {
       const p = (i - 1) >> 1;
       if (k[p] <= k[i]) break;
-      [k[p], k[i]] = [k[i], k[p]];
-      [v[p], v[i]] = [v[i], v[p]];
+      const tk = k[p];
+      k[p] = k[i];
+      k[i] = tk;
+      const tv = v[p];
+      v[p] = v[i];
+      v[i] = tv;
       i = p;
     }
   }
@@ -166,8 +171,12 @@ class MinHeap {
         if (l < k.length && k[l] < k[m]) m = l;
         if (r < k.length && k[r] < k[m]) m = r;
         if (m === i) break;
-        [k[m], k[i]] = [k[i], k[m]];
-        [v[m], v[i]] = [v[i], v[m]];
+        const tk = k[m];
+        k[m] = k[i];
+        k[i] = tk;
+        const tv = v[m];
+        v[m] = v[i];
+        v[i] = tv;
         i = m;
       }
     }
@@ -193,6 +202,8 @@ export class HostSimulation {
   zombies: SimZombie[] = [];
   bullets: SimBullet[] = [];
   stash: Stash = { wood: 30, scrap: 12 };
+  /** 拠点の共有チェスト */
+  chest: Record<string, number> = {};
 
   day = 1;
   cycleT: number;
@@ -207,7 +218,8 @@ export class HostSimulation {
   private removed: number[] = [];
   private nextId = 1;
   private nextBuildId = BUILD_ID_START;
-  private flow = new Float32Array(MAP_W * MAP_H);
+  // Float64 で保持する（Float32 だとヒープのキーとの丸め誤差で同じノードが何度も再投入され、計算が爆発する）
+  private flow = new Float64Array(MAP_W * MAP_H);
   private flowTimer = 0;
   private spawnTimer = 2;
   private hordeQuota = 0;
@@ -250,6 +262,8 @@ export class HostSimulation {
         dashCd: 0,
         dashDx: 0,
         dashDy: 0,
+        stamina: PLAYER.maxStamina,
+        staminaDelay: 0,
         queue: [],
         fire: false,
         revive: false,
@@ -280,7 +294,7 @@ export class HostSimulation {
     const o: SimObj = { id: this.nextBuildId++, kind, tx, ty, hp, maxHp: hp, ready: 1, regrowT: 0 };
     this.world.setObj(o);
     this.changed.add(o.id);
-    this.flowTimer = 0;
+    this.flowTimer = Math.min(this.flowTimer, 0.1);
   }
 
   queueInput(playerId: number, f: InputFrame): void {
@@ -329,6 +343,7 @@ export class HostSimulation {
       minute: Math.floor(this.minute()),
       phase: this.phase,
       stash: { ...this.stash },
+      chest: { ...this.chest },
       hordeLeft: this.phase === 'horde' ? this.hordeQuota - this.hordeSpawned + this.zombies.filter((z) => z.horde).length : 0,
       players: this.players.map((p) => ({
         id: p.id,
@@ -355,6 +370,8 @@ export class HostSimulation {
         dashCd: p.dashCd,
         dashDx: p.dashDx,
         dashDy: p.dashDy,
+        stamina: Math.round(p.stamina * 10) / 10,
+        staminaDelay: Math.round(p.staminaDelay * 100) / 100,
       })),
       zombies: this.zombies.map((z) => ({
         id: z.id,
@@ -432,9 +449,10 @@ export class HostSimulation {
 
     if (prevPhase !== this.phase) {
       if (this.phase === 'horde') {
-        const mult = 1 + 0.45 * (this.players.length - 1);
+        // 人数ごとの大襲撃の規模（ボットによる自動テストで調整：3人は資材を分け合うぶん控えめ）
+        const mult = [1, 0.92, 1.9, 2.35][Math.min(3, this.players.length)];
         const n = this.day / HORDE_EVERY;
-        this.hordeQuota = Math.round((26 + 16 * (n - 1)) * mult);
+        this.hordeQuota = Math.round((30 + 20 * (n - 1)) * mult);
         this.hordeSpawned = 0;
         this.spawnTimer = 1.5;
         this.events.push({ k: 'banner', t: '大襲撃 - HORDE NIGHT', s: 'ゾンビの大群が押し寄せてくる！朝 6:00 まで生き延びろ', c: '#ff3b3b', snd: 'horde' });
@@ -503,6 +521,8 @@ export class HostSimulation {
       if (f.interact) this.interact(p);
       if (f.reload) this.startReload(p);
       if (f.craft) this.craft(p, f.craft);
+      if (f.chest) this.chestOp(p, f.chest);
+      if (f.ping) this.ping(p, f.tx, f.ty);
       if (f.eat) this.useFood(p, true);
       if (f.heal) this.useMedkit(p, true);
     }
@@ -681,6 +701,50 @@ export class HostSimulation {
     p.reloadW = wid;
   }
 
+  private pingCd = new Map<number, number>();
+
+  /** ピン：近くに敵がいれば「敵」、物資なら「物資」、それ以外は「ここ」 */
+  private ping(p: SimPlayer, tx: number, ty: number): void {
+    const now = this.time;
+    if ((this.pingCd.get(p.id) ?? -9) > now - 0.8) return;
+    this.pingCd.set(p.id, now);
+    const x = (tx + 0.5) * TILE;
+    const y = (ty + 0.5) * TILE;
+    let t: 'enemy' | 'loot' | 'go' = 'go';
+    if (this.zombies.some((z) => Math.hypot(z.x - x, z.y - y) < 90)) t = 'enemy';
+    else {
+      for (let dy = -1; dy <= 1 && t === 'go'; dy++)
+        for (let dx = -1; dx <= 1; dx++) {
+          const o = this.world.objAt(tx + dx, ty + dy);
+          if (o && o.ready && (o.kind === 'crate' || o.kind === 'mcrate' || o.kind === 'box')) t = 'loot';
+        }
+    }
+    this.events.push({ k: 'ping', id: p.id, x, y, t });
+  }
+
+  /** 共有チェストへの出し入れ（チェストの近くでのみ） */
+  private chestOp(p: SimPlayer, op: string): void {
+    const near = [...this.world.objects.values()].some(
+      (o) => o.kind === 'chest' && Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) <= BENCH_RANGE,
+    );
+    if (!near) return;
+    const [dir, item, amountStr] = op.split(':');
+    if (!CHEST_ITEMS.some((c) => c.id === item)) return;
+    const inv = p.inv as unknown as Record<string, number>;
+    const amount = Math.max(1, Math.min(999, Number(amountStr) || 1));
+    if (dir === 'd') {
+      const n = Math.min(amount, inv[item] ?? 0);
+      if (n <= 0) return;
+      inv[item] -= n;
+      this.chest[item] = (this.chest[item] ?? 0) + n;
+    } else if (dir === 'w') {
+      const n = Math.min(amount, this.chest[item] ?? 0);
+      if (n <= 0) return;
+      this.chest[item] -= n;
+      inv[item] = (inv[item] ?? 0) + n;
+    }
+  }
+
   /** 作業台の近くにいるか */
   private nearBench(p: SimPlayer): boolean {
     for (const o of this.world.objects.values()) {
@@ -714,7 +778,7 @@ export class HostSimulation {
     }
     switch (id) {
       case 'ammo':
-        p.inv.ammo += 12;
+        p.inv.ammo += 10;
         break;
       case 'shells':
         p.inv.shells += 6;
@@ -840,30 +904,30 @@ export class HostSimulation {
       give('食料', roll(0.8, 1, 2), (n) => (inv.food += n));
       give('布', roll(0.5, 1, 2), (n) => (inv.cloth += n));
       give('薬草', roll(0.4, 1, 1), (n) => (inv.herb += n));
-      give('弾薬', roll(0.5, 6, 10), (n) => (inv.ammo += n));
+      give('弾薬', roll(0.4, 4, 8), (n) => (inv.ammo += n));
     } else if (tier === 1) {
-      give('食料', roll(0.45, 1, 2), (n) => (inv.food += n));
+      give('食料', roll(0.4, 1, 1), (n) => (inv.food += n));
       give('布', roll(0.4, 1, 3), (n) => (inv.cloth += n));
       give('薬草', roll(0.35, 1, 2), (n) => (inv.herb += n));
       give('木材', roll(0.45, 2, 5), (n) => (this.stash.wood += n));
-      give('弾薬', roll(0.3, 4, 9), (n) => (inv.ammo += n));
+      give('弾薬', roll(0.25, 3, 6), (n) => (inv.ammo += n));
       give('火薬', roll(0.2, 1, 1), (n) => (inv.gunpowder += n));
-      give('救急', roll(0.06, 1, 1), (n) => (inv.medkit += n));
+      give('救急', roll(0.04, 1, 1), (n) => (inv.medkit += n));
     } else if (tier === 2) {
-      give('弾薬', roll(0.55, 8, 15), (n) => (inv.ammo += n));
+      give('弾薬', roll(0.5, 5, 10), (n) => (inv.ammo += n));
       give('火薬', roll(0.5, 1, 3), (n) => (inv.gunpowder += n));
       give('鉄', roll(0.5, 2, 5), (n) => (this.stash.scrap += n));
       give('シェル', roll(0.25, 2, 5), (n) => (inv.shells += n));
       give('布', roll(0.25, 1, 2), (n) => (inv.cloth += n));
       give('食料', roll(0.25, 1, 1), (n) => (inv.food += n));
-      give('武器パーツ', roll(0.15, 1, 1), (n) => (inv.parts += n));
-      give('救急', roll(0.12, 1, 1), (n) => (inv.medkit += n));
+      give('武器パーツ', roll(0.1, 1, 1), (n) => (inv.parts += n));
+      give('救急', roll(0.08, 1, 1), (n) => (inv.medkit += n));
     } else {
-      give('弾薬', roll(0.8, 14, 28), (n) => (inv.ammo += n));
+      give('弾薬', roll(0.75, 10, 18), (n) => (inv.ammo += n));
       give('シェル', roll(0.5, 4, 8), (n) => (inv.shells += n));
       give('火薬', roll(0.6, 2, 4), (n) => (inv.gunpowder += n));
-      give('武器パーツ', roll(0.75, 1, 2), (n) => (inv.parts += n));
-      give('救急', roll(0.35, 1, 1), (n) => (inv.medkit += n));
+      give('武器パーツ', roll(0.6, 1, 2), (n) => (inv.parts += n));
+      give('救急', roll(0.25, 1, 1), (n) => (inv.medkit += n));
       if (!inv.shotgun && R() < 0.22) {
         inv.shotgun = 1;
         inv.smag = WEAPONS.shotgun.magSize;
@@ -878,6 +942,15 @@ export class HostSimulation {
   }
 
   private swingAxe(p: SimPlayer): void {
+    if (p.stamina < PLAYER.meleeStamina) {
+      if (p.warnCd <= 0) {
+        this.pop(p, 'スタミナ切れ！', '#ffb347');
+        p.warnCd = 1;
+      }
+      return;
+    }
+    p.stamina -= PLAYER.meleeStamina;
+    p.staminaDelay = PLAYER.staminaDelay;
     p.swings++;
     this.makeNoise(p.x, p.y, AXE.noiseRadius);
     // ゾンビへの近接攻撃
@@ -980,7 +1053,7 @@ export class HostSimulation {
     this.changed.add(o.id);
     p.builds++;
     this.events.push({ k: 'build', x: cx, y: cy, kind });
-    this.flowTimer = 0; // 経路を即再計算
+    this.flowTimer = Math.min(this.flowTimer, 0.1); // 経路を即再計算
   }
 
   private repair(p: SimPlayer): void {
@@ -1095,7 +1168,7 @@ export class HostSimulation {
       flow[i] = 0;
       heap.push(0, i);
     }
-    const cost = new Float32Array(MAP_W * MAP_H).fill(-2);
+    const cost = new Float64Array(MAP_W * MAP_H).fill(-2);
     const getCost = (i: number) => {
       if (cost[i] === -2) cost[i] = this.enterCost(i);
       return cost[i];
@@ -1141,12 +1214,12 @@ export class HostSimulation {
         const pos = this.findSpawn(anchor.x + Math.cos(ang) * 820, anchor.y + Math.sin(ang) * 820, 160, 600);
         if (!pos) break;
         const r = Math.random();
-        const bruteRate = Math.min(0.2, 0.06 + 0.012 * this.day);
+        const bruteRate = Math.min(0.24, 0.08 + 0.014 * this.day);
         const type: ZombieType = r < bruteRate ? 'brute' : r < 0.45 ? 'runner' : 'walker';
         this.spawnZombie(type, pos.x, pos.y, true);
         this.hordeSpawned++;
       }
-      this.spawnTimer = Math.max(0.5, 1.6 - this.day * 0.05);
+      this.spawnTimer = Math.max(0.35, 1.25 - this.day * 0.05) / (1 + 0.25 * (this.players.length - 1));
       return;
     }
 
@@ -1163,7 +1236,7 @@ export class HostSimulation {
     }
     const roaming = this.zombies.filter((z) => !z.horde).length;
     const night = this.phase !== 'day';
-    const target = Math.min(55, night ? 14 + this.day * 3 : 8 + this.day * 2) * (1 + 0.25 * (this.players.length - 1));
+    const target = Math.min(60, night ? 14 + this.day * 3 : 8 + this.day * 2) * (1 + 0.4 * (this.players.length - 1));
     if (roaming < target && this.zombies.length < MAX_ZOMBIES) {
       const pos = this.findSpawn(Math.random() * WORLD_W, Math.random() * WORLD_H, 2000, night ? 520 : 680);
       if (pos) {
@@ -1207,7 +1280,9 @@ export class HostSimulation {
   }
 
   private spawnZombie(type: ZombieType, x: number, y: number, horde: boolean): void {
-    const hp = ZOMBIE[type].hp * (1 + 0.08 * (this.day - 1));
+    // 大襲撃のゾンビは人数が多いほどタフになる（火力の増加分を相殺）
+    const teamMul = horde ? 1 + 0.1 * (this.players.length - 1) : 1;
+    const hp = ZOMBIE[type].hp * (1 + 0.08 * (this.day - 1)) * teamMul;
     this.zombies.push({
       id: this.nextId++,
       type,
@@ -1523,7 +1598,7 @@ export class HostSimulation {
     this.changed.delete(o.id);
     this.removed.push(o.id);
     this.events.push({ k: 'break', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });
-    this.flowTimer = 0;
+    this.flowTimer = Math.min(this.flowTimer, 0.1);
   }
 
   /** 自動タレット：射程内で視線の通る最寄りのゾンビを撃つ */
@@ -1590,7 +1665,7 @@ export class HostSimulation {
       if (o.kind === 'crate' || o.kind === 'mcrate') o.ready = 1;
       else o.hp = o.maxHp;
       this.changed.add(o.id);
-      if (o.kind !== 'crate' && o.kind !== 'mcrate') this.flowTimer = 0;
+      if (o.kind !== 'crate' && o.kind !== 'mcrate') this.flowTimer = Math.min(this.flowTimer, 0.1);
     }
   }
 }

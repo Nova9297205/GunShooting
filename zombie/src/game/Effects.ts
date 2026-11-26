@@ -96,6 +96,8 @@ export class Effects {
   listener = { x: 0, y: 0 };
   /** タレットごとの最後の射撃方向（見た目用） */
   turretAim = new Map<number, { a: number; flash: number }>();
+  /** 仲間のピン（プレイヤーごとに1つ） */
+  pings: { id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go'; life: number }[] = [];
 
   /** 位置に応じて減衰する画面揺れ */
   shakeAt(x: number, y: number, amount: number): void {
@@ -260,6 +262,8 @@ export class Effects {
     }
     this.corpses = this.corpses.filter((c) => c.life > 0);
     for (const t of this.turretAim.values()) t.flash = Math.max(0, t.flash - dt);
+    for (const p of this.pings) p.life -= dt;
+    this.pings = this.pings.filter((p) => p.life > 0);
     const kk = Math.exp(-14 * dt);
     this.kickX *= kk;
     this.kickY *= kk;
@@ -378,6 +382,11 @@ export class Effects {
         this.turretAim.set(ev.id, { a: ev.a, flash: 0.06 });
         this.burst(ev.x + Math.cos(ev.a) * 24, ev.y + Math.sin(ev.a) * 24, '#ffd27a', 3, 180, 0.12, 1.5, 'spark', true, ev.a, 0.6);
         this.casing(ev.x - Math.cos(ev.a) * 12, ev.y - Math.sin(ev.a) * 12, ev.a, 'rifle');
+        break;
+      case 'ping':
+        this.pings = this.pings.filter((p) => p.id !== ev.id);
+        this.pings.push({ id: ev.id, x: ev.x, y: ev.y, t: ev.t, life: 7 });
+        this.ring(ev.x, ev.y, ev.t === 'enemy' ? '#ff5c5c' : ev.t === 'loot' ? '#ffd84d' : PLAYER_COLORS[ev.id] ?? '#fff', 60, 0.6);
         break;
       case 'noise':
         this.ring(ev.x, ev.y, '#5a6270', 46, 0.25); // 銃声（騒音）の小さな波紋

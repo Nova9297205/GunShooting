@@ -311,7 +311,7 @@ details.controls summary {
 
 #hud-buttons {
   position: fixed;
-  top: 12px;
+  bottom: 14px;
   right: 12px;
   display: flex;
   gap: 6px;
@@ -446,4 +446,58 @@ details.controls summary {
   font-size: 11px;
   color: #6f7a90;
   text-align: center;
+}
+
+.chest-sub {
+  font-size: 11px;
+  font-weight: 700;
+  color: #8f9bb3;
+  margin-right: auto;
+}
+.chest-row {
+  display: grid;
+  grid-template-columns: 1fr 56px 92px 92px 56px;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: #1a2130;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+.chest-row.head {
+  background: transparent;
+  font-size: 11px;
+  color: #8f9bb3;
+}
+.chest-row .c-num {
+  text-align: center;
+  font-weight: 800;
+}
+.chest-row .c-num.chest {
+  color: #9fd8ff;
+}
+.chest-row button,
+.chest-all {
+  appearance: none;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 12px;
+  font-weight: 700;
+  background: #2f4a66;
+  color: #e6ebf5;
+  cursor: pointer;
+}
+.chest-row button:disabled,
+.chest-all:disabled {
+  background: #222936;
+  color: #5d6780;
+  cursor: not-allowed;
+}
+.chest-all {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  background: #4a3a2a;
 }

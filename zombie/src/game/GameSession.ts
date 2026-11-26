@@ -19,6 +19,7 @@ import type {
 } from '../types';
 import { Tool } from '../types';
 import { audio } from './Audio';
+import { ChestMenu } from '../ui/ChestMenu';
 import { CraftMenu } from '../ui/CraftMenu';
 import { AXE, BENCH_RANGE, BLUEPRINTS, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, WEAPONS, ZOMBIE } from './constants';
 import { Effects } from './Effects';
@@ -86,6 +87,8 @@ export class GameSession {
   private campfires: { x: number; y: number }[] = [];
   private craftMenu: CraftMenu;
   private pendingCraft = '';
+  private chestMenu: ChestMenu;
+  private chestOps: string[] = [];
   private hudButtons = document.getElementById('hud-buttons')!;
   private muteBtn = document.getElementById('btn-mute')!;
 
@@ -115,6 +118,14 @@ export class GameSession {
       },
       () => audio.click(),
     );
+    this.chestMenu = new ChestMenu(
+      document.getElementById('chest-panel')!,
+      (op) => {
+        this.chestOps.push(op);
+        audio.click();
+      },
+      () => audio.click(),
+    );
     for (const ob of this.world.objects.values()) {
       if (ob.kind === 'campfire') this.campfires.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE });
     }
@@ -139,6 +150,7 @@ export class GameSession {
   stop(): void {
     this.hudButtons.classList.add('hidden');
     this.craftMenu.destroy();
+    this.chestMenu.destroy();
     this.running = false;
     cancelAnimationFrame(this.rafId);
     clearInterval(this.pumpTimer);
@@ -236,6 +248,8 @@ export class GameSession {
       dashCd: me.dashCd,
       dashDx: me.dashDx,
       dashDy: me.dashDy,
+      stamina: me.stamina,
+      staminaDelay: me.staminaDelay,
     };
     for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
     if (before) {
@@ -316,6 +330,7 @@ export class GameSession {
         bodyAngle: this.pred.bodyAngle,
         dashTime: this.pred.dashTime,
         dashCd: this.pred.dashCd,
+        stamina: this.pred.stamina,
         aim: this.localAim,
         tool: this.localTool,
         inv: { ...meLatest.inv, mag: Math.max(0, meLatest.inv.mag - this.localShotSeqs.length) },
@@ -333,6 +348,7 @@ export class GameSession {
       minute: L.minute,
       phase: L.phase,
       stash: L.stash,
+      chest: L.chest,
       hordeLeft: L.hordeLeft,
       players,
       zombies,
@@ -407,11 +423,26 @@ export class GameSession {
     if (this.localTool !== prevTool || this.localBp !== prevBp) audio.click();
     if (this.input.consume('KeyM')) audio.toggleMute();
     this.muteBtn.textContent = audio.settings.muted ? '🔇' : '🔊';
-    if (this.input.consume('KeyC')) this.craftMenu.toggle();
-    if (this.input.consume('Escape')) this.craftMenu.toggle(false);
-    // 作業台の前で F を押したらクラフトメニュー
+    if (this.input.consume('KeyC')) {
+      this.chestMenu.toggle(false);
+      this.craftMenu.toggle();
+    }
+    if (this.input.consume('Escape')) {
+      this.craftMenu.toggle(false);
+      this.chestMenu.toggle(false);
+    }
+    // チェスト／作業台の前で F を押したらメニュー（チェストを優先）
     let interact = this.input.consume('KeyF');
-    if (interact && myPos && this.nearBench(myPos)) {
+    // チェスト／作業台の前で F → 近いほうのメニューを開く
+    const station = myPos ? this.nearestStation(myPos) : null;
+    if (interact && (this.chestMenu.open || this.craftMenu.open)) {
+      this.chestMenu.toggle(false);
+      this.craftMenu.toggle(false);
+      interact = false;
+    } else if (interact && station === 'chest') {
+      this.chestMenu.toggle(true);
+      interact = false;
+    } else if (interact && station === 'bench') {
       this.craftMenu.toggle(true);
       interact = false;
     }
@@ -431,6 +462,8 @@ export class GameSession {
       interact,
       reload: this.input.consume('KeyR'),
       craft: this.pendingCraft,
+      chest: this.chestOps.shift() ?? '',
+      ping: this.input.consume('KeyG'),
       eat: this.input.consume('KeyQ'),
       heal: this.input.consume('KeyH'),
       tool: this.localTool,
@@ -467,7 +500,10 @@ export class GameSession {
     }
 
     const me = view.players.find((p) => p.id === localId);
-    if (me) this.craftMenu.update(me.inv, view.stash, this.nearBench(me));
+    if (me) {
+      this.craftMenu.update(me.inv, view.stash, this.nearBench(me));
+      this.chestMenu.update(me.inv, view.chest, this.nearKind(me, 'chest', 130));
+    }
     // 弾切れのカチッという音
     if (
       me &&
@@ -548,6 +584,29 @@ export class GameSession {
     }
   }
 
+  /** 近くにある作業台・チェストのうち、より近いほう */
+  private nearestStation(pos: { x: number; y: number }): 'chest' | 'bench' | null {
+    let best: 'chest' | 'bench' | null = null;
+    let bd = Infinity;
+    for (const ob of this.world.objects.values()) {
+      if (ob.kind !== 'chest' && ob.kind !== 'bench') continue;
+      const d = Math.hypot((ob.tx + 0.5) * TILE - pos.x, (ob.ty + 0.5) * TILE - pos.y);
+      const range = ob.kind === 'chest' ? 70 : BENCH_RANGE;
+      if (d <= range && d < bd) {
+        bd = d;
+        best = ob.kind;
+      }
+    }
+    return best;
+  }
+
+  private nearKind(pos: { x: number; y: number }, kind: string, range: number): boolean {
+    for (const ob of this.world.objects.values()) {
+      if (ob.kind === kind && Math.hypot((ob.tx + 0.5) * TILE - pos.x, (ob.ty + 0.5) * TILE - pos.y) <= range) return true;
+    }
+    return false;
+  }
+
   private nearBench(pos: { x: number; y: number }): boolean {
     for (const ob of this.world.objects.values()) {
       if (ob.kind === 'bench' && Math.hypot((ob.tx + 0.5) * TILE - pos.x, (ob.ty + 0.5) * TILE - pos.y) <= BENCH_RANGE) return true;
@@ -577,7 +636,9 @@ export class GameSession {
         }
       }
     if (best) return best;
-    if (this.nearBench(me)) return '[F] / [C] 作業台でクラフト';
+    const station = this.nearestStation(me);
+    if (station === 'chest') return '[F] 共有チェストを開く（仲間と受け渡し）';
+    if (station === 'bench') return '[F] / [C] 作業台でクラフト';
     if (this.localTool !== Tool.Melee) {
       for (const dist of [30, 52]) {
         const ob = this.world.objAt(

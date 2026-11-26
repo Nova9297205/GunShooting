@@ -337,6 +337,7 @@ export function generateWorld(seed: number): GeneratedWorld {
   addObj('box', sh.x + sh.w - 3, sh.y + sh.h - 3);
   addObj('crate', sh.x + sh.w - 3, sh.y + 2);
   addObj('bench', sh.x + 2, sh.y + sh.h - 3);
+  addObj('chest', sh.x + 4, sh.y + sh.h - 3);
 
   // ---- 廃車（道路沿い） ----
   let cars = 0;

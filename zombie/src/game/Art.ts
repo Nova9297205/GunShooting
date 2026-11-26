@@ -380,6 +380,28 @@ export class VectorArt implements ArtSet {
         }
         return true;
       }
+      case 'chest': {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(x + 7, y + 13, 32, 24);
+        const lg = ctx.createLinearGradient(x, y + 6, x, y + 32);
+        lg.addColorStop(0, '#8a5a2e');
+        lg.addColorStop(1, '#5a3a1e');
+        ctx.fillStyle = lg;
+        roundRect(ctx, x + 3, y + 7, 34, 25, 4);
+        ctx.fill();
+        ctx.fillStyle = '#6b4424';
+        roundRect(ctx, x + 3, y + 5, 34, 10, 4); // ふた
+        ctx.fill();
+        ctx.fillStyle = '#c8a24a';
+        ctx.fillRect(x + 3, y + 13, 34, 2);
+        ctx.fillRect(x + 9, y + 5, 2, 27);
+        ctx.fillRect(x + 29, y + 5, 2, 27);
+        ctx.fillStyle = '#e8d080';
+        ctx.fillRect(x + 17, y + 12, 6, 6);
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fillRect(x + 5, y + 6, 30, 2);
+        return true;
+      }
       case 'bench': {
         ctx.fillStyle = 'rgba(0,0,0,0.35)';
         ctx.fillRect(x + 6, y + 12, 36, 26);

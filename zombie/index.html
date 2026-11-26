@@ -31,12 +31,12 @@
         <p class="audio-note">ゲーム中は <kbd>M</kbd> でミュート切替。操作中のウィンドウだけ音が鳴ります。</p>
         <details class="controls">
           <summary>操作方法</summary>
-          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動 / <kbd>マウス</kbd> 照準（夜は懐中電灯）</div>
-          <div><kbd>左クリック</kbd> 攻撃・使用 / <kbd>R</kbd> リロード / <kbd>Shift</kbd> ダッシュ</div>
-          <div><kbd>1</kbd>斧（近接・解体） <kbd>2</kbd>銃 <kbd>3</kbd>ショットガン <kbd>4</kbd>建築・修理 <kbd>5</kbd>食料 <kbd>6</kbd>救急キット（ホイールでも切替）</div>
+          <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動 / <kbd>マウス</kbd> 照準（夜は懐中電灯） / <kbd>Shift</kbd> ダッシュ（スタミナ消費）</div>
+          <div><kbd>左クリック</kbd> 攻撃・使用 / <kbd>R</kbd> リロード</div>
+          <div><kbd>1</kbd>斧 <kbd>2</kbd>銃 <kbd>3</kbd>ショットガン <kbd>4</kbd>建築・修理 <kbd>5</kbd>食料 <kbd>6</kbd>救急（ホイールでも切替）</div>
           <div>建築中：<kbd>B</kbd> 設計図の切替 / <kbd>左クリック</kbd> 設置 / <kbd>右クリック</kbd> 修理</div>
-          <div><kbd>F</kbd> クレートを調べる／アイテム使用 / <kbd>Q</kbd> 食事 / <kbd>H</kbd> 救急キット / <kbd>C</kbd> 火薬→弾薬</div>
-          <div><kbd>E</kbd> 長押しでダウンした味方を蘇生 / <kbd>M</kbd> サウンドのミュート切替</div>
+          <div><kbd>F</kbd> 調べる・チェスト・作業台 / <kbd>C</kbd> クラフト / <kbd>Q</kbd> 食事 / <kbd>H</kbd> 救急キット</div>
+          <div><kbd>E</kbd> 長押しで味方を蘇生 / <kbd>G</kbd>・中クリック ピン / <kbd>M</kbd> ミュート</div>
         </details>
       </div>
     </section>
@@ -85,6 +85,17 @@
       </div>
       <div id="craft-list"></div>
       <p class="craft-hint">[C] / [Esc] で閉じる ・ 木材と鉄はチーム共有、その他は自分の持ち物から消費 ・ ゲームは止まりません</p>
+    </div>
+
+    <!-- 共有チェスト -->
+    <div id="chest-panel" class="craft hidden">
+      <div class="craft-head">
+        <span>共有チェスト</span>
+        <span class="chest-sub">仲間と弾薬・救急キット・素材を受け渡し</span>
+        <button id="chest-close" class="hud-btn">×</button>
+      </div>
+      <div id="chest-list"></div>
+      <p class="craft-hint">[F] / [Esc] で閉じる ・ 木材と鉄はもともとチーム共有です</p>
     </div>
 
     <div id="toast" class="toast hidden"></div>

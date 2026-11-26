@@ -51,7 +51,25 @@ export const PLAYER = {
   starveDps: 1.5,
   foodValue: 40,
   medkitValue: 55,
+  maxStamina: 100,
+  dashStamina: 30,
+  meleeStamina: 8,
+  staminaRegen: 26,
+  staminaDelay: 0.7,
 };
+
+/** 共有チェストに入れられるアイテム（表示名・1回で動かす量） */
+export const CHEST_ITEMS: { id: string; name: string; step: number }[] = [
+  { id: 'ammo', name: '弾薬', step: 12 },
+  { id: 'shells', name: 'シェル', step: 6 },
+  { id: 'gunpowder', name: '火薬', step: 1 },
+  { id: 'food', name: '食料', step: 1 },
+  { id: 'medkit', name: '救急キット', step: 1 },
+  { id: 'cloth', name: '布', step: 1 },
+  { id: 'herb', name: '薬草', step: 1 },
+  { id: 'parts', name: '武器パーツ', step: 1 },
+  { id: 'kit', name: 'タレットキット', step: 1 },
+];
 
 export interface WeaponStats {
   name: string;
@@ -134,6 +152,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
   bench: 1,
   barbed: 140,
   turret: 320,
+  chest: 1,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -148,10 +167,11 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
   'mcrate',
   'bench',
   'turret',
+  'chest',
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */
-export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench']);
+export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench', 'chest']);
 
 /** ゾンビが破壊して進む建築物 */
 export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall', 'turret']);
@@ -237,7 +257,7 @@ export interface Recipe {
 
 /** クラフトレシピ（木材・鉄はチーム共有、それ以外は個人の持ち物から消費） */
 export const RECIPES: Recipe[] = [
-  { id: 'ammo', name: '弾薬 ×12', desc: 'ハンドガン・ライフル用の弾', bench: false, cost: { gunpowder: 1, scrap: 1 } },
+  { id: 'ammo', name: '弾薬 ×10', desc: 'ハンドガン・ライフル用の弾', bench: false, cost: { gunpowder: 1, scrap: 1 } },
   { id: 'shells', name: 'ショットガンシェル ×6', desc: 'ショットガン用の散弾', bench: false, cost: { gunpowder: 2, scrap: 1 } },
   { id: 'medkit', name: '救急キット', desc: 'HPを55回復する', bench: false, cost: { cloth: 2, herb: 1 } },
   { id: 'kit', name: 'タレットキット', desc: '建築ツールで設置。近づくゾンビを自動で撃つ（[F]で弾を補充）', bench: true, cost: { scrap: 8, parts: 2, gunpowder: 2 } },

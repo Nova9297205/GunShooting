@@ -27,7 +27,8 @@ export type ObjKind =
   | 'mcrate'
   | 'bench'
   | 'barbed'
-  | 'turret';
+  | 'turret'
+  | 'chest';
 
 export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'barbed' | 'turret';
 
@@ -69,6 +70,10 @@ export interface InputFrame {
   bp: number;
   /** 右クリック押しっぱなし（建築ツールでは修理） */
   alt: boolean;
+  /** G キー：マウス位置にピンを立てる（押した瞬間のみ） */
+  ping: boolean;
+  /** 共有チェストの操作（例 "d:ammo:10" = 預ける / "w:ammo:10" = 受け取る、なければ空文字） */
+  chest: string;
   /** マウスが指しているタイル座標（建築・修理対象） */
   tx: number;
   ty: number;
@@ -82,6 +87,10 @@ export interface MoveBody {
   dashCd: number;
   dashDx: number;
   dashDy: number;
+  /** スタミナ（ダッシュ・近接で消費） */
+  stamina: number;
+  /** スタミナ回復が始まるまでの待ち時間 */
+  staminaDelay: number;
 }
 
 export interface Inventory {
@@ -191,7 +200,8 @@ export type GameEvent =
   | { k: 'banner'; t: string; s: string; c: string; snd?: SoundKey }
   | { k: 'burn'; x: number; y: number }
   | { k: 'noise'; x: number; y: number; r: number }
-  | { k: 'tshot'; x: number; y: number; a: number; id: number };
+  | { k: 'tshot'; x: number; y: number; a: number; id: number }
+  | { k: 'ping'; id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go' };
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {
@@ -202,6 +212,8 @@ export interface ViewState {
   minute: number;
   phase: TimePhase;
   stash: Stash;
+  /** 拠点の共有チェストの中身 */
+  chest: Record<string, number>;
   hordeLeft: number;
   players: PlayerSnap[];
   zombies: ZombieSnap[];
