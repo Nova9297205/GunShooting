@@ -314,6 +314,8 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
       }
     }
 
+  detailPass(ctx, world);
+
   // ---------- 3) 壁の落ち影（ぼかし） ----------
   const shadow = document.createElement('canvas');
   shadow.width = WORLD_W;
@@ -338,6 +340,7 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
       if (t === T_WALL) drawRuinWall(ctx, tx, ty, terrainAt);
       else if (t === T_WINDOW) drawWindow(ctx, tx, ty, terrainAt);
     }
+  wallWear(ctx, world);
   // ---------- 5) 金網フェンス ----------
   for (let ty = 0; ty < MAP_H; ty++)
     for (let tx = 0; tx < MAP_W; tx++) if (terrainAt(tx, ty) === T_FENCE) drawFence(ctx, tx, ty, terrainAt);
@@ -562,4 +565,377 @@ function drawFence(ctx: CanvasRenderingContext2D, tx: number, ty: number, at: (x
     ctx.fill();
   }
   ctx.restore();
+}
+
+// ======================================================================
+// 細部の描き込み（焼き込み時に1回だけ）
+//   道路：骨材の粒・亀甲状のひび・補修跡・ポットホール・油染み・タイヤ痕・路肩の雑草
+//   草地：枯れ草の株・小石・落ち葉・ごみ　土：小石・乾いた泥のひび
+//   床：木目と節・板の段差／タイルの面取りと目地の汚れ・欠け／コンクリートのヘアクラック
+//   壁際の床に環境遮蔽（暗がり）、壁の天面にひびと欠け、汚染地帯の染み
+// ======================================================================
+export function detailPass(ctx: CanvasRenderingContext2D, world: TileWorld): void {
+  const at = (x: number, y: number) => world.terrainAt(x, y);
+  const indoor = (t: number) => t === T_WOOD || t === T_TILE || t === T_FLOOR;
+  for (let ty = 0; ty < MAP_H; ty++)
+    for (let tx = 0; tx < MAP_W; tx++) {
+      const t = at(tx, ty);
+      const x = tx * TILE;
+      const y = ty * TILE;
+      const r = hash(tx, ty, 301);
+      const R = (i: number) => hash(tx, ty, 400 + i);
+      if (t === T_ROAD) {
+        // 骨材の粒
+        for (let i = 0; i < 26; i++) {
+          ctx.fillStyle = i % 3 ? 'rgba(0,0,0,0.18)' : 'rgba(200,198,190,0.13)';
+          ctx.fillRect(x + R(i) * TILE, y + R(i + 40) * TILE, 1.2, 1.2);
+        }
+        // 亀甲状のひび
+        if (r > 0.82) {
+          ctx.strokeStyle = 'rgba(10,10,10,0.42)';
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          const cx = x + 8 + R(1) * 24;
+          const cy = y + 8 + R(2) * 24;
+          for (let k = 0; k < 6; k++) {
+            const a = (k / 6) * Math.PI * 2 + R(3);
+            const d = 6 + R(k + 4) * 5;
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + Math.cos(a) * d, cy + Math.sin(a) * d);
+            ctx.lineTo(cx + Math.cos(a + 1) * d * 1.3, cy + Math.sin(a + 1) * d * 1.3);
+          }
+          ctx.stroke();
+        }
+        // 補修跡（色の違うアスファルト）
+        if (r > 0.6 && r < 0.66) {
+          ctx.fillStyle = 'rgba(20,20,22,0.35)';
+          ctx.fillRect(x + R(5) * 14, y + R(6) * 14, 16 + R(7) * 14, 12 + R(8) * 10);
+          ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+          ctx.strokeRect(x + R(5) * 14 + 0.5, y + R(6) * 14 + 0.5, 16 + R(7) * 14, 12 + R(8) * 10);
+        }
+        // ポットホール
+        if (r > 0.5 && r < 0.515) {
+          const px = x + 10 + R(9) * 20;
+          const py = y + 10 + R(10) * 20;
+          ctx.fillStyle = 'rgba(14,14,14,0.85)';
+          ctx.beginPath();
+          ctx.ellipse(px, py, 6 + R(11) * 3, 4 + R(12) * 2, R(13) * 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(150,145,135,0.35)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        // 油染み（不規則な重なり）
+        if (r < 0.06) {
+          for (let k = 0; k < 4; k++) {
+            const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 7 + R(k + 20) * 7);
+            g.addColorStop(0, 'rgba(8,8,12,0.4)');
+            g.addColorStop(1, 'rgba(8,8,12,0)');
+            ctx.save();
+            ctx.translate(x + 10 + R(k + 24) * 20, y + 10 + R(k + 28) * 20);
+            ctx.scale(1, 0.6 + R(k + 32) * 0.6);
+            ctx.fillStyle = g;
+            ctx.fillRect(-15, -15, 30, 30);
+            ctx.restore();
+          }
+        }
+        // タイヤ痕（道路の向きに沿って）
+        if (r > 0.92) {
+          const horiz = at(tx - 1, ty) === T_ROAD && at(tx + 1, ty) === T_ROAD;
+          ctx.strokeStyle = 'rgba(12,12,12,0.28)';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          for (const off of [0, 7]) {
+            if (horiz) {
+              ctx.moveTo(x, y + 12 + off);
+              ctx.quadraticCurveTo(x + 20, y + 12 + off + (R(14) - 0.5) * 8, x + TILE, y + 14 + off);
+            } else {
+              ctx.moveTo(x + 12 + off, y);
+              ctx.quadraticCurveTo(x + 12 + off + (R(14) - 0.5) * 8, y + 20, x + 14 + off, y + TILE);
+            }
+          }
+          ctx.stroke();
+        }
+        // 路肩：道路の外側の縁石と、はみ出した雑草
+        for (const [dx, dy] of [
+          [0, -1],
+          [0, 1],
+          [-1, 0],
+          [1, 0],
+        ]) {
+          const n = at(tx + dx, ty + dy);
+          if (n === T_ROAD || n === T_WALL || n === T_WINDOW) continue;
+          ctx.fillStyle = 'rgba(150,145,130,0.28)';
+          if (dy) ctx.fillRect(x, dy < 0 ? y : y + TILE - 2, TILE, 2);
+          else ctx.fillRect(dx < 0 ? x : x + TILE - 2, y, 2, TILE);
+          if (n === T_GRASS) {
+            ctx.strokeStyle = 'rgba(95,105,60,0.55)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let k = 0; k < 5; k++) {
+              const bx = dy ? x + R(k + 50) * TILE : dx < 0 ? x + 1 : x + TILE - 1;
+              const by = dx ? y + R(k + 55) * TILE : dy < 0 ? y + 1 : y + TILE - 1;
+              ctx.moveTo(bx, by);
+              ctx.lineTo(bx + (dx ? -dx * 4 : (R(k) - 0.5) * 3), by + (dy ? -dy * 4 : (R(k) - 0.5) * 3));
+            }
+            ctx.stroke();
+          }
+        }
+      } else if (t === T_GRASS) {
+        // 枯れ草の株（扇状の葉）
+        if (r > 0.45) {
+          const gx = x + 6 + R(1) * 28;
+          const gy = y + 6 + R(2) * 28;
+          const dry = R(3) > 0.5;
+          ctx.lineWidth = 1;
+          for (let k = 0; k < 7; k++) {
+            const a = -Math.PI / 2 + (k - 3) * 0.32 + (R(k + 4) - 0.5) * 0.2;
+            const l = 5 + R(k + 11) * 5;
+            ctx.strokeStyle = dry ? `rgba(${160 + k * 4},${145 + k * 3},90,0.55)` : `rgba(${70 + k * 5},${95 + k * 4},50,0.6)`;
+            ctx.beginPath();
+            ctx.moveTo(gx, gy);
+            ctx.lineTo(gx + Math.cos(a) * l, gy + Math.sin(a) * l);
+            ctx.stroke();
+          }
+          ctx.fillStyle = 'rgba(0,0,0,0.18)';
+          ctx.beginPath();
+          ctx.ellipse(gx + 1, gy + 1, 4, 1.6, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // 小石（影とハイライト付き）
+        for (let i = 0; i < 2; i++) {
+          if (R(i + 20) < 0.55) continue;
+          const px = x + R(i + 22) * TILE;
+          const py = y + R(i + 24) * TILE;
+          const s = 1.5 + R(i + 26) * 2;
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          ctx.beginPath();
+          ctx.ellipse(px + 1, py + 1, s, s * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#8a8476';
+          ctx.beginPath();
+          ctx.ellipse(px, py, s, s * 0.7, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(255,250,230,0.3)';
+          ctx.fillRect(px - s * 0.5, py - s * 0.5, s * 0.6, 0.8);
+        }
+        // 落ち葉・ごみ
+        if (r < 0.12) {
+          for (let i = 0; i < 4; i++) {
+            ctx.fillStyle = ['rgba(150,90,40,0.6)', 'rgba(120,80,40,0.55)', 'rgba(170,130,60,0.5)'][i % 3];
+            ctx.beginPath();
+            ctx.ellipse(x + R(i + 30) * TILE, y + R(i + 34) * TILE, 2, 1.1, R(i + 38) * 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else if (r < 0.14) {
+          ctx.save();
+          ctx.translate(x + R(40) * 30 + 5, y + R(41) * 30 + 5);
+          ctx.rotate(R(42) * 3);
+          ctx.fillStyle = 'rgba(210,205,190,0.7)';
+          ctx.fillRect(-3, -2, 6, 4);
+          ctx.restore();
+        }
+      } else if (t === T_DIRT) {
+        // 乾いた泥のひび
+        if (fbm(x / 70, y / 70, 91, 2) > 0.58) {
+          ctx.strokeStyle = 'rgba(40,30,20,0.35)';
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          for (let k = 0; k < 4; k++) {
+            let cx = x + R(k) * TILE;
+            let cy = y + R(k + 5) * TILE;
+            ctx.moveTo(cx, cy);
+            for (let s = 0; s < 3; s++) {
+              cx += (R(k * 3 + s + 10) - 0.5) * 14;
+              cy += (R(k * 3 + s + 20) - 0.5) * 14;
+              ctx.lineTo(cx, cy);
+            }
+          }
+          ctx.stroke();
+        }
+        for (let i = 0; i < 3; i++) {
+          const px = x + R(i + 30) * TILE;
+          const py = y + R(i + 33) * TILE;
+          const s = 1.2 + R(i + 36) * 2.2;
+          ctx.fillStyle = 'rgba(0,0,0,0.28)';
+          ctx.fillRect(px + 0.8, py + 0.8, s, s * 0.8);
+          ctx.fillStyle = '#968a76';
+          ctx.fillRect(px, py, s, s * 0.8);
+        }
+      } else if (t === T_WOOD) {
+        // 木目（板ごとに細い波線）と節、板の段差のハイライト
+        ctx.lineWidth = 0.6;
+        for (let k = 0; k < 4; k++) {
+          const py = y + k * 10;
+          ctx.fillStyle = 'rgba(255,235,200,0.07)';
+          ctx.fillRect(x, py + 1, TILE, 1);
+          ctx.strokeStyle = 'rgba(40,24,12,0.22)';
+          for (let l = 0; l < 2; l++) {
+            const ly = py + 3.5 + l * 3;
+            ctx.beginPath();
+            ctx.moveTo(x, ly);
+            ctx.bezierCurveTo(x + 13, ly + (R(k * 2 + l) - 0.5) * 2.5, x + 27, ly - (R(k * 2 + l + 9) - 0.5) * 2.5, x + TILE, ly);
+            ctx.stroke();
+          }
+          if (R(k + 20) > 0.85) {
+            ctx.fillStyle = 'rgba(50,28,14,0.45)';
+            ctx.beginPath();
+            ctx.ellipse(x + R(k + 24) * 34 + 3, py + 5, 2.2, 1.3, 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        if (r > 0.8) {
+          // 擦り傷
+          ctx.strokeStyle = 'rgba(220,200,170,0.12)';
+          ctx.beginPath();
+          ctx.moveTo(x + R(30) * 30, y + R(31) * 30);
+          ctx.lineTo(x + R(32) * 40, y + R(33) * 40);
+          ctx.stroke();
+        }
+      } else if (t === T_TILE) {
+        // 1枚ごとの色ムラと面取り、目地の汚れ
+        for (let k = 0; k < 4; k++) {
+          const ox = x + (k % 2) * 20;
+          const oy = y + Math.floor(k / 2) * 20;
+          const v = R(k + 60);
+          ctx.fillStyle = v > 0.5 ? `rgba(255,250,240,${(v - 0.5) * 0.12})` : `rgba(0,0,0,${(0.5 - v) * 0.12})`;
+          ctx.fillRect(ox + 1, oy + 1, 19, 19);
+          ctx.fillStyle = 'rgba(255,255,250,0.1)';
+          ctx.fillRect(ox + 1, oy + 1, 18, 1);
+          ctx.fillRect(ox + 1, oy + 1, 1, 18);
+          ctx.fillStyle = 'rgba(0,0,0,0.12)';
+          ctx.fillRect(ox + 1, oy + 19, 19, 1);
+          ctx.fillRect(ox + 19, oy + 1, 1, 19);
+          if (R(k + 70) > 0.96) {
+            // 剥がれたタイル
+            ctx.fillStyle = '#5a5852';
+            ctx.fillRect(ox + 1, oy + 1, 19, 19);
+            for (let s = 0; s < 6; s++) {
+              ctx.fillStyle = 'rgba(0,0,0,0.25)';
+              ctx.fillRect(ox + 2 + R(k * 6 + s) * 15, oy + 2 + R(k * 6 + s + 3) * 15, 1.5, 1.5);
+            }
+          }
+        }
+      } else if (t === T_FLOOR) {
+        // コンクリートのヘアクラックと染み
+        if (r > 0.7) {
+          ctx.strokeStyle = 'rgba(20,18,16,0.35)';
+          ctx.lineWidth = 0.7;
+          ctx.beginPath();
+          let cx = x + R(1) * TILE;
+          let cy = y + R(2) * TILE;
+          ctx.moveTo(cx, cy);
+          for (let s = 0; s < 5; s++) {
+            cx += (R(s + 3) - 0.5) * 16;
+            cy += (R(s + 9) - 0.5) * 16;
+            ctx.lineTo(cx, cy);
+          }
+          ctx.stroke();
+        }
+        if (r < 0.1) {
+          const g = ctx.createRadialGradient(x + 20, y + 20, 0, x + 20, y + 20, 18);
+          g.addColorStop(0, 'rgba(50,40,28,0.3)');
+          g.addColorStop(1, 'rgba(50,40,28,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x, y, TILE, TILE);
+        }
+      }
+
+      // 壁際の床の暗がり（環境遮蔽）
+      if (indoor(t)) {
+        const ao = (dx: number, dy: number) => {
+          if (!wallLike(at(tx + dx, ty + dy))) return;
+          const g =
+            dx === 0
+              ? ctx.createLinearGradient(0, dy < 0 ? y : y + TILE, 0, dy < 0 ? y + 12 : y + TILE - 12)
+              : ctx.createLinearGradient(dx < 0 ? x : x + TILE, 0, dx < 0 ? x + 12 : x + TILE - 12, 0);
+          g.addColorStop(0, 'rgba(0,0,0,0.38)');
+          g.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = g;
+          if (dx === 0) ctx.fillRect(x, dy < 0 ? y : y + TILE - 12, TILE, 12);
+          else ctx.fillRect(dx < 0 ? x : x + TILE - 12, y, 12, TILE);
+        };
+        ao(0, -1);
+        ao(-1, 0);
+        ao(1, 0);
+        ao(0, 1);
+      }
+    }
+
+  // 汚染地帯：黄緑色の染み・水たまり・枯れた地面
+  for (const loc of world.locations ?? []) {
+    if (!loc.hot) continue;
+    const x0 = (loc.x - 3) * TILE;
+    const y0 = (loc.y - 3) * TILE;
+    const w = (loc.w + 6) * TILE;
+    const hh = (loc.h + 6) * TILE;
+    for (let i = 0; i < 26; i++) {
+      const px = x0 + hash(i, loc.x, 501) * w;
+      const py = y0 + hash(i, loc.y, 502) * hh;
+      const rad = 14 + hash(i, 3, 503) * 34;
+      const g = ctx.createRadialGradient(px, py, 0, px, py, rad);
+      g.addColorStop(0, 'rgba(120,140,40,0.32)');
+      g.addColorStop(0.6, 'rgba(90,100,30,0.16)');
+      g.addColorStop(1, 'rgba(90,100,30,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(px - rad, py - rad, rad * 2, rad * 2);
+      if (i % 4 === 0) {
+        // 毒々しい水たまり
+        ctx.fillStyle = 'rgba(110,135,50,0.45)';
+        ctx.beginPath();
+        ctx.ellipse(px, py, rad * 0.35, rad * 0.22, hash(i, 9, 504) * 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(220,240,150,0.25)';
+        ctx.fillRect(px - rad * 0.15, py - rad * 0.08, rad * 0.18, 1.2);
+      }
+    }
+  }
+}
+
+/** 壁の天面のひび・欠け・すす（壁を描いたあとに重ねる） */
+export function wallWear(ctx: CanvasRenderingContext2D, world: TileWorld): void {
+  for (let ty = 0; ty < MAP_H; ty++)
+    for (let tx = 0; tx < MAP_W; tx++) {
+      if (world.terrainAt(tx, ty) !== T_WALL) continue;
+      const x = tx * TILE;
+      const y = ty * TILE;
+      const r = hash(tx, ty, 611);
+      const R = (i: number) => hash(tx, ty, 620 + i);
+      // レンガの目地の陰
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      for (let row = 1; row < 4; row++) ctx.fillRect(x, y + row * 10, TILE, 1);
+      if (r > 0.72) {
+        ctx.strokeStyle = 'rgba(15,14,12,0.6)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        let cx = x + R(1) * TILE;
+        let cy = y + 2;
+        ctx.moveTo(cx, cy);
+        for (let s = 0; s < 4; s++) {
+          cx += (R(s + 2) - 0.5) * 10;
+          cy += 8 + R(s + 6) * 3;
+          ctx.lineTo(cx, cy);
+        }
+        ctx.stroke();
+      }
+      if (r < 0.2) {
+        // 欠けた角（下地が見える）
+        ctx.fillStyle = '#2e2c28';
+        ctx.beginPath();
+        const cx = x + (R(10) > 0.5 ? TILE : 0);
+        const cy = y + (R(11) > 0.5 ? TILE : 0);
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + (cx > x ? -9 : 9), cy);
+        ctx.lineTo(cx, cy + (cy > y ? -7 : 7));
+        ctx.closePath();
+        ctx.fill();
+      }
+      if (r > 0.3 && r < 0.4) {
+        const g = ctx.createRadialGradient(x + 20, y + 20, 0, x + 20, y + 20, 22);
+        g.addColorStop(0, 'rgba(10,8,6,0.35)');
+        g.addColorStop(1, 'rgba(10,8,6,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(x, y, TILE, TILE);
+      }
+    }
 }

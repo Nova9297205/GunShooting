@@ -26,6 +26,7 @@ import type { Decal, Effects } from './Effects';
 import { clamp } from './physics';
 import { type Viewer, Vision } from './vision';
 import { locationAt, type TileWorld } from './world';
+import { roofCanvas } from './RoofArt';
 import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -363,12 +364,6 @@ export class Renderer {
     const { ctx } = this;
     const mtx = me ? Math.floor(me.x / TILE) : -1;
     const mty = me ? Math.floor(me.y / TILE) : -1;
-    const cols = [
-      ['#4a4038', '#55493f'],
-      ['#3e4044', '#46484c'],
-      ['#4a5040', '#535946'],
-      ['#5a5248', '#625a4f'],
-    ];
     for (const b of this.world.buildings) {
       if (b.x * TILE > x1 || b.y * TILE > y1 || (b.x + b.w) * TILE < x0 || (b.y + b.h) * TILE < y0) continue;
       const inside = mtx > b.x && mty > b.y && mtx < b.x + b.w - 1 && mty < b.y + b.h - 1;
@@ -379,22 +374,21 @@ export class Renderer {
       for (let ty = b.y; ty < b.y + b.h && !seen; ty++) seen = this.vision.tileVisible(b.x, ty) || this.vision.tileVisible(b.x + b.w - 1, ty);
       if (seen !== seenPass) continue;
       if (seen) this.vision.markExplored(b.x, b.y, b.w, b.h);
-      const [c0, c1] = cols[b.roof % cols.length];
+      // 建物ごとに焼き込んだ屋根テクスチャを、見えていないタイルの分だけ切り出して描く
+      const roof = roofCanvas(b);
+      let all = true;
+      for (let ty = b.y; ty < b.y + b.h && all; ty++) for (let tx = b.x; tx < b.x + b.w && all; tx++) if (this.vision.tileVisible(tx, ty)) all = false;
+      if (all) {
+        ctx.drawImage(roof, b.x * TILE, b.y * TILE);
+        continue;
+      }
       for (let ty = b.y; ty < b.y + b.h; ty++)
         for (let tx = b.x; tx < b.x + b.w; tx++) {
-          const edge = tx === b.x || ty === b.y || tx === b.x + b.w - 1 || ty === b.y + b.h - 1;
-          if (this.vision.tileVisible(tx, ty) && (edge || !seenPass)) continue;
-          if (this.vision.tileVisible(tx, ty) && seenPass && !edge) continue;
-          // 波板の屋根（列ごとに明暗）
-          ctx.fillStyle = (tx + ty * 0) % 2 === 0 ? c0 : c1;
-          ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
-          ctx.fillStyle = 'rgba(0,0,0,0.12)';
-          ctx.fillRect(tx * TILE, ty * TILE + 36, TILE, 4);
+          if (this.vision.tileVisible(tx, ty)) continue;
+          const sx = (tx - b.x) * TILE;
+          const sy = (ty - b.y) * TILE;
+          ctx.drawImage(roof, sx, sy, TILE, TILE, tx * TILE, ty * TILE, TILE, TILE);
         }
-      // 屋根の縁と錆
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(b.x * TILE + 1, b.y * TILE + 1, b.w * TILE - 2, b.h * TILE - 2);
     }
   }
 
@@ -489,8 +483,14 @@ export class Renderer {
       this.lastReload.set(p.id, p.reloadT);
       a.lastShots = p.shots;
       a.lastSwings = p.swings;
-      a.recoilV += (-900 * a.recoil - 26 * a.recoilV) * dt;
-      a.recoil += a.recoilV * dt;
+      // リコイルのばね：低FPSでも発散しないよう細かく分けて積分し、範囲も制限する
+      const sub = Math.max(1, Math.ceil(dt / (1 / 240)));
+      const sdt = dt / sub;
+      for (let k = 0; k < sub; k++) {
+        a.recoilV += (-900 * a.recoil - 26 * a.recoilV) * sdt;
+        a.recoil += a.recoilV * sdt;
+      }
+      a.recoil = clamp(a.recoil, -12, 4);
       a.flash = Math.max(0, a.flash - dt);
       a.swing = Math.max(0, a.swing - dt * 3.2);
       if (!Number.isNaN(a.lastX)) {
