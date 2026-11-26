@@ -178,6 +178,9 @@ export interface ObjSnap {
 /** イベントに付ける効果音の種類 */
 export type SoundKey = 'loot' | 'eat' | 'heal' | 'craft' | 'error' | 'day' | 'night' | 'horde' | 'clear' | 'level' | 'alarm';
 
+/** イベントログの重要度（色分け） */
+export type FeedCat = 'danger' | 'loot' | 'up' | 'ally' | 'info';
+
 /** 天候 */
 export type Weather = 'clear' | 'fog' | 'rain' | 'storm';
 
@@ -205,7 +208,7 @@ export type GameEvent =
   | { k: 'search'; id: number; x: number; y: number; done: boolean }
   | { k: 'alert'; x: number; y: number }
   /** 画面左のイベントログ（仲間のダウン・スキル上昇・補給物資など） */
-  | { k: 'feed'; t: string; c: string; id?: number; snd?: SoundKey }
+  | { k: 'feed'; t: string; c: string; id?: number; snd?: SoundKey; cat?: FeedCat }
   /** 弾が装甲に弾かれた */
   | { k: 'ricochet'; x: number; y: number };
 

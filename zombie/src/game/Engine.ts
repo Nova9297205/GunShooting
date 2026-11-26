@@ -378,7 +378,7 @@ export class HostSimulation {
     if (lv > (p.lv[i] ?? 0)) {
       p.lv[i] = lv;
       this.applySkills(p);
-      this.events.push({ k: 'feed', t: `${p.name}：${SKILLS[i].name} Lv${lv}（${SKILLS[i].desc}）`, c: '#c9e08a', id: p.id, snd: 'level' });
+      this.events.push({ k: 'feed', cat: 'up', t: `${p.name}：${SKILLS[i].name} Lv${lv}（${SKILLS[i].desc}）`, c: '#c9e08a', id: p.id, snd: 'level' });
       this.pop(p, `${SKILLS[i].name} Lv${lv}!`, '#c9e08a');
     }
   }
@@ -1052,7 +1052,7 @@ export class HostSimulation {
         this.base[def.id] = lv + 1;
         if (def.id === 'storage') this.resizeStorage();
         this.storage.ver++;
-        this.events.push({ k: 'feed', t: `${p.name} が拠点の${def.name}を強化した（Lv${cur + 2}）`, c: '#e0cfa8', snd: 'level' });
+        this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が拠点の${def.name}を強化した（Lv${cur + 2}）`, c: '#e0cfa8', snd: 'level' });
         this.pop(p, `${def.name} 強化！`, '#e0cfa8', 'craft');
         break;
       }
@@ -1251,7 +1251,7 @@ export class HostSimulation {
     if (o.ready && o.kind !== 'bag') this.gainXp(p, 0, 4 + this.tierAt(o.tx, o.ty) * 3 + (o.kind === 'drop' ? 15 : 0));
     if (o.id === this.dropObj && o.ready) {
       this.dropObj = null;
-      this.events.push({ k: 'feed', t: `${p.name} が補給物資を開けた`, c: '#e0b070' });
+      this.events.push({ k: 'feed', cat: 'loot', t: `${p.name} が補給物資を開けた`, c: '#e0b070' });
     }
     if (o.ready && o.kind !== 'bag') {
       o.ready = 0;
@@ -1383,7 +1383,7 @@ export class HostSimulation {
           d.reviveProgress = 0;
           d.downTimer = 0;
           this.events.push({ k: 'revive', id: d.id, x: d.x, y: d.y });
-          this.events.push({ k: 'feed', t: `${reviver.name} が ${d.name} を救助した`, c: '#9fc48a' });
+          this.events.push({ k: 'feed', cat: 'ally', t: `${reviver.name} が ${d.name} を救助した`, c: '#9fc48a' });
           this.gainXp(reviver, 3, 15);
         }
       } else {
@@ -1412,7 +1412,7 @@ export class HostSimulation {
     p.viewing = 0;
     p.storage = 0;
     this.events.push({ k: 'down', id: p.id, x: p.x, y: p.y });
-    if (this.players.length > 1) this.events.push({ k: 'feed', t: `${p.name} がダウン！ 近くで [E] 長押しで救助（${PLAYER.downTime}秒以内）`, c: '#e07a60', snd: 'alarm' });
+    if (this.players.length > 1) this.events.push({ k: 'feed', cat: 'danger', t: `${p.name} がダウン！ 近くで [E] 長押しで救助（${PLAYER.downTime}秒以内）`, c: '#e07a60', snd: 'alarm' });
   }
 
   /** 戦闘不能：持ち物をすべてその場の袋に落とす（仲間が回収できる） */
@@ -1669,8 +1669,8 @@ export class HostSimulation {
       this.weather = w;
       this.wx = w === 'clear' ? 0 : 1;
     }
-    if (w !== 'clear') this.events.push({ k: 'feed', t: `天候：${WEATHER_FX[w].name} — ${WEATHER_FX[w].desc}`, c: '#aab8c8' });
-    else if (this.weather !== 'clear') this.events.push({ k: 'feed', t: '天候：晴れてきた', c: '#aab8c8' });
+    if (w !== 'clear') this.events.push({ k: 'feed', cat: 'info', t: `天候：${WEATHER_FX[w].name} — ${WEATHER_FX[w].desc}`, c: '#aab8c8' });
+    else if (this.weather !== 'clear') this.events.push({ k: 'feed', cat: 'info', t: '天候：晴れてきた', c: '#aab8c8' });
   }
 
   private updateWeather(dt: number): void {
@@ -1715,7 +1715,7 @@ export class HostSimulation {
         z.homeY = y;
       }
       this.events.push({ k: 'banner', t: '補給物資が投下された', s: '赤い発煙筒の場所へ。レア物資と、それを狙う感染兵士がいる', c: '#e0b070', snd: 'alarm' });
-      this.events.push({ k: 'feed', t: '補給物資が投下された（地図に赤く表示）', c: '#e0b070' });
+      this.events.push({ k: 'feed', cat: 'loot', t: '補給物資が投下された（地図に赤く表示）', c: '#e0b070' });
       return;
     }
   }

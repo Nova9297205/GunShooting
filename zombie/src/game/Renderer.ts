@@ -26,7 +26,7 @@ import type { Decal, Effects } from './Effects';
 import { clamp } from './physics';
 import { type Viewer, Vision } from './vision';
 import { locationAt, type TileWorld } from './world';
-import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
+import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
 /** 落ち影と側面を持つ「高い」建築物 */
@@ -577,7 +577,7 @@ export class Renderer {
 
   private worldLabel(x: number, y: number, text: string, color: string): void {
     const { ctx } = this;
-    ctx.font = 'bold 11px "Segoe UI", sans-serif';
+    ctx.font = 'bold 11px "Noto Sans JP", "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 3;
@@ -732,7 +732,7 @@ export class Renderer {
     for (const p of fx.popups) {
       const t = p.life / p.maxLife;
       ctx.globalAlpha = Math.min(1, t * 2.5);
-      ctx.font = `800 ${p.size}px "Segoe UI", sans-serif`;
+      ctx.font = `800 ${p.size}px "Noto Sans JP", "Segoe UI", sans-serif`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.85)';
       ctx.strokeText(p.text, p.x, p.y);
@@ -960,7 +960,7 @@ export class Renderer {
     ctx.fill();
     ctx.restore();
     const dist = Math.round(Math.hypot(view.drop.x - me.x, view.drop.y - me.y) / TILE);
-    ctx.font = 'bold 10px "Segoe UI", sans-serif';
+    ctx.font = 'bold 10px "Noto Sans JP", "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 3;
@@ -973,23 +973,38 @@ export class Renderer {
   // ---------------- イベントログ ----------------
 
   /** 左上（チーム一覧の下）に最近の出来事を表示 */
-  private drawFeed(fx: Effects): void {
+  private drawFeed(fx: Effects, players: number): void {
     if (!fx.feed.length) return;
     const { ctx } = this;
-    const x = 14;
-    let y = 22 + 40 * 3 + 16;
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
+    const x = 12;
+    let y = 12 + 22 + 36 * players + 10;
+    const CAT: Record<string, [string, string]> = {
+      danger: ['危険', '#d0583e'],
+      loot: ['入手', '#e0a33a'],
+      up: ['強化', '#93b77c'],
+      ally: ['仲間', '#7fa2bf'],
+      info: ['情報', '#8c8872'],
+    };
+    ctx.textBaseline = 'middle';
     for (const f of fx.feed) {
+      const [tag, col] = CAT[f.cat] ?? CAT.info;
       const a = Math.min(1, f.life / 1.2, (9 - f.life) * 5);
       ctx.globalAlpha = a;
-      const tw = Math.min(460, ctx.measureText(f.t).width + 16);
-      ctx.fillStyle = 'rgba(12,13,10,0.72)';
+      ctx.font = `bold 11px ${UI}`;
+      const tw = Math.min(430, ctx.measureText(f.t).width) + 56;
+      ctx.fillStyle = f.cat === 'danger' ? 'rgba(48,16,10,0.82)' : 'rgba(14,15,11,0.8)';
       ctx.fillRect(x, y, tw, 20);
-      ctx.fillStyle = f.c;
-      ctx.fillRect(x, y, 3, 20);
-      ctx.fillText(f.t, x + 9, y + 4, 440);
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y, 2, 20);
+      chipBox(ctx, x + 7, y + 3, 34, 14, col, true);
+      ctx.font = `bold 9px ${UI}`;
+      ctx.fillStyle = '#15170f';
+      ctx.textAlign = 'center';
+      ctx.fillText(tag, x + 24, y + 10.5);
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = f.cat === 'danger' ? '#f4b4a2' : '#e6e1cc';
+      ctx.fillText(f.t, x + 48, y + 10.5, 430);
       y += 23;
     }
     ctx.globalAlpha = 1;
@@ -1052,7 +1067,7 @@ export class Renderer {
     const { ctx } = this;
     const color = PLAYER_COLORS[p.id] ?? '#fff';
     const y = p.y - 32;
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+    ctx.font = 'bold 12px "Noto Sans JP", "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 3;
@@ -1138,7 +1153,7 @@ export class Renderer {
       if (z.alert > 0) {
         const t = z.alert === 2 ? '!' : '?';
         const by = z.y - r - (z.hp < z.maxHp ? 22 : 14) + Math.sin(this.time * 6 + z.id) * 1.5;
-        ctx.font = '900 15px "Segoe UI", sans-serif';
+        ctx.font = '900 15px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.lineWidth = 3;
@@ -1192,53 +1207,36 @@ export class Renderer {
     this.drawLocationToast(me, o.dt, !!fx.banner);
     this.drawAllyIndicators(view, o.localId, o.effects);
     this.drawDropIndicator(view, me);
-    this.drawFeed(fx);
+    this.drawFeed(fx, view.players.length);
     this.drawTeam(view, o.localId);
     if (me) this.drawSelfPanel(view, me);
     this.drawHotbar(o, view);
     this.drawMinimap(view, o.localId);
 
     // モード表示
-    ctx.font = '11px "Segoe UI", sans-serif';
+    ctx.font = `10px ${MONO}`;
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = 'rgba(200,210,225,0.55)';
-    const modeLabel = o.mode === 'solo' ? 'SOLO' : `${o.mode.toUpperCase()}  ROOM: ${o.roomCode ?? ''}`;
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(189,183,158,0.6)';
+    const modeLabel = o.mode === 'solo' ? 'SOLO OPS' : `${o.mode.toUpperCase()} / ROOM ${o.roomCode ?? ''}`;
     ctx.fillText(
-      modeLabel + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : '') + (o.muted ? '   ♪ OFF [M]' : '   ♪ ON [M]') + '   ピン [G]/中クリック',
+      `● ${modeLabel}` + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : '') + (o.muted ? '  SND OFF [M]' : '  SND ON [M]') + '  PING [G]',
       14,
-      h - 18,
+      h - 14,
     );
 
     // ---- 中央メッセージ ----
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     if (me && me.status === 'down') {
-      ctx.font = '900 28px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#c0573e';
-      ctx.fillText('ダウン中！', w / 2, h * 0.3);
-      ctx.font = '15px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#ffd0d5';
-      ctx.fillText(`味方の蘇生を待て（残り ${Math.ceil(me.downTimer)} 秒）`, w / 2, h * 0.3 + 30);
+      centerCard(ctx, w / 2, h * 0.3, 'DOWN — ダウン中', `味方の救助を待て　残り ${Math.ceil(me.downTimer)} 秒`, '#d0583e', this.time);
     } else if (me && me.status === 'dead') {
-      ctx.font = '900 26px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#9aa3b5';
-      ctx.fillText('戦闘不能', w / 2, h * 0.3);
-      ctx.font = '15px "Segoe UI", sans-serif';
-      ctx.fillText('仲間が朝（6:00）まで生き延びれば復帰します', w / 2, h * 0.3 + 30);
+      centerCard(ctx, w / 2, h * 0.3, 'K.I.A. — 戦闘不能', '仲間が朝（6:00）まで生き延びれば拠点で復帰する', '#8c8872', this.time);
     } else {
       let hint: string | null = null;
       if (o.reviveHint) hint = '[E] 長押しで蘇生';
       else if (o.interactHint) hint = o.interactHint;
-      if (hint) {
-        const pulse = 0.75 + Math.sin(this.time * 6) * 0.25;
-        ctx.font = 'bold 16px "Segoe UI", sans-serif';
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-        ctx.strokeText(hint, w / 2, h * 0.64);
-        ctx.fillStyle = o.reviveHint ? `rgba(125,255,176,${pulse})` : `rgba(255,230,150,${pulse})`;
-        ctx.fillText(hint, w / 2, h * 0.64);
-      }
+      if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
     }
 
     if (fx.banner) {
@@ -1251,17 +1249,28 @@ export class Renderer {
       ctx.translate(w / 2, h * 0.24);
       const sc = 1 + (1 - appear) * 0.4;
       ctx.scale(sc, sc);
-      ctx.font = '900 40px "Segoe UI", sans-serif';
-      ctx.lineWidth = 7;
-      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+      // 横帯＋見出し
+      ctx.font = `bold 15px ${UI}`;
+      const bw = Math.max(420, ctx.measureText(b.sub).width + 80);
+      const grd = ctx.createLinearGradient(-bw / 2, 0, bw / 2, 0);
+      grd.addColorStop(0, 'rgba(12,13,10,0)');
+      grd.addColorStop(0.2, 'rgba(12,13,10,0.78)');
+      grd.addColorStop(0.8, 'rgba(12,13,10,0.78)');
+      grd.addColorStop(1, 'rgba(12,13,10,0)');
+      ctx.fillStyle = grd;
+      ctx.fillRect(-bw / 2, -34, bw, 84);
+      ctx.fillStyle = b.color;
+      ctx.fillRect(-bw * 0.3, -34, bw * 0.6, 1);
+      ctx.fillRect(-bw * 0.3, 49, bw * 0.6, 1);
+      ctx.font = `bold 36px ${HEAD}`;
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
       ctx.strokeText(b.text, 0, 0);
       ctx.fillStyle = b.color;
       ctx.fillText(b.text, 0, 0);
-      ctx.font = 'bold 15px "Segoe UI", sans-serif';
-      ctx.lineWidth = 4;
-      ctx.strokeText(b.sub, 0, 36);
-      ctx.fillStyle = '#e6ebf5';
-      ctx.fillText(b.sub, 0, 36);
+      ctx.font = `bold 14px ${UI}`;
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(b.sub, 0, 32);
       ctx.restore();
       ctx.globalAlpha = 1;
     }
@@ -1306,7 +1315,7 @@ export class Renderer {
     ctx.fillStyle = '#fff';
     ctx.fillRect(cx - 1, cy - 1, 2, 2);
     if (me && held && alive) {
-      ctx.font = 'bold 11px "Segoe UI", sans-serif';
+      ctx.font = `12px ${MONO}`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       const st = effectiveStats(held.id, held.w);
@@ -1346,19 +1355,24 @@ export class Renderer {
     }
     const { ctx, w } = this;
     ctx.globalAlpha = Math.min(1, t.life, (3.5 - t.life) * 4);
+    // 場所に入ったときの表示：上部中央の細い帯
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.font = '900 22px "Segoe UI", sans-serif';
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-    ctx.strokeText(t.text, w / 2, 90);
+    ctx.textBaseline = 'middle';
+    ctx.font = `bold 12px ${UI}`;
+    const bw = Math.max(300, ctx.measureText(t.sub).width + 60);
+    const y = 96;
+    ctx.fillStyle = 'rgba(12,13,10,0.78)';
+    ctx.fillRect(w / 2 - bw / 2, y - 22, bw, 50);
+    brackets(ctx, w / 2 - bw / 2, y - 22, bw, 50, t.color, 8, 1.5);
+    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = 'rgba(189,183,158,0.7)';
+    ctx.fillText('ENTERING AREA', w / 2, y - 12);
+    ctx.font = `bold 18px ${UI}`;
     ctx.fillStyle = t.color;
-    ctx.fillText(t.text, w / 2, 90);
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
-    ctx.lineWidth = 4;
-    ctx.strokeText(t.sub, w / 2, 118);
-    ctx.fillStyle = '#e6ebf5';
-    ctx.fillText(t.sub, w / 2, 118);
+    ctx.fillText(t.text, w / 2, y + 4);
+    ctx.font = `bold 11px ${UI}`;
+    ctx.fillStyle = '#d8d2b8';
+    ctx.fillText(t.sub, w / 2, y + 19);
     ctx.globalAlpha = 1;
   }
 
@@ -1442,12 +1456,12 @@ export class Renderer {
         ctx.strokeStyle = down ? '#b03a2e' : col;
         ctx.lineWidth = 2;
         ctx.stroke();
-        ctx.font = 'bold 11px "Segoe UI", sans-serif';
+        ctx.font = 'bold 11px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = down ? '#c98070' : col;
         ctx.fillText(down ? 'SOS' : p.name.slice(0, 2), e.x, e.y);
-        ctx.font = 'bold 10px "Segoe UI", sans-serif';
+        ctx.font = 'bold 10px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.lineWidth = 3;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
         const label = down ? `${p.name} 助けて！ ${dist}m・残り${Math.ceil(p.downTimer)}s` : `${p.name} ${dist}m`;
@@ -1461,7 +1475,7 @@ export class Renderer {
         // すぐそばにいるときは画面下の「[E] 長押しで蘇生」と重複するので進捗だけ出す
         if (me && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange && p.reviveProgress <= 0) continue;
         const pulse = 0.7 + Math.sin(this.time * 8) * 0.3;
-        ctx.font = '900 16px "Segoe UI", sans-serif';
+        ctx.font = '900 16px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.lineWidth = 4;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
@@ -1488,7 +1502,7 @@ export class Renderer {
       ctx.lineTo(4, 7);
       ctx.stroke();
       ctx.restore();
-      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      ctx.font = 'bold 10px "Noto Sans JP", "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = col;
@@ -1500,96 +1514,138 @@ export class Renderer {
   private drawClock(view: ViewState, me?: PlayerSnap): void {
     const { ctx, w } = this;
     const pw = 300;
+    const ph = 62;
     const x = w - pw - 12;
-    const cxm = x + pw / 2;
-    panel(ctx, x, 10, pw, 66);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    const icon = view.phase === 'day' ? '☀' : '☾';
-    const label = view.phase === 'day' ? '昼' : '夜';
-    ctx.font = '900 22px "Segoe UI", sans-serif';
-    ctx.fillStyle = view.phase === 'night' ? '#aab4c8' : '#e0cfa8';
-    const wname = view.wx > 0.3 ? { clear: '', fog: ' 霧', rain: ' 雨', storm: ' 嵐' }[view.weather] : '';
-    ctx.fillText(`Day ${view.day} - ${formatClock(view.minute)}  ${icon} ${label}${wname}`, cxm, 16);
+    const y = 12;
+    panel(ctx, x, y, pw, ph);
+    // 時刻（等幅）と昼夜
+    const night = view.phase === 'night';
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    ctx.font = `22px ${MONO}`;
+    ctx.fillStyle = night ? '#b4c0d4' : '#efe6c4';
+    ctx.fillText(formatClock(view.minute), x + 12, y + 28);
+    ctx.font = `11px ${MONO}`;
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText(`DAY ${String(view.day).padStart(2, '0')}`, x + 84, y + 27);
+    // 右上のバッジ：昼夜・天候
+    let bx = x + pw - 10;
+    const badge = (t: string, c: string, fill = false) => {
+      ctx.font = `bold 10px ${UI}`;
+      const tw = ctx.measureText(t).width + 12;
+      bx -= tw;
+      chipBox(ctx, bx, y + 11, tw, 17, c, fill);
+      ctx.fillStyle = fill ? '#15170f' : c;
+      ctx.textAlign = 'center';
+      ctx.fillText(t, bx + tw / 2, y + 23);
+      ctx.textAlign = 'left';
+      bx -= 4;
+    };
+    if (view.wx > 0.3 && view.weather !== 'clear') badge({ fog: '霧', rain: '雨', storm: '嵐', clear: '' }[view.weather], '#9fb4c8');
+    badge(night ? '☾ 夜' : '☀ 昼', night ? '#9fb4c8' : '#e0a33a', !night);
 
-    // 時間バー（昼=黄 / 夜=青）
-    const bx = x + 16;
-    const bw = pw - 32;
-    const by = 44;
+    // 時間バー（昼=アンバー / 夜=青）＋目盛り
+    const bx0 = x + 12;
+    const bw = pw - 24;
+    const by = y + 36;
     const dayFrac = DAY_SECONDS / CYCLE_SECONDS;
-    ctx.fillStyle = '#6b5a2a';
-    ctx.fillRect(bx, by, bw * dayFrac, 4);
-    ctx.fillStyle = '#26305a';
-    ctx.fillRect(bx + bw * dayFrac, by, bw * (1 - dayFrac), 4);
+    ctx.fillStyle = 'rgba(224,163,58,0.35)';
+    ctx.fillRect(bx0, by, bw * dayFrac, 3);
+    ctx.fillStyle = 'rgba(110,140,190,0.4)';
+    ctx.fillRect(bx0 + bw * dayFrac, by, bw * (1 - dayFrac), 3);
+    ctx.fillStyle = 'rgba(230,225,204,0.3)';
+    for (let k = 0; k <= 12; k++) ctx.fillRect(bx0 + (bw * k) / 12, by + 4, 1, k % 3 === 0 ? 3 : 2);
     const m = view.minute;
     const cyc = m >= 360 && m < 1200 ? ((m - 360) / 840) * dayFrac : dayFrac + (((m - 1200 + 1440) % 1440) / 600) * (1 - dayFrac);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(bx + bw * clamp(cyc, 0, 1) - 1, by - 3, 3, 10);
+    const px = bx0 + bw * clamp(cyc, 0, 1);
+    ctx.fillStyle = '#efe6c4';
+    ctx.beginPath();
+    ctx.moveTo(px, by - 1);
+    ctx.lineTo(px - 4, by - 6);
+    ctx.lineTo(px + 4, by - 6);
+    ctx.closePath();
+    ctx.fill();
 
-    // 現在地の危険度
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+    // 現在地と危険度
     let sub = '野外';
-    let col = '#c3cbe0';
+    let col = '#bdb79e';
+    let tag = '';
     if (me) {
       const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
       if (loc?.kind === 'base') {
-        sub = '拠点（安全地帯）— 焚き火のそばで回復';
-        col = '#9fc48a';
+        sub = '拠点 — 安全地帯';
+        col = '#93b77c';
+        tag = 'SAFE';
       } else if (loc) {
-        sub = `${loc.name}  ${'★'.repeat(loc.tier)}${loc.hot ? ' ☣ 汚染地帯' : loc.tier >= 3 ? ' 危険' : ''}`;
-        col = loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8b870' : '#c3cbe0';
-      } else if (view.phase === 'night') {
-        sub = '野外（夜は徘徊者が増える）';
-      }
+        sub = loc.name;
+        col = loc.hot ? '#d68ac8' : loc.tier >= 3 ? '#e07a5e' : loc.tier === 2 ? '#e0b862' : '#bdb79e';
+        tag = loc.hot ? '☣ 汚染' : '★'.repeat(loc.tier);
+      } else if (view.phase === 'night') sub = '野外 — 夜は徘徊者が多い';
     }
+    ctx.font = `bold 11px ${UI}`;
     ctx.fillStyle = col;
-    ctx.fillText(sub, cxm, 54);
+    ctx.fillText(sub, x + 12, y + 55, pw - 80);
+    if (tag) {
+      ctx.textAlign = 'right';
+      ctx.fillText(tag, x + pw - 12, y + 55);
+      ctx.textAlign = 'left';
+    }
   }
 
   private drawTeam(view: ViewState, localId: number): void {
     const { ctx } = this;
-    const pw = 200;
-    const rowH = 40;
+    const pw = 224;
+    const rowH = 36;
     const x = 12;
     const y0 = 12;
-    panel(ctx, x, y0, pw, 10 + rowH * view.players.length);
+    panel(ctx, x, y0, pw, 22 + rowH * view.players.length);
+    ctx.font = `10px ${MONO}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// SQUAD', x + 10, y0 + 11);
+    ctx.fillStyle = '#8c8872';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${view.players.filter((p) => p.status !== 'dead').length}/${view.players.length} ACTIVE`, x + pw - 10, y0 + 11);
     view.players.forEach((p, i) => {
-      const y = y0 + 8 + i * rowH;
+      const y = y0 + 22 + i * rowH;
       const color = PLAYER_COLORS[p.id];
+      ctx.fillStyle = 'rgba(255,255,240,0.03)';
+      ctx.fillRect(x + 6, y, pw - 12, rowH - 4);
       ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(x + 14, y + 9, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.fillRect(x + 6, y, 3, rowH - 4);
       ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = '#fff';
-      ctx.fillText(p.name + (p.id === localId ? ' (YOU)' : ''), x + 24, y + 2);
+      ctx.font = `bold 12px ${UI}`;
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(p.name, x + 15, y + 9, 110);
+      if (p.id === localId) {
+        ctx.font = `9px ${MONO}`;
+        ctx.fillStyle = '#93b77c';
+        ctx.fillText('YOU', x + 15 + Math.min(110, ctx.measureText(p.name).width * 1.25) + 6, y + 9);
+      }
       ctx.textAlign = 'right';
-      ctx.fillStyle = '#aab4c8';
-      ctx.font = '11px "Segoe UI", sans-serif';
-      ctx.fillText(`☠${p.kills}  ▣${p.bag.filter((b) => b).length}/${p.bag.length}`, x + pw - 10, y + 3);
-      const bw = pw - 36;
-      ctx.fillStyle = 'rgba(255,255,255,0.1)';
-      ctx.fillRect(x + 24, y + 19, bw, 5);
-      ctx.fillRect(x + 24, y + 27, bw, 3);
+      ctx.font = `10px ${MONO}`;
+      ctx.fillStyle = '#8c8872';
+      ctx.fillText(`K${p.kills} ▣${p.bag.filter((b) => b).length}`, x + pw - 12, y + 9);
+      const bw = pw - 30;
       if (p.status === 'alive') {
-        ctx.fillStyle = color;
-        ctx.fillRect(x + 24, y + 19, bw * clamp(p.hp / p.maxHp, 0, 1), 5);
+        segBar(ctx, x + 15, y + 18, bw, 5, p.hp / p.maxHp, p.hp / p.maxHp > 0.3 ? color : '#d0583e', 20);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(x + 15, y + 26, bw, 2);
         ctx.fillStyle = '#b08a50';
-        ctx.fillRect(x + 24, y + 27, bw * clamp(p.hunger / 100, 0, 1), 3);
+        ctx.fillRect(x + 15, y + 26, bw * clamp(p.hunger / 100, 0, 1), 2);
       } else if (p.status === 'down') {
-        ctx.fillStyle = '#b4483a';
-        ctx.fillRect(x + 24, y + 19, bw * clamp(p.downTimer / PLAYER.downTime, 0, 1), 5);
-        ctx.font = 'bold 10px sans-serif';
-        ctx.fillStyle = '#c98a80';
-        ctx.textAlign = 'right';
-        ctx.fillText(`DOWN ${Math.ceil(p.downTimer)}s`, x + pw - 10, y + 26);
-      } else {
-        ctx.font = 'bold 10px sans-serif';
-        ctx.fillStyle = '#9aa3b5';
+        const pulse = 0.6 + Math.sin(this.time * 8) * 0.4;
+        segBar(ctx, x + 15, y + 18, bw, 5, p.downTimer / PLAYER.downTime, `rgba(208,88,62,${pulse})`, 20);
         ctx.textAlign = 'left';
-        ctx.fillText('戦闘不能', x + 24, y + 18);
+        ctx.font = `bold 9px ${MONO}`;
+        ctx.fillStyle = '#ef8a70';
+        ctx.fillText(`DOWN ${Math.ceil(p.downTimer)}s — 救助を！`, x + 15, y + 30);
+      } else {
+        ctx.textAlign = 'left';
+        ctx.font = `bold 10px ${UI}`;
+        ctx.fillStyle = '#8c8872';
+        ctx.fillText('K.I.A. — 夜明けに拠点で復帰', x + 15, y + 22);
       }
     });
   }
@@ -1597,112 +1653,165 @@ export class Renderer {
   private drawSelfPanel(view: ViewState, me: PlayerSnap): void {
     const { ctx, h } = this;
     const x = 12;
-    const pw = 230;
-    const ph = 132;
-    const y = h - ph - 28;
-    panel(ctx, x, y, pw, ph);
-    ctx.textAlign = 'left';
+    const pw = 262;
+    const ph = 150;
+    const y = h - ph - 30;
+    const low = me.hp / me.maxHp < 0.3;
+    const hungry = me.hunger < 25;
+    const tired = me.stamina < PLAYER.dashStamina;
+    panel(ctx, x, y, pw, ph, undefined, low ? `rgba(208,88,62,${0.55 + Math.sin(this.time * 7) * 0.35})` : undefined);
     ctx.textBaseline = 'middle';
-    const bar = (label: string, by: number, ratio: number, color: string, text: string) => {
-      ctx.font = 'bold 11px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#aab4c8';
-      ctx.fillText(label, x + 10, by + 5);
-      ctx.fillStyle = 'rgba(255,255,255,0.1)';
-      ctx.fillRect(x + 46, by, pw - 58, 10);
-      ctx.fillStyle = color;
-      ctx.fillRect(x + 46, by, (pw - 58) * clamp(ratio, 0, 1), 10);
-      ctx.font = 'bold 9px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#fff';
+    // ヘッダー
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// VITALS', x + 10, y + 11);
+    // 警告チップ
+    let cx = x + pw - 10;
+    const warn = (t: string, c: string) => {
+      ctx.font = `bold 9px ${UI}`;
+      const tw = ctx.measureText(t).width + 10;
+      cx -= tw;
+      const blink = Math.sin(this.time * 7) > -0.2;
+      chipBox(ctx, cx, y + 4, tw, 14, c, blink);
+      ctx.fillStyle = blink ? '#15170f' : c;
       ctx.textAlign = 'center';
-      ctx.fillText(text, x + 46 + (pw - 58) / 2, by + 5);
+      ctx.fillText(t, cx + tw / 2, y + 11.5);
       ctx.textAlign = 'left';
+      cx -= 4;
+    };
+    if (low) warn('出血・HP低下', '#d0583e');
+    if (hungry) warn('空腹', '#e0a33a');
+    if (tired) warn('息切れ', '#7fa2bf');
+
+    const bar = (label: string, by: number, ratio: number, color: string, val: string, flash: boolean) => {
+      ctx.font = `bold 10px ${UI}`;
+      ctx.fillStyle = flash ? `rgba(239,138,112,${0.6 + Math.sin(this.time * 9) * 0.4})` : '#bdb79e';
+      ctx.textAlign = 'left';
+      ctx.fillText(label, x + 10, by + 5);
+      segBar(ctx, x + 50, by, pw - 112, 10, ratio, color, 24);
+      ctx.font = `12px ${MONO}`;
+      ctx.fillStyle = flash ? '#ef8a70' : '#e6e1cc';
+      ctx.textAlign = 'right';
+      ctx.fillText(val, x + pw - 10, by + 5.5);
     };
     const hr = me.hp / me.maxHp;
-    bar('HP', y + 10, hr, hr > 0.5 ? '#7fa35e' : hr > 0.25 ? '#c9a85a' : '#c0573e', `${Math.max(0, Math.ceil(me.hp))} / ${me.maxHp}`);
-    const st = me.stamina / PLAYER.maxStamina;
-    bar('体力', y + 26, st, st >= PLAYER.dashStamina / PLAYER.maxStamina ? '#6f93b0' : '#2d5a8a', me.stamina >= PLAYER.dashStamina && me.dashCd <= 0 ? 'スタミナ  DASH OK [Shift]' : 'スタミナ');
+    bar('HP', y + 24, hr, hr > 0.5 ? '#93b77c' : hr > 0.3 ? '#e0a33a' : '#d0583e', `${Math.max(0, Math.ceil(me.hp))}`, low);
+    const smax = me.stmMax ?? PLAYER.maxStamina;
+    bar('体力', y + 40, me.stamina / smax, tired ? '#3d5a78' : '#7fa2bf', `${Math.round(me.stamina)}`, false);
     // ダッシュに必要な量の目盛り
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.fillRect(x + 46 + (pw - 58) * (PLAYER.dashStamina / PLAYER.maxStamina), y + 26, 1, 10);
-    bar('空腹', y + 42, me.hunger / 100, me.hunger > 25 ? '#b08a50' : '#c0573e', `${Math.ceil(me.hunger)}%`);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillRect(x + 50 + (pw - 112) * (PLAYER.dashStamina / smax), y + 39, 1, 12);
+    bar('空腹', y + 56, me.hunger / 100, me.hunger > 25 ? '#b08a50' : '#d0583e', `${Math.ceil(me.hunger)}%`, hungry);
 
-    // 装備と持ち物の要約
-    const held = heldWeapon({ ...me, tool: Tool.Primary }) ?? null;
-    const side = heldWeapon({ ...me, tool: Tool.Secondary }) ?? null;
-    const wtxt = (s: typeof held, label: string, iy: number) => {
-      ctx.font = '10px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#8f9bb3';
+    // 区切り
+    ctx.fillStyle = 'rgba(190,180,130,0.18)';
+    ctx.fillRect(x + 10, y + 72, pw - 20, 1);
+    // 装備
+    const wline = (key: 'prim' | 'sec', label: string, iy: number) => {
+      const s = heldWeapon({ ...me, tool: key === 'prim' ? Tool.Primary : Tool.Secondary });
+      ctx.textAlign = 'left';
+      ctx.font = `9px ${MONO}`;
+      ctx.fillStyle = '#8c8872';
       ctx.fillText(label, x + 10, iy);
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
       if (!s) {
-        ctx.fillStyle = '#6f7a90';
-        ctx.fillText('—', x + 46, iy);
+        ctx.font = `bold 11px ${UI}`;
+        ctx.fillStyle = '#5e5c4c';
+        ctx.fillText('— 未装備 —', x + 50, iy);
         return;
       }
       const st = effectiveStats(s.id, s.w);
-      const mods = (['scope', 'suppressor', 'extmag', 'grip'] as const).filter((a) => s.w[a]).length;
-      ctx.fillStyle = '#e6dcc0';
-      ctx.fillText(`${ITEMS[s.id].name}${mods ? ` +${mods}` : ''}`, x + 46, iy);
+      const mods = ATTACHMENTS.filter((a) => s.w[a]).length;
+      ctx.font = `bold 12px ${UI}`;
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(ITEMS[s.id].name, x + 50, iy, 120);
+      let ax = x + 50 + Math.min(120, ctx.measureText(ITEMS[s.id].name).width) + 6;
+      if (mods) {
+        ctx.font = `10px ${MONO}`;
+        ctx.fillStyle = '#93b77c';
+        ctx.fillText(`+${mods}`, ax, iy);
+        ax += 18;
+      }
+      if (s.w.ap) ammoBadge(ctx, ax, iy - 7, s.id === 'shotgun' ? 'SLG' : 'AP');
       ctx.textAlign = 'right';
-      ctx.fillStyle = s.w.mag === 0 ? '#c06a5a' : '#c9a85a';
-      ctx.fillText(`${s.w.mag}/${countItem(me.bag, st.ammo)}`, x + pw - 10, iy);
-      ctx.textAlign = 'left';
+      ctx.font = `13px ${MONO}`;
+      ctx.fillStyle = s.w.mag === 0 ? '#ef8a70' : '#e0b862';
+      ctx.fillText(`${String(s.w.mag).padStart(2, '0')}/${countItem(me.bag, st.ammo)}`, x + pw - 10, iy);
     };
-    wtxt(held, 'メイン', y + 66);
-    wtxt(side, 'サブ', y + 84);
+    wline('prim', 'PRI', y + 86);
+    wline('sec', 'SEC', y + 104);
+    // バッグの使用状況
     const used = me.bag.filter((b) => b).length;
-    ctx.font = '10px "Segoe UI", sans-serif';
-    ctx.fillStyle = '#8f9bb3';
-    ctx.fillText('バッグ', x + 10, y + 102);
+    ctx.textAlign = 'left';
+    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText('BAG', x + 10, y + 122);
+    const cw = (pw - 112) / me.bag.length;
     for (let i = 0; i < me.bag.length; i++) {
-      ctx.fillStyle = me.bag[i] ? '#b8a878' : 'rgba(255,255,255,0.12)';
-      ctx.fillRect(x + 46 + i * 9, y + 98, 7, 8);
+      ctx.fillStyle = me.bag[i] ? '#b8a878' : 'rgba(255,255,255,0.1)';
+      ctx.fillRect(x + 50 + i * cw, y + 118, cw - 2, 8);
     }
     ctx.textAlign = 'right';
-    ctx.fillStyle = used >= me.bag.length ? '#c06a5a' : '#c3cbe0';
-    ctx.font = 'bold 10px "Segoe UI", sans-serif';
-    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 102);
+    ctx.font = `12px ${MONO}`;
+    ctx.fillStyle = used >= me.bag.length ? '#ef8a70' : '#e6e1cc';
+    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 122);
     ctx.textAlign = 'left';
-    ctx.font = '9px "Segoe UI", sans-serif';
-    ctx.fillStyle = '#6f7a90';
-    ctx.fillText('[F]探索/ドア [Tab]持ち物 [R]リロード [T]弾種 [C]クラフト [Q]食事 [H]回復', x + 10, y + ph - 7);
+    ctx.font = `9px ${UI}`;
+    ctx.fillStyle = '#6f6c5a';
+    ctx.fillText('F 探索/ドア ・ Tab 持ち物 ・ R リロード ・ T 弾種 ・ C 作業台', x + 10, y + ph - 9, pw - 20);
     void view;
   }
 
   private drawHotbar(o: RenderOptions, view: ViewState): void {
     const { ctx, w, h } = this;
     const me = view.players.find((p) => p.id === o.localId);
-    const size = 50;
-    const gap = 5;
+    const gap = 4;
+    // 左のステータス（約285px）・右のボタン（約250px）と重ならない大きさにする
+    const avail = w - 2 * 292;
+    const size = Math.max(38, Math.min(54, Math.floor((avail - gap * (SLOTS.length - 1)) / SLOTS.length)));
     const total = SLOTS.length * size + (SLOTS.length - 1) * gap;
-    const x0 = w / 2 - total / 2;
+    const x0 = Math.round(w / 2 - total / 2);
     const y = h - size - 14;
     SLOTS.forEach((t, i) => {
       const x = x0 + i * (size + gap);
       const sel = o.localTool === t.id;
       const usable = i < USABLE_SLOTS;
-      panel(ctx, x, y, size, size, sel ? 'rgba(60,90,130,0.92)' : usable ? undefined : 'rgba(10,12,16,0.4)');
-      if (sel) {
-        ctx.strokeStyle = '#9fb4c2';
-        ctx.lineWidth = 2;
-        roundRectPath(ctx, x + 1, y + 1, size - 2, size - 2, 7);
-        ctx.stroke();
-      }
-      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      const yy = sel ? y - 4 : y;
+      // 枠
+      ctx.fillStyle = usable ? (sel ? 'rgba(56,62,38,0.92)' : 'rgba(17,19,14,0.82)') : 'rgba(10,11,8,0.5)';
+      ctx.fillRect(x, yy, size, size);
+      ctx.strokeStyle = sel ? '#e0a33a' : usable ? 'rgba(190,180,130,0.25)' : 'rgba(190,180,130,0.1)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, yy + 0.5, size - 1, size - 1);
+      if (sel) brackets(ctx, x - 2, yy - 2, size + 4, size + 4, '#e0a33a', 9, 2);
+      // キー番号
+      ctx.font = `10px ${MONO}`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillStyle = usable ? '#ffffff' : 'rgba(255,255,255,0.3)';
-      ctx.fillText(t.key, x + 5, y + 4);
-      if (!usable || !me) return;
+      ctx.fillStyle = sel ? '#e0a33a' : usable ? '#bdb79e' : 'rgba(190,180,130,0.25)';
+      ctx.fillText(t.key, x + 4, yy + 3);
+      if (!usable) {
+        // 未解放スロット：錠前
+        ctx.strokeStyle = 'rgba(190,180,130,0.25)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(x + size / 2, yy + size / 2 - 4, 5, Math.PI, 0);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(190,180,130,0.22)';
+        ctx.fillRect(x + size / 2 - 7, yy + size / 2 - 4, 14, 10);
+        return;
+      }
+      if (!me) return;
       let label = '';
       let warn = false;
       let locked = false;
+      let badge = '';
       const cx = x + size / 2;
-      const cy = y + size / 2 - 3;
+      const cy = yy + size / 2 - 4;
       switch (t.id) {
         case Tool.Melee:
           drawSlotIcon(ctx, 'axe', cx, cy);
-          label = '斧';
+          label = 'MELEE';
           break;
         case Tool.Primary:
         case Tool.Secondary: {
@@ -1711,13 +1820,14 @@ export class Renderer {
           const icon = !s ? (t.id === Tool.Primary ? 'rifle' : 'pistol') : s.id === 'pistol' ? 'pistol' : s.id === 'shotgun' ? 'shotgun' : 'rifle';
           drawSlotIcon(ctx, icon, cx, cy, locked);
           if (s) {
-            label = `${s.w.mag}/${countItem(me.bag, effectiveStats(s.id, s.w).ammo)}${s.w.ap ? 'AP' : ''}`;
+            label = `${s.w.mag}/${countItem(me.bag, effectiveStats(s.id, s.w).ammo)}`;
             warn = s.w.mag === 0;
-          } else label = 'なし';
+            if (s.w.ap) badge = s.id === 'shotgun' ? 'SLG' : 'AP';
+          } else label = 'EMPTY';
           break;
         }
         case Tool.Meds: {
-          const n = countItem(me.bag, 'bandage') + countItem(me.bag, 'medkit');
+          const n = countItem(me.bag, 'bandage') + countItem(me.bag, 'medkit') + countItem(me.bag, 'stim');
           drawSlotIcon(ctx, 'medkit', cx, cy, n <= 0);
           label = `×${n}`;
           warn = n <= 0;
@@ -1731,23 +1841,31 @@ export class Renderer {
           break;
         }
       }
+      if (badge) ammoBadge(ctx, x + size - 24, yy + 3, badge);
       ctx.textAlign = 'center';
-      ctx.font = 'bold 9px "Segoe UI", sans-serif';
-      ctx.fillStyle = locked ? '#7d8597' : warn ? '#c06a5a' : '#dfe6f3';
-      ctx.fillText(label, x + size / 2, y + size - 12);
+      ctx.textBaseline = 'alphabetic';
+      ctx.font = `11px ${MONO}`;
+      ctx.fillStyle = locked ? '#5e5c4c' : warn ? '#ef8a70' : '#e6e1cc';
+      ctx.fillText(label, cx, yy + size - 5);
+      // 下辺の状態ライン
+      ctx.fillStyle = locked ? 'rgba(90,90,70,0.4)' : warn ? '#d0583e' : sel ? '#e0a33a' : 'rgba(147,183,124,0.5)';
+      ctx.fillRect(x + 1, yy + size - 2, size - 2, 1);
     });
 
     const cur = SLOTS[o.localTool];
     if (cur && me) {
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillStyle = '#e6ebf5';
       const s = heldWeapon({ ...me, tool: o.localTool });
       const name: string = s ? ITEMS[s.id].name : cur.name;
-      ctx.fillText(`${name}  （1〜5 / ホイールで切替）`, w / 2, y - 6);
+      ctx.font = `bold 12px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      const txt = `${name}`;
+      const tw = ctx.measureText(txt).width + 60;
+      ctx.fillStyle = 'rgba(12,13,10,0.65)';
+      ctx.fillRect(w / 2 - tw / 2, y - 30, tw, 18);
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(txt, w / 2, y - 16);
     }
-    void view;
   }
 
   private drawMinimap(view: ViewState, localId: number): void {
@@ -1756,9 +1874,17 @@ export class Renderer {
     const s = 2.2;
     const mw = MAP_W * s;
     const mh = MAP_H * s;
-    const mx = this.w - mw - 12;
-    const my = 86;
-    panel(ctx, mx - 4, my - 4, mw + 8, mh + 8);
+    const mx = this.w - mw - 16;
+    const my = 98;
+    panel(ctx, mx - 4, my - 18, mw + 8, mh + 22);
+    ctx.font = `9px ${MONO}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// TAC-MAP', mx, my - 10);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText('N▲', mx + mw, my - 10);
     ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
     // ロケーション（★の数で危険度）
     for (const loc of this.world.locations) {
@@ -1767,7 +1893,7 @@ export class Renderer {
       ctx.strokeStyle = col;
       ctx.lineWidth = 1;
       ctx.strokeRect(mx + loc.x * s - 1, my + loc.y * s - 1, loc.w * s + 2, loc.h * s + 2);
-      ctx.font = 'bold 8px "Segoe UI", sans-serif';
+      ctx.font = 'bold 8px "Noto Sans JP", "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
       ctx.fillStyle = col;
@@ -1832,23 +1958,135 @@ export class Renderer {
 
 // ---------------- ヘルパー ----------------
 
-function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+
+const UI = '"Noto Sans JP", "Segoe UI", sans-serif';
+const MONO = '"Share Tech Mono", ui-monospace, Consolas, monospace';
+const HEAD = '"Oswald", "Noto Sans JP", sans-serif';
+
+/** タクティカルパネル：ダークガラス＋1px枠＋四隅のL字ブラケット */
+function panel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, fill?: string, accent?: string): void {
+  x = Math.round(x);
+  y = Math.round(y);
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, fill ?? 'rgba(28,31,22,0.84)');
+  g.addColorStop(1, fill ?? 'rgba(13,14,10,0.84)');
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = accent ?? 'rgba(190,180,130,0.22)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  brackets(ctx, x, y, w, h, accent ?? 'rgba(224,163,58,0.75)', 7, 1.5);
 }
 
-function panel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, fill?: string): void {
-  ctx.fillStyle = fill ?? 'rgba(10,12,16,0.72)';
-  roundRectPath(ctx, x, y, w, h, 8);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+/** 四隅のL字 */
+function brackets(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, color: string, len: number, lw: number): void {
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, len, lw);
+  ctx.fillRect(x, y, lw, len);
+  ctx.fillRect(x + w - len, y, len, lw);
+  ctx.fillRect(x + w - lw, y, lw, len);
+  ctx.fillRect(x, y + h - lw, len, lw);
+  ctx.fillRect(x, y + h - len, lw, len);
+  ctx.fillRect(x + w - len, y + h - lw, len, lw);
+  ctx.fillRect(x + w - lw, y + h - len, lw, len);
+}
+
+/** 区切り目盛り付きのゲージ */
+function segBar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, ratio: number, color: string, segs: number): void {
+  ctx.fillStyle = 'rgba(255,255,240,0.07)';
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, w * clamp(ratio, 0, 1), h);
+  ctx.fillStyle = 'rgba(10,11,8,0.55)';
+  for (let i = 1; i < segs; i++) ctx.fillRect(Math.round(x + (w * i) / segs), y, 1, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.fillRect(x, y, w * clamp(ratio, 0, 1), 1);
+}
+
+/** 小さな枠（チップ） */
+function chipBox(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, color: string, fill: boolean): void {
+  if (fill) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+  } else {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  }
+}
+
+/** 弾種バッジ（AP / SLG） */
+function ammoBadge(ctx: CanvasRenderingContext2D, x: number, y: number, t: string): void {
+  ctx.font = `9px ${MONO}`;
+  const tw = ctx.measureText(t).width + 6;
+  ctx.fillStyle = '#e08a4a';
+  ctx.fillRect(x, y, tw, 12);
+  ctx.fillStyle = '#15170f';
+  const ta = ctx.textAlign;
+  const tb = ctx.textBaseline;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(t, x + 3, y + 6.5);
+  ctx.textAlign = ta;
+  ctx.textBaseline = tb;
+}
+
+/** 操作ヒント：キーキャップ風 */
+function keyHint(ctx: CanvasRenderingContext2D, x: number, y: number, text: string, color: string, t: number): void {
+  const m = /^\[([^\]]+)\]\s*(.*)$/.exec(text);
+  const key = m ? m[1] : '';
+  const body = m ? m[2] : text;
+  ctx.font = `bold 14px ${UI}`;
+  const bw = ctx.measureText(body).width;
+  ctx.font = `bold 12px ${MONO}`;
+  const kw = key ? ctx.measureText(key).width + 14 : 0;
+  const total = kw + (kw ? 8 : 0) + bw + 24;
+  const x0 = x - total / 2;
+  const pulse = 0.7 + Math.sin(t * 5) * 0.3;
+  ctx.fillStyle = 'rgba(12,13,10,0.78)';
+  ctx.fillRect(x0, y - 15, total, 30);
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35 + pulse * 0.4;
+  ctx.strokeRect(x0 + 0.5, y - 14.5, total - 1, 29);
+  ctx.globalAlpha = 1;
+  brackets(ctx, x0, y - 15, total, 30, color, 6, 1.5);
+  let cx = x0 + 12;
+  ctx.textBaseline = 'middle';
+  if (key) {
+    ctx.fillStyle = color;
+    ctx.fillRect(cx, y - 9, kw, 18);
+    ctx.fillStyle = '#15170f';
+    ctx.textAlign = 'center';
+    ctx.fillText(key, cx + kw / 2, y + 1);
+    cx += kw + 8;
+  }
+  ctx.font = `bold 14px ${UI}`;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#e6e1cc';
+  ctx.fillText(body, cx, y + 1);
+  ctx.textAlign = 'center';
+}
+
+/** ダウン・戦闘不能などの中央カード */
+function centerCard(ctx: CanvasRenderingContext2D, x: number, y: number, title: string, sub: string, color: string, t: number): void {
+  ctx.font = `bold 13px ${UI}`;
+  const w = Math.max(360, ctx.measureText(sub).width + 60);
+  const pulse = 0.6 + Math.sin(t * 6) * 0.4;
+  ctx.fillStyle = 'rgba(14,12,10,0.82)';
+  ctx.fillRect(x - w / 2, y - 30, w, 64);
+  ctx.fillStyle = color;
+  ctx.globalAlpha = pulse;
+  ctx.fillRect(x - w / 2, y - 30, w, 2);
+  ctx.globalAlpha = 1;
+  brackets(ctx, x - w / 2, y - 30, w, 64, color, 10, 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold 24px ${HEAD}`;
+  ctx.fillStyle = color;
+  ctx.fillText(title, x, y - 6);
+  ctx.font = `bold 13px ${UI}`;
+  ctx.fillStyle = '#e6e1cc';
+  ctx.fillText(sub, x, y + 20);
 }
 
 /** ホットバーのアイコン（ベクター） */

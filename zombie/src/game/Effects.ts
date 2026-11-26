@@ -86,7 +86,7 @@ export class Effects {
   corpses: Corpse[] = [];
   banner: Banner | null = null;
   /** 画面左のイベントログ */
-  feed: { t: string; c: string; life: number }[] = [];
+  feed: { t: string; c: string; life: number; cat: string }[] = [];
   trauma = 0;
   hurt = 0;
   /** ヒットストップの残り秒（見た目だけ一瞬止める） */
@@ -386,7 +386,7 @@ export class Effects {
         this.burst(ev.x, ev.y, '#8a8070', 5, 60, 0.6, 5, 'smoke', false);
         break;
       case 'feed':
-        this.feed.push({ t: ev.t, c: ev.c, life: 9 });
+        this.feed.push({ t: ev.t, c: ev.c, life: 9, cat: ev.cat ?? 'info' });
         if (this.feed.length > 6) this.feed.shift();
         break;
       case 'ricochet':
