@@ -285,3 +285,26 @@ details.controls summary {
 .result-table th:nth-child(2) {
   text-align: right;
 }
+
+.audio-row {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: #8f9bb3;
+}
+.audio-row label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.audio-row input[type='range'] {
+  flex: 1;
+  accent-color: #d9534f;
+}
+.audio-note {
+  margin: -4px 0 0;
+  font-size: 11px;
+  color: #6f7a90;
+  text-align: center;
+}

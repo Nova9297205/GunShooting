@@ -44,6 +44,14 @@ export interface RenderOptions {
   reviveHint: boolean;
   interactHint: string | null;
   syncMs?: number;
+  muted?: boolean;
+}
+
+/** 射撃・近接・リロードを検出したときに呼ばれるフック（効果音用） */
+export interface AnimHooks {
+  shot(p: PlayerSnap): void;
+  swing(p: PlayerSnap): void;
+  reload(p: PlayerSnap): void;
 }
 
 /** 時刻（分）から暗さ 0..1 を求める */
@@ -76,6 +84,8 @@ export class Renderer {
   private lightCtx = this.lightCanvas.getContext('2d')!;
   private pAnim = new Map<number, PlayerAnim>();
   private zAnim = new Map<number, ZombieAnim>();
+  private lastReload = new Map<number, number>();
+  hooks: AnimHooks | null = null;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -255,9 +265,18 @@ export class Renderer {
       if (a.lastShots < 0) a.lastShots = p.shots;
       if (a.lastSwings < 0) a.lastSwings = p.swings;
       if (p.id !== o.skipAnimDetectId) {
-        if (p.shots !== a.lastShots) this.triggerShot(p.id);
-        if (p.swings !== a.lastSwings) this.triggerSwing(p.id);
+        if (p.shots !== a.lastShots) {
+          this.triggerShot(p.id);
+          this.hooks?.shot(p);
+        }
+        if (p.swings !== a.lastSwings) {
+          this.triggerSwing(p.id);
+          this.hooks?.swing(p);
+        }
       }
+      const lr = this.lastReload.get(p.id) ?? 0;
+      if (p.reloadT > 0 && lr <= 0) this.hooks?.reload(p);
+      this.lastReload.set(p.id, p.reloadT);
       a.lastShots = p.shots;
       a.lastSwings = p.swings;
       a.recoilV += (-900 * a.recoil - 26 * a.recoilV) * dt;
@@ -692,7 +711,11 @@ export class Renderer {
     ctx.textBaseline = 'top';
     ctx.fillStyle = 'rgba(200,210,225,0.55)';
     const modeLabel = o.mode === 'solo' ? 'SOLO' : `${o.mode.toUpperCase()}  ROOM: ${o.roomCode ?? ''}`;
-    ctx.fillText(modeLabel + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : ''), 14, h - 18);
+    ctx.fillText(
+      modeLabel + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : '') + (o.muted ? '   ♪ OFF [M]' : '   ♪ ON [M]'),
+      14,
+      h - 18,
+    );
 
     // ---- 中央メッセージ ----
     ctx.textAlign = 'center';

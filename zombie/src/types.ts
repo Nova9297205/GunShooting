@@ -141,6 +141,9 @@ export interface Stash {
   scrap: number;
 }
 
+/** イベントに付ける効果音の種類 */
+export type SoundKey = 'loot' | 'eat' | 'heal' | 'craft' | 'error' | 'day' | 'night' | 'horde' | 'clear';
+
 /** 一度きりの演出イベント */
 export type GameEvent =
   | { k: 'hit'; x: number; y: number; o: number }
@@ -155,8 +158,8 @@ export type GameEvent =
   | { k: 'build'; x: number; y: number; kind: ObjKind }
   | { k: 'smash'; x: number; y: number; kind: ObjKind }
   | { k: 'break'; x: number; y: number; kind: ObjKind }
-  | { k: 'pop'; x: number; y: number; t: string; c: string; id: number }
-  | { k: 'banner'; t: string; s: string; c: string }
+  | { k: 'pop'; x: number; y: number; t: string; c: string; id: number; s?: SoundKey }
+  | { k: 'banner'; t: string; s: string; c: string; snd?: SoundKey }
   | { k: 'burn'; x: number; y: number }
   | { k: 'noise'; x: number; y: number; r: number };
 

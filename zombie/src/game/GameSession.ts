@@ -18,6 +18,7 @@ import type {
   ViewState,
 } from '../types';
 import { Tool } from '../types';
+import { audio } from './Audio';
 import { AXE, GUN, INTERP_DELAY, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, TOOLS, ZOMBIE } from './constants';
 import { Effects } from './Effects';
 import type { HostSimulation } from './Engine';
@@ -80,6 +81,7 @@ export class GameSession {
   private localShotSeqs: number[] = [];
   private localBullets: LocalBullet[] = [];
   private localBulletId = -1;
+  private campfires: { x: number; y: number }[] = [];
 
   constructor(private o: SessionOptions) {
     this.sim = o.sim ?? null;
@@ -91,6 +93,15 @@ export class GameSession {
     }
     this.renderer = new Renderer(o.canvas, this.world);
     this.input = new InputController(o.canvas);
+    // 効果音：射撃・斧・リロードは描画側のカウンタ検出から鳴らす
+    this.renderer.hooks = {
+      shot: (p) => audio.shot(p.x, p.y, p.id === o.localId),
+      swing: (p) => audio.swing(p.x, p.y, p.id === o.localId),
+      reload: (p) => audio.reload(p.x, p.y, p.id === o.localId),
+    };
+    for (const ob of this.world.objects.values()) {
+      if (ob.kind === 'campfire') this.campfires.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE });
+    }
   }
 
   start(): void {
@@ -109,6 +120,13 @@ export class GameSession {
     clearInterval(this.pumpTimer);
     this.input.detach();
     window.removeEventListener('resize', this.onResize);
+    audio.setMood(null);
+  }
+
+  /** イベントを演出（パーティクル等）と効果音の両方へ */
+  private onEvent(ev: GameEvent): void {
+    this.effects.handleEvent(ev, this.o.localId);
+    audio.handleEvent(ev, this.o.localId);
   }
 
   // ---------------- ネットワークからの呼び出し ----------------
@@ -158,7 +176,7 @@ export class GameSession {
       this.acc -= TICK_DT;
       sim.step(TICK_DT);
       const evs = sim.drainEvents();
-      for (const ev of evs) this.effects.handleEvent(ev, this.o.localId);
+      for (const ev of evs) this.onEvent(ev);
       if (this.o.mode === 'host' && this.o.net) {
         this.pendingEvents.push(...evs);
         if (sim.tick % SNAPSHOT_EVERY === 0 || sim.gameOver) {
@@ -212,7 +230,7 @@ export class GameSession {
     b.fired = true;
     for (const ev of b.snap.events) {
       if (ev.k === 'wall' && ev.o === this.o.localId) continue; // ローカル予測弾で表現済み
-      this.effects.handleEvent(ev, this.o.localId);
+      this.onEvent(ev);
     }
   }
 
@@ -305,7 +323,7 @@ export class GameSession {
         b.y += (b.vy * dt) / 2;
         if (this.world.blocksBullet(Math.floor(b.x / TILE), Math.floor(b.y / TILE))) {
           b.life = 0;
-          this.effects.handleEvent({ k: 'wall', x: b.x - b.vx * 0.005, y: b.y - b.vy * 0.005, o: this.o.localId }, this.o.localId);
+          this.onEvent({ k: 'wall', x: b.x - b.vx * 0.005, y: b.y - b.vy * 0.005, o: this.o.localId });
           break;
         }
         if (view) {
@@ -359,6 +377,7 @@ export class GameSession {
 
     // ---- 入力 ----
     this.handleToolKeys();
+    if (this.input.consume('KeyM')) audio.toggleMute();
     const mv = this.input.getMove();
     const mw = this.renderer.screenToWorld(this.input.mouseX, this.input.mouseY);
     const aim = myPos ? Math.atan2(mw.y - myPos.y, mw.x - myPos.x) : this.localAim;
@@ -408,6 +427,8 @@ export class GameSession {
     }
 
     const me = view.players.find((p) => p.id === localId);
+    // 弾切れのカチッという音
+    if (me && me.status === 'alive' && frame.fire && this.localTool === Tool.Gun && me.inv.mag <= 0 && me.reloadT <= 0) audio.emptyClick();
     const reviveHint =
       !!me &&
       me.status === 'alive' &&
@@ -426,7 +447,12 @@ export class GameSession {
       reviveHint,
       interactHint: me && me.status === 'alive' ? this.interactHint(me) : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
+      muted: audio.settings.muted,
     });
+    // 聞き手の位置＝カメラ中心。BGMの曲調と環境音を更新
+    audio.listener.x = this.renderer.cam.x;
+    audio.listener.y = this.renderer.cam.y;
+    audio.update(dt, view, this.campfires);
   };
 
   /** ゲスト：射撃・近接の見た目を即時に出す（判定はホスト） */
@@ -459,10 +485,12 @@ export class GameSession {
         });
         this.localShotSeqs.push(frame.seq);
         this.renderer.triggerShot(this.o.localId);
+        audio.shot(px, py, true);
       }
     } else if (this.localTool === Tool.Axe && this.localSwingCd <= 0) {
       this.localSwingCd = AXE.interval;
       this.renderer.triggerSwing(this.o.localId);
+      audio.swing(this.pred.x, this.pred.y, true);
     }
   }
 

@@ -3,6 +3,7 @@
 // ============================================================
 import './style.css';
 import { MAX_PLAYERS, PLAYER_COLORS } from './game/constants';
+import { audio } from './game/Audio';
 import { HostSimulation } from './game/Engine';
 import { GameSession } from './game/GameSession';
 import { NetworkManager, sanitizeName } from './network/NetworkManager';
@@ -38,6 +39,24 @@ nameInput.addEventListener('input', () => {
   }
 });
 const playerName = () => nameInput.value.trim().slice(0, 10);
+
+// ---------------- サウンド ----------------
+
+// ブラウザの自動再生制限：最初のクリック/キー入力で音を有効化
+const unlockAudio = () => audio.unlock();
+window.addEventListener('pointerdown', unlockAudio);
+window.addEventListener('keydown', unlockAudio);
+
+const volMusic = $<HTMLInputElement>('vol-music');
+const volSfx = $<HTMLInputElement>('vol-sfx');
+volMusic.value = String(Math.round(audio.settings.music * 100));
+volSfx.value = String(Math.round(audio.settings.sfx * 100));
+volMusic.addEventListener('input', () => audio.setMusicVolume(Number(volMusic.value) / 100));
+volSfx.addEventListener('input', () => {
+  audio.setSfxVolume(Number(volSfx.value) / 100);
+});
+volSfx.addEventListener('change', () => audio.handleEvent({ k: 'pop', x: 0, y: 0, t: '', c: '', id: -1, s: 'loot' }, -1));
+
 
 // ---------------- 画面切り替え ----------------
 
@@ -102,7 +121,7 @@ function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[]): void {
   const info: StartInfo = { players, seed, objs: sim.initialObjs() };
   if (m === 'host') net?.startGame(info);
   // 開発時のみ：コンソールから時間を進めるなどのデバッグ用
-  if (import.meta.env.DEV) (window as unknown as { __sim: HostSimulation }).__sim = sim;
+  if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio });
   startSession(m, info, 0, sim);
 }
 
@@ -112,6 +131,7 @@ function endSession(): void {
 }
 
 function showResult(r: GameResult): void {
+  audio.gameOver();
   $('result-day').textContent = String(r.day);
   const body = $('result-body');
   body.innerHTML = '';

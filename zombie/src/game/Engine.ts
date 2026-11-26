@@ -15,6 +15,7 @@ import type {
   ObjSnap,
   PlayerSnap,
   Snapshot,
+  SoundKey,
   Stash,
   TimePhase,
   ViewState,
@@ -246,7 +247,7 @@ export class HostSimulation {
         idle: 0,
       });
     });
-    this.events.push({ k: 'banner', t: 'DAY 1', s: '物資を集めて拠点を強化しよう。5日目の夜に大襲撃が来る…', c: '#ffe2a8' });
+    this.events.push({ k: 'banner', t: 'DAY 1', s: '物資を集めて拠点を強化しよう。5日目の夜に大襲撃が来る…', c: '#ffe2a8', snd: 'day' });
   }
 
   // ======================== 外部API ========================
@@ -404,9 +405,9 @@ export class HostSimulation {
         this.hordeQuota = Math.round((26 + 16 * (n - 1)) * mult);
         this.hordeSpawned = 0;
         this.spawnTimer = 1.5;
-        this.events.push({ k: 'banner', t: '大襲撃 - HORDE NIGHT', s: 'ゾンビの大群が押し寄せてくる！朝 6:00 まで生き延びろ', c: '#ff3b3b' });
+        this.events.push({ k: 'banner', t: '大襲撃 - HORDE NIGHT', s: 'ゾンビの大群が押し寄せてくる！朝 6:00 まで生き延びろ', c: '#ff3b3b', snd: 'horde' });
       } else if (this.phase === 'night') {
-        this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: 'ゾンビが活発になった。懐中電灯で周囲を照らせ', c: '#9fb7ff' });
+        this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: 'ゾンビが活発になった。懐中電灯で周囲を照らせ', c: '#9fb7ff', snd: 'night' });
       } else {
         this.onDawn(prevPhase === 'horde');
       }
@@ -415,7 +416,7 @@ export class HostSimulation {
 
   private onDawn(hordeCleared: boolean): void {
     if (hordeCleared) {
-      this.events.push({ k: 'banner', t: '大襲撃クリア！', s: `DAY ${this.day} の朝を迎えた。生き延びたぞ！`, c: '#7dffb0' });
+      this.events.push({ k: 'banner', t: '大襲撃クリア！', s: `DAY ${this.day} の朝を迎えた。生き延びたぞ！`, c: '#7dffb0', snd: 'clear' });
       // 残ったホードゾンビは朝日で燃え尽きる
       for (const z of this.zombies) {
         if (!z.horde) continue;
@@ -426,7 +427,7 @@ export class HostSimulation {
       const sub = isHordeDay(this.day)
         ? '今夜は大襲撃！ 拠点を固めろ'
         : `大襲撃まであと ${HORDE_EVERY - (this.day % HORDE_EVERY)} 日`;
-      this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: sub, c: '#ffe2a8' });
+      this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: sub, c: '#ffe2a8', snd: 'day' });
     }
     // 戦闘不能者はキャンプファイアで復帰
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -551,8 +552,9 @@ export class HostSimulation {
     }
   }
 
-  private pop(p: SimPlayer, t: string, c: string): void {
-    this.events.push({ k: 'pop', x: p.x, y: p.y - 30, t, c, id: p.id });
+  private pop(p: SimPlayer, t: string, c: string, s?: SoundKey): void {
+    // 赤い警告メッセージにはエラー音を付ける
+    this.events.push({ k: 'pop', x: p.x, y: p.y - 30, t, c, id: p.id, s: s ?? (c === '#ff8080' ? 'error' : undefined) });
   }
 
   private fireGun(p: SimPlayer): void {
@@ -604,7 +606,7 @@ export class HostSimulation {
     }
     p.inv.gunpowder -= CRAFT.gunpowder;
     p.inv.ammo += CRAFT.ammo;
-    this.pop(p, `弾薬 +${CRAFT.ammo}`, '#ffd84d');
+    this.pop(p, `弾薬 +${CRAFT.ammo}`, '#ffd84d', 'craft');
   }
 
   private useFood(p: SimPlayer, explicit: boolean): boolean {
@@ -619,7 +621,7 @@ export class HostSimulation {
     p.inv.food--;
     p.hunger = Math.min(100, p.hunger + PLAYER.foodValue);
     p.hp = Math.min(p.maxHp, p.hp + 5);
-    this.pop(p, `空腹 +${PLAYER.foodValue}`, '#ffcf6b');
+    this.pop(p, `空腹 +${PLAYER.foodValue}`, '#ffcf6b', 'eat');
     return true;
   }
 
@@ -634,7 +636,7 @@ export class HostSimulation {
     }
     p.inv.medkit--;
     p.hp = Math.min(p.maxHp, p.hp + PLAYER.medkitValue);
-    this.pop(p, `HP +${PLAYER.medkitValue}`, '#7dffb0');
+    this.pop(p, `HP +${PLAYER.medkitValue}`, '#7dffb0', 'heal');
     return true;
   }
 
@@ -692,7 +694,7 @@ export class HostSimulation {
       p.inv.food += 1;
       parts.push('食料+1');
     }
-    this.events.push({ k: 'pop', x: (o.tx + 0.5) * TILE, y: o.ty * TILE - 6, t: parts.join('  '), c: '#ffe08a', id: p.id });
+    this.events.push({ k: 'pop', x: (o.tx + 0.5) * TILE, y: o.ty * TILE - 6, t: parts.join('  '), c: '#ffe08a', id: p.id, s: 'loot' });
   }
 
   private swingAxe(p: SimPlayer): void {
@@ -1241,7 +1243,7 @@ export class HostSimulation {
     if (killer && Math.random() < 0.12) {
       const ammo = 4 + Math.floor(Math.random() * 6);
       killer.inv.ammo += ammo;
-      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: `弾薬+${ammo}`, c: '#ffe08a', id: killer.id });
+      this.events.push({ k: 'pop', x: z.x, y: z.y - 26, t: `弾薬+${ammo}`, c: '#ffe08a', id: killer.id, s: 'loot' });
     }
   }
 

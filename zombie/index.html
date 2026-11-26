@@ -24,13 +24,18 @@
           <button id="btn-join" class="btn">部屋に参加（ゲスト）</button>
         </div>
         <p id="title-status" class="status"></p>
+        <div class="audio-row">
+          <label>BGM <input id="vol-music" type="range" min="0" max="100" /></label>
+          <label>効果音 <input id="vol-sfx" type="range" min="0" max="100" /></label>
+        </div>
+        <p class="audio-note">ゲーム中は <kbd>M</kbd> でミュート切替。操作中のウィンドウだけ音が鳴ります。</p>
         <details class="controls">
           <summary>操作方法</summary>
           <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移動 / <kbd>マウス</kbd> 照準（夜は懐中電灯）</div>
           <div><kbd>左クリック</kbd> 射撃・斧・建築・修理 / <kbd>R</kbd> リロード / <kbd>Shift</kbd> ダッシュ</div>
           <div><kbd>1</kbd>拳銃 <kbd>2</kbd>斧 <kbd>3</kbd>木の壁 <kbd>4</kbd>鉄の壁 <kbd>5</kbd>スパイク <kbd>6</kbd>修理（<kbd>B</kbd>/ホイールでも切替）</div>
           <div><kbd>F</kbd> クレートを調べる／アイテム使用 / <kbd>Q</kbd> 食事 / <kbd>H</kbd> 救急キット / <kbd>C</kbd> 火薬→弾薬</div>
-          <div><kbd>E</kbd> 長押しでダウンした味方を蘇生</div>
+          <div><kbd>E</kbd> 長押しでダウンした味方を蘇生 / <kbd>M</kbd> サウンドのミュート切替</div>
         </details>
       </div>
     </section>
