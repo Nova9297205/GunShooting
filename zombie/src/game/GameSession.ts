@@ -15,13 +15,16 @@ import type {
   PlayerSnap,
   Snapshot,
   StartInfo,
+  StorageState,
   ViewState,
 } from '../types';
 import { Tool } from '../types';
 import { audio } from './Audio';
-import { ChestMenu } from '../ui/ChestMenu';
 import { CraftMenu } from '../ui/CraftMenu';
-import { AXE, BENCH_RANGE, BLUEPRINTS, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, WEAPONS, ZOMBIE } from './constants';
+import { InventoryPanel } from '../ui/InventoryPanel';
+import { AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
+import { CONTAINER_KINDS, STORAGE_KINDS } from './Engine';
+import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon } from './items';
 import { Effects } from './Effects';
 import type { HostSimulation } from './Engine';
 import { InputController } from './Input';
@@ -61,8 +64,7 @@ export class GameSession {
   private pumpTimer = 0;
   private lastFrame = 0;
   private seq = 0;
-  private localTool: number = Tool.Gun;
-  private localBp = 0;
+  private localTool: number = Tool.Secondary;
   private localAim = 0;
 
   // host / solo
@@ -87,8 +89,16 @@ export class GameSession {
   private campfires: { x: number; y: number }[] = [];
   private craftMenu: CraftMenu;
   private pendingCraft = '';
-  private chestMenu: ChestMenu;
-  private chestOps: string[] = [];
+  private invPanel: InventoryPanel;
+  private ops: string[] = [];
+  /** 入れ物・倉庫を開いたことで自動的にパネルを開いたか */
+  private autoOpened = false;
+  private lastViewing = 0;
+  private lastStorageOpen = 0;
+  private lastPrim = '';
+  private lastSec = '';
+  /** ゲスト：最後に受け取った倉庫の状態（変化したときだけ届く） */
+  private storage: StorageState | null = null;
   private hudButtons = document.getElementById('hud-buttons')!;
   private muteBtn = document.getElementById('btn-mute')!;
 
@@ -100,6 +110,7 @@ export class GameSession {
       const gen = generateTerrain(o.info.seed);
       this.world = new TileWorld(gen.terrain);
       this.world.locations = gen.locations;
+      this.world.buildings = gen.buildings;
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
     }
     this.renderer = new Renderer(o.canvas, this.world);
@@ -117,14 +128,25 @@ export class GameSession {
         audio.click();
       },
       () => audio.click(),
-    );
-    this.chestMenu = new ChestMenu(
-      document.getElementById('chest-panel')!,
-      (op) => {
-        this.chestOps.push(op);
+      (slot, att) => {
+        this.ops.push(`mod:${slot}:${att}`);
         audio.click();
       },
-      () => audio.click(),
+    );
+    this.invPanel = new InventoryPanel(
+      document.getElementById('inv-panel')!,
+      (op) => {
+        this.ops.push(op);
+        audio.click();
+      },
+      (open) => {
+        audio.click();
+        // 手動で閉じたら入れ物・倉庫も閉じる
+        if (!open) {
+          this.autoOpened = false;
+          this.ops.push('close');
+        }
+      },
     );
     for (const ob of this.world.objects.values()) {
       if (ob.kind === 'campfire') this.campfires.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE });
@@ -141,6 +163,7 @@ export class GameSession {
     this.rafId = requestAnimationFrame(this.frame);
     this.hudButtons.classList.remove('hidden');
     document.getElementById('btn-craft')!.onclick = () => this.craftMenu.toggle();
+    document.getElementById('btn-inv')!.onclick = () => this.invPanel.toggle();
     this.muteBtn.onclick = () => {
       audio.toggleMute();
       audio.click();
@@ -150,7 +173,7 @@ export class GameSession {
   stop(): void {
     this.hudButtons.classList.add('hidden');
     this.craftMenu.destroy();
-    this.chestMenu.destroy();
+    this.invPanel.destroy();
     this.running = false;
     cancelAnimationFrame(this.rafId);
     clearInterval(this.pumpTimer);
@@ -180,6 +203,7 @@ export class GameSession {
     // オブジェクト差分は即時反映（建築・破壊・資源の再湧き）
     for (const ob of s.objs) this.world.setObj({ ...ob });
     for (const id of s.removed) this.world.removeObj(id);
+    if (s.storage) this.storage = s.storage;
 
     const now = performance.now() / 1000;
     const est = s.time - now;
@@ -333,8 +357,13 @@ export class GameSession {
         stamina: this.pred.stamina,
         aim: this.localAim,
         tool: this.localTool,
-        inv: { ...meLatest.inv, mag: Math.max(0, meLatest.inv.mag - this.localShotSeqs.length) },
       };
+      // 予測で撃った分だけ装填数を減らして見せる
+      const held = heldWeapon(me);
+      if (held && this.localShotSeqs.length) {
+        const k = this.localTool === Tool.Primary ? 'prim' : 'sec';
+        me[k] = { ...held, w: { ...held.w, mag: Math.max(0, held.w.mag - this.localShotSeqs.length) } };
+      }
       if (idx >= 0) players[idx] = me;
       else players.push(me);
     }
@@ -347,9 +376,8 @@ export class GameSession {
       day: L.day,
       minute: L.minute,
       phase: L.phase,
-      stash: L.stash,
-      chest: L.chest,
-      hordeLeft: L.hordeLeft,
+      cont: L.cont,
+      storage: this.storage ?? undefined,
       players,
       zombies,
       bullets,
@@ -385,11 +413,6 @@ export class GameSession {
 
   private handleToolKeys(): void {
     for (let i = 0; i < 9; i++) if (this.input.consume(`Digit${i + 1}`) && i < USABLE_SLOTS) this.localTool = i;
-    if (this.input.consume('KeyB')) {
-      // 建築ツールの設計図を切替（建築ツール以外なら建築ツールに持ち替え）
-      if (this.localTool === Tool.Build) this.localBp = (this.localBp + 1) % BLUEPRINTS.length;
-      else this.localTool = Tool.Build;
-    }
     const wheel = this.input.consumeWheel();
     if (wheel) this.localTool = (this.localTool + (wheel > 0 ? 1 : -1) + USABLE_SLOTS) % USABLE_SLOTS;
   }
@@ -418,31 +441,29 @@ export class GameSession {
 
     // ---- 入力 ----
     const prevTool = this.localTool;
-    const prevBp = this.localBp;
     this.handleToolKeys();
-    if (this.localTool !== prevTool || this.localBp !== prevBp) audio.click();
+    if (this.localTool !== prevTool) audio.click();
     if (this.input.consume('KeyM')) audio.toggleMute();
     this.muteBtn.textContent = audio.settings.muted ? '🔇' : '🔊';
     if (this.input.consume('KeyC')) {
-      this.chestMenu.toggle(false);
+      this.invPanel.toggle(false);
       this.craftMenu.toggle();
+    }
+    if (this.input.consume('Tab')) {
+      this.craftMenu.toggle(false);
+      this.invPanel.toggle();
     }
     if (this.input.consume('Escape')) {
       this.craftMenu.toggle(false);
-      this.chestMenu.toggle(false);
+      this.invPanel.toggle(false);
     }
-    // チェスト／作業台の前で F を押したらメニュー（チェストを優先）
+    // F：パネルが開いていれば閉じる。作業台がいちばん近ければクラフト画面、それ以外はホストに任せる（ドア・探索・倉庫）
     let interact = this.input.consume('KeyF');
-    // チェスト／作業台の前で F → 近いほうのメニューを開く
-    const station = myPos ? this.nearestStation(myPos) : null;
-    if (interact && (this.chestMenu.open || this.craftMenu.open)) {
-      this.chestMenu.toggle(false);
+    if (interact && (this.craftMenu.open || this.invPanel.open)) {
       this.craftMenu.toggle(false);
+      this.invPanel.toggle(false);
       interact = false;
-    } else if (interact && station === 'chest') {
-      this.chestMenu.toggle(true);
-      interact = false;
-    } else if (interact && station === 'bench') {
+    } else if (interact && myPos && this.nearestUsable(myPos) === 'bench') {
       this.craftMenu.toggle(true);
       interact = false;
     }
@@ -462,13 +483,11 @@ export class GameSession {
       interact,
       reload: this.input.consume('KeyR'),
       craft: this.pendingCraft,
-      chest: this.chestOps.shift() ?? '',
+      op: this.ops.shift() ?? '',
       ping: this.input.consume('KeyG'),
       eat: this.input.consume('KeyQ'),
       heal: this.input.consume('KeyH'),
       tool: this.localTool,
-      bp: this.localBp,
-      alt: this.input.altDown,
       tx: Math.floor(mw.x / TILE),
       ty: Math.floor(mw.y / TILE),
     };
@@ -501,18 +520,12 @@ export class GameSession {
 
     const me = view.players.find((p) => p.id === localId);
     if (me) {
-      this.craftMenu.update(me.inv, view.stash, this.nearBench(me));
-      this.chestMenu.update(me.inv, view.chest, this.nearKind(me, 'chest', 130));
+      this.syncPanels(me, view);
+      this.craftMenu.update(me.bag, me.prim, me.sec, this.nearBench(me));
     }
     // 弾切れのカチッという音
-    if (
-      me &&
-      me.status === 'alive' &&
-      frame.fire &&
-      me.reloadT <= 0 &&
-      ((this.localTool === Tool.Gun && me.inv.mag <= 0) || (this.localTool === Tool.Shotgun && me.inv.shotgun && me.inv.smag <= 0))
-    )
-      audio.emptyClick();
+    const held = me ? heldWeapon({ ...me, tool: this.localTool }) : null;
+    if (me && me.status === 'alive' && frame.fire && me.reloadT <= 0 && held && held.w.mag <= 0) audio.emptyClick();
     const reviveHint =
       !!me &&
       me.status === 'alive' &&
@@ -528,8 +541,6 @@ export class GameSession {
       mouseY: this.input.mouseY,
       skipAnimDetectId: this.o.mode === 'guest' ? localId : null,
       localTool: this.localTool,
-      localBp: this.localBp,
-      altDown: this.input.altDown,
       reviveHint,
       interactHint: me && me.status === 'alive' ? this.interactHint(me) : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
@@ -549,10 +560,11 @@ export class GameSession {
       if (this.localFireCd < 0) this.localFireCd = 0;
       return;
     }
-    const wid = this.localTool === Tool.Gun ? (me.inv.gun >= 1 ? 'rifle' : 'pistol') : this.localTool === Tool.Shotgun && me.inv.shotgun ? 'shotgun' : null;
-    if (wid) {
-      const w = WEAPONS[wid];
-      const mag = (wid === 'shotgun' ? me.inv.smag : me.inv.mag) - this.localShotSeqs.length;
+    const held = heldWeapon({ ...me, tool: this.localTool });
+    const wid = held?.id ?? null;
+    if (held && wid) {
+      const w = effectiveStats(wid, held.w);
+      const mag = held.w.mag - this.localShotSeqs.length;
       if (me.reloadT > 0 || mag <= 0 || me.tool !== this.localTool) {
         if (this.localFireCd < 0) this.localFireCd = 0;
         return;
@@ -584,27 +596,55 @@ export class GameSession {
     }
   }
 
-  /** 近くにある作業台・チェストのうち、より近いほう */
-  private nearestStation(pos: { x: number; y: number }): 'chest' | 'bench' | null {
-    let best: 'chest' | 'bench' | null = null;
-    let bd = Infinity;
-    for (const ob of this.world.objects.values()) {
-      if (ob.kind !== 'chest' && ob.kind !== 'bench') continue;
-      const d = Math.hypot((ob.tx + 0.5) * TILE - pos.x, (ob.ty + 0.5) * TILE - pos.y);
-      const range = ob.kind === 'chest' ? 70 : BENCH_RANGE;
-      if (d <= range && d < bd) {
-        bd = d;
-        best = ob.kind;
-      }
+  /** 入れ物・倉庫のパネルをサーバーの状態に合わせて開閉する */
+  private syncPanels(me: PlayerSnap, view: ViewState): void {
+    // 新しく武器を装備したら持ち替える
+    const pk = me.prim?.id ?? '';
+    const sk = me.sec?.id ?? '';
+    if (pk && pk !== this.lastPrim) this.localTool = Tool.Primary;
+    else if (sk && sk !== this.lastSec && !pk) this.localTool = Tool.Secondary;
+    this.lastPrim = pk;
+    this.lastSec = sk;
+    const opened = (me.viewing && me.viewing !== this.lastViewing) || (me.storage && !this.lastStorageOpen);
+    const closed = (!me.viewing && this.lastViewing) || (!me.storage && this.lastStorageOpen);
+    this.lastViewing = me.viewing;
+    this.lastStorageOpen = me.storage;
+    if (opened && !this.invPanel.open) {
+      this.craftMenu.toggle(false);
+      this.autoOpened = true;
+      this.invPanel.toggle(true);
+    } else if (closed && !me.viewing && !me.storage && this.autoOpened) {
+      this.autoOpened = false;
+      this.invPanel.toggle(false, true);
     }
-    return best;
+    const ob = me.viewing ? this.world.objects.get(me.viewing) : undefined;
+    this.invPanel.update({
+      me,
+      cont: me.viewing && view.cont[me.viewing] ? { id: me.viewing, name: CONTAINER_NAMES[ob?.kind ?? 'bag'] ?? '入れ物', slots: view.cont[me.viewing] } : null,
+      storage: view.storage ?? this.storage,
+    });
   }
 
-  private nearKind(pos: { x: number; y: number }, kind: string, range: number): boolean {
-    for (const ob of this.world.objects.values()) {
-      if (ob.kind === kind && Math.hypot((ob.tx + 0.5) * TILE - pos.x, (ob.ty + 0.5) * TILE - pos.y) <= range) return true;
-    }
-    return false;
+  /** F で操作される対象（ホストの interact と同じ選び方） */
+  private nearestUsable(pos: { x: number; y: number }): string | null {
+    const ptx = Math.floor(pos.x / TILE);
+    const pty = Math.floor(pos.y / TILE);
+    let best: string | null = null;
+    let bd = 64;
+    for (let ty = pty - 2; ty <= pty + 2; ty++)
+      for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
+        const ob = this.world.objAt(tx, ty);
+        if (!ob) continue;
+        const usable = ob.kind === 'door' || STORAGE_KINDS.has(ob.kind) || (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0));
+        if (!usable) continue;
+        const d = Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) - (ob.kind === 'door' ? 0 : 6);
+        if (d < bd) {
+          bd = d;
+          best = ob.kind;
+        }
+      }
+    if (best) return best;
+    return this.nearBench(pos) ? 'bench' : null;
   }
 
   private nearBench(pos: { x: number; y: number }): boolean {
@@ -615,41 +655,32 @@ export class GameSession {
   }
 
   private interactHint(me: PlayerSnap): string | null {
+    if (me.searchId) return null;
     const ptx = Math.floor(me.x / TILE);
     const pty = Math.floor(me.y / TILE);
     let best: string | null = null;
-    let bd = PLAYER.interactRange;
+    let bd = 64;
     for (let ty = pty - 2; ty <= pty + 2; ty++)
       for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
         const ob = this.world.objAt(tx, ty);
         if (!ob) continue;
-        const d = Math.hypot((tx + 0.5) * TILE - me.x, (ty + 0.5) * TILE - me.y);
+        const d = Math.hypot((tx + 0.5) * TILE - me.x, (ty + 0.5) * TILE - me.y) - (ob.kind === 'door' ? 0 : 6);
         if (d >= bd) continue;
         let h: string | null = null;
-        if (ob.ready && ob.kind === 'crate') h = '[F] 物資クレートを調べる';
-        else if (ob.ready && ob.kind === 'mcrate') h = '[F] 軍用クレートを調べる（レア物資）';
-        else if (ob.ready && ob.kind === 'box') h = '[F] 収納箱を開ける';
-        else if (ob.kind === 'turret') h = `[F] タレットに弾薬を補充（残弾 ${ob.ready}/60）`;
+        if (ob.kind === 'door') h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
+        else if (STORAGE_KINDS.has(ob.kind)) h = '[F] 倉庫を開く（個人・共有）';
+        else if (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) {
+          const name = CONTAINER_NAMES[ob.kind] ?? '入れ物';
+          h = ob.kind === 'bag' ? `[F] ${name}を調べる` : ob.ready ? `[F] ${name}を探索する` : `[F] ${name}（探索済み）`;
+        }
         if (h) {
           bd = d;
           best = h;
         }
       }
     if (best) return best;
-    const station = this.nearestStation(me);
-    if (station === 'chest') return '[F] 共有チェストを開く（仲間と受け渡し）';
-    if (station === 'bench') return '[F] / [C] 作業台でクラフト';
-    if (this.localTool !== Tool.Melee) {
-      for (const dist of [30, 52]) {
-        const ob = this.world.objAt(
-          Math.floor((me.x + Math.cos(this.localAim) * dist) / TILE),
-          Math.floor((me.y + Math.sin(this.localAim) * dist) / TILE),
-        );
-        if (ob && (ob.kind === 'tree' || ob.kind === 'car') && ob.hp > 0) {
-          return ob.kind === 'tree' ? '[1] 斧に持ち替えて木を伐採（木材）' : '[1] 斧に持ち替えて廃車を解体（鉄スクラップ）';
-        }
-      }
-    }
+    if (this.nearBench(me)) return '[F] / [C] 作業台：クラフト・武器改造';
+    if (me.hunger < 30 && countItem(me.bag, 'can') + countItem(me.bag, 'mre') > 0) return '[Q] 食事する';
     return null;
   }
 

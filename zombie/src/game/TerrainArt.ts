@@ -6,7 +6,9 @@
 //   3) 廃墟の壁：ぼかした落ち影＋南側の側面（2.5D）＋レンガの天面
 //   ★ スプライト化する場合はこのファイルの代わりにタイル画像を並べる処理を書けばOK
 // ============================================================
-import { MAP_H, MAP_W, T_DIRT, T_FLOOR, T_GRASS, T_ROAD, T_WALL, TILE, WORLD_H, WORLD_W } from './constants';
+import { MAP_H, MAP_W, T_DIRT, T_FENCE, T_FLOOR, T_GRASS, T_ROAD, T_TILE, T_WALL, T_WINDOW, T_WOOD, TILE, WORLD_H, WORLD_W } from './constants';
+
+const wallLike = (t: number) => t === T_WALL || t === T_WINDOW;
 import type { TileWorld } from './world';
 
 // ---------------- ノイズ ----------------
@@ -85,57 +87,78 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
       const n1 = fbm(wx / 160, wy / 160, 3, 3);
       const n2 = fbm(wx / 26, wy / 26, 7, 2);
       const grain = hash(px, py, 99);
+      // 彩度を落とした荒廃パレット（枯れ草・乾いた土・風化したアスファルト・汚れた床）
       switch (t) {
         case T_GRASS: {
           const lush = n1 * 0.8 + n2 * 0.2;
-          r = mix(46, 78, lush) + (grain - 0.5) * 14;
-          g = mix(70, 104, lush) + (grain - 0.5) * 16;
-          b = mix(36, 48, lush) + (grain - 0.5) * 8;
-          if (n2 > 0.7) {
-            // 乾いた草の斑
-            r += 18;
-            g += 10;
+          r = mix(66, 92, lush) + (grain - 0.5) * 14;
+          g = mix(70, 90, lush) + (grain - 0.5) * 14;
+          b = mix(46, 56, lush) + (grain - 0.5) * 8;
+          if (n2 > 0.66) {
+            // 枯れ草の斑
+            r += 22;
+            g += 14;
+            b += 4;
           }
           break;
         }
-        case T_DIRT: {
+        case T_DIRT:
+        case T_FENCE: {
           const k = n1 * 0.6 + n2 * 0.4;
-          r = mix(88, 118, k) + (grain - 0.5) * 18;
-          g = mix(70, 92, k) + (grain - 0.5) * 14;
-          b = mix(48, 62, k) + (grain - 0.5) * 10;
+          r = mix(86, 108, k) + (grain - 0.5) * 16;
+          g = mix(76, 94, k) + (grain - 0.5) * 14;
+          b = mix(62, 74, k) + (grain - 0.5) * 10;
           break;
         }
         case T_ROAD: {
           const k = n1 * 0.5 + n2 * 0.5;
-          const v = mix(46, 62, k) + (grain - 0.5) * 22;
-          r = v;
-          g = v;
-          b = v + 4;
+          const v = mix(50, 64, k) + (grain - 0.5) * 20;
+          r = v + 2;
+          g = v + 1;
+          b = v;
           if (n2 < 0.22) {
-            // 補修跡の黒い継ぎはぎ
             r -= 10;
             g -= 10;
-            b -= 8;
+            b -= 9;
           }
+          break;
+        }
+        case T_WOOD: {
+          // フローリング：板ごとの色ムラ
+          const plank = Math.floor(wy / 10);
+          const pv = hash(plank, Math.floor((wx + (plank % 3) * 17) / 60), 41);
+          const v = mix(74, 96, pv) + (grain - 0.5) * 10 - n2 * 10;
+          r = v + 14;
+          g = v + 2;
+          b = v - 14;
+          break;
+        }
+        case T_TILE: {
+          const cx = Math.floor(wx / 20);
+          const cy = Math.floor(wy / 20);
+          const checker = (cx + cy) % 2 === 0 ? 8 : 0;
+          const v = 92 + checker + (grain - 0.5) * 8 - Math.max(0, n2 - 0.55) * 40;
+          r = v;
+          g = v - 2;
+          b = v - 6;
           break;
         }
         case T_FLOOR: {
           const k = n1 * 0.7 + n2 * 0.3;
-          const v = mix(84, 104, k) + (grain - 0.5) * 12;
-          r = v + 4;
+          const v = mix(78, 96, k) + (grain - 0.5) * 12;
+          r = v + 2;
           g = v;
-          b = v - 8;
-          // 汚れ（なだらかに）
-          const dirt = Math.max(0, n2 - 0.62) * 2.2;
+          b = v - 4;
+          const dirt = Math.max(0, n2 - 0.58) * 2.2;
           r -= 16 * dirt;
           g -= 18 * dirt;
-          b -= 20 * dirt;
+          b -= 18 * dirt;
           break;
         }
         default: {
-          r = 70;
-          g = 64;
-          b = 58;
+          r = 64;
+          g = 60;
+          b = 56;
         }
       }
       const i = (py * bw + px) * 4;
@@ -189,7 +212,7 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
           const gx = x + hash(tx, ty, i + 10) * TILE;
           const gy = y + hash(tx, ty, i + 30) * TILE;
           const lean = (hash(tx, ty, i + 50) - 0.5) * 4;
-          ctx.strokeStyle = hash(tx, ty, i + 70) > 0.5 ? 'rgba(130,170,80,0.35)' : 'rgba(20,45,15,0.35)';
+          ctx.strokeStyle = hash(tx, ty, i + 70) > 0.5 ? 'rgba(150,145,95,0.32)' : 'rgba(40,40,25,0.32)';
           ctx.beginPath();
           ctx.moveTo(gx, gy);
           ctx.lineTo(gx + lean, gy - 4 - hash(tx, ty, i + 90) * 3);
@@ -197,7 +220,7 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
         }
         if (r > 0.95) {
           // 小さな花
-          ctx.fillStyle = r > 0.975 ? 'rgba(230,220,120,0.8)' : 'rgba(220,170,200,0.7)';
+          ctx.fillStyle = r > 0.975 ? 'rgba(190,180,120,0.6)' : 'rgba(170,150,150,0.5)';
           for (let i = 0; i < 3; i++) ctx.fillRect(x + 8 + hash(tx, ty, i) * 24, y + 8 + hash(tx, ty, i + 4) * 24, 2, 2);
         }
       } else if (t === T_DIRT) {
@@ -211,6 +234,47 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
         }
       } else if (t === T_ROAD) {
         drawRoadDetails(ctx, tx, ty, terrainAt);
+      } else if (t === T_WOOD) {
+        // 板の継ぎ目
+        ctx.strokeStyle = 'rgba(30,18,10,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let k = 0; k < 4; k++) {
+          ctx.moveTo(x, y + k * 10 + 0.5);
+          ctx.lineTo(x + TILE, y + k * 10 + 0.5);
+          const jx = x + ((tx * 7 + ty * 3 + k * 13) % 4) * 10 + 0.5;
+          ctx.moveTo(jx, y + k * 10);
+          ctx.lineTo(jx, y + k * 10 + 10);
+        }
+        ctx.stroke();
+        if (r > 0.88) {
+          ctx.fillStyle = 'rgba(20,14,10,0.3)';
+          ctx.beginPath();
+          ctx.ellipse(x + 10 + r * 20, y + 20, 9, 5, r * 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (t === T_TILE) {
+        ctx.strokeStyle = 'rgba(40,38,34,0.35)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, y);
+        ctx.lineTo(x + 0.5, y + TILE);
+        ctx.moveTo(x + 20.5, y);
+        ctx.lineTo(x + 20.5, y + TILE);
+        ctx.moveTo(x, y + 0.5);
+        ctx.lineTo(x + TILE, y + 0.5);
+        ctx.moveTo(x, y + 20.5);
+        ctx.lineTo(x + TILE, y + 20.5);
+        ctx.stroke();
+        if (r > 0.86) {
+          // ひび割れたタイル・汚れ
+          ctx.strokeStyle = 'rgba(30,28,24,0.5)';
+          ctx.beginPath();
+          ctx.moveTo(x + 4 + r * 10, y + 3);
+          ctx.lineTo(x + 14, y + 13);
+          ctx.lineTo(x + 9, y + 19);
+          ctx.stroke();
+        }
       } else if (t === T_FLOOR) {
         // 床タイルの目地
         ctx.strokeStyle = 'rgba(0,0,0,0.16)';
@@ -258,7 +322,7 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
   sctx.fillStyle = '#000';
   for (let ty = 0; ty < MAP_H; ty++)
     for (let tx = 0; tx < MAP_W; tx++) {
-      if (terrainAt(tx, ty) !== T_WALL) continue;
+      if (!wallLike(terrainAt(tx, ty))) continue;
       sctx.fillRect(tx * TILE + 8, ty * TILE + 12, TILE, TILE);
     }
   ctx.save();
@@ -270,9 +334,13 @@ export function bakeTerrain(world: TileWorld): BakedTerrain {
   // ---------- 4) 廃墟の壁（側面＋天面） ----------
   for (let ty = 0; ty < MAP_H; ty++)
     for (let tx = 0; tx < MAP_W; tx++) {
-      if (terrainAt(tx, ty) !== T_WALL) continue;
-      drawRuinWall(ctx, tx, ty, terrainAt);
+      const t = terrainAt(tx, ty);
+      if (t === T_WALL) drawRuinWall(ctx, tx, ty, terrainAt);
+      else if (t === T_WINDOW) drawWindow(ctx, tx, ty, terrainAt);
     }
+  // ---------- 5) 金網フェンス ----------
+  for (let ty = 0; ty < MAP_H; ty++)
+    for (let tx = 0; tx < MAP_W; tx++) if (terrainAt(tx, ty) === T_FENCE) drawFence(ctx, tx, ty, terrainAt);
 
   // ---------- ミニマップ ----------
   const mini = document.createElement('canvas');
@@ -358,20 +426,20 @@ function drawRoadDetails(ctx: CanvasRenderingContext2D, tx: number, ty: number, 
 function drawRuinWall(ctx: CanvasRenderingContext2D, tx: number, ty: number, at: (x: number, y: number) => number): void {
   const x = tx * TILE;
   const y = ty * TILE;
-  const below = at(tx, ty + 1) === T_WALL;
+  const below = wallLike(at(tx, ty + 1));
   // 南側の側面（高さ表現）
   if (!below) {
     const face = 12;
     const g = ctx.createLinearGradient(0, y + TILE, 0, y + TILE + face);
-    g.addColorStop(0, '#3a332d');
-    g.addColorStop(1, '#2a2520');
+    g.addColorStop(0, '#3b3935');
+    g.addColorStop(1, '#292825');
     ctx.fillStyle = g;
     ctx.fillRect(x, y + TILE, TILE, face);
     ctx.fillStyle = 'rgba(0,0,0,0.25)';
     for (let i = 0; i < 4; i++) ctx.fillRect(x + i * 10 + (ty % 2) * 5, y + TILE + 5, 1, 7);
   }
   // 天面（レンガ）
-  ctx.fillStyle = '#4e463f';
+  ctx.fillStyle = '#45433f';
   ctx.fillRect(x, y, TILE, TILE);
   for (let row = 0; row < 4; row++) {
     const off = (row + ty) % 2 ? 0 : 10;
@@ -381,12 +449,12 @@ function drawRuinWall(ctx: CanvasRenderingContext2D, tx: number, ty: number, at:
       const x1 = Math.min(x + TILE, bx + 19);
       if (x1 <= x0) continue;
       const v = hash(tx * 4 + col, ty * 4 + row, 8);
-      ctx.fillStyle = `rgb(${96 + v * 26},${84 + v * 20},${74 + v * 16})`;
+      ctx.fillStyle = `rgb(${88 + v * 20},${85 + v * 18},${80 + v * 14})`;
       ctx.fillRect(x0, y + row * 10 + 1, x1 - x0, 8);
     }
   }
   // 上辺のハイライトと苔
-  if (at(tx, ty - 1) !== T_WALL) {
+  if (!wallLike(at(tx, ty - 1))) {
     ctx.fillStyle = 'rgba(255,240,220,0.12)';
     ctx.fillRect(x, y, TILE, 2);
   }
@@ -396,4 +464,102 @@ function drawRuinWall(ctx: CanvasRenderingContext2D, tx: number, ty: number, at:
     ctx.ellipse(x + hash(tx, ty, 78) * TILE, y + hash(tx, ty, 79) * TILE, 7, 4, 0, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+/** ガラス窓：壁の天面に窓枠とくすんだガラス */
+function drawWindow(ctx: CanvasRenderingContext2D, tx: number, ty: number, at: (x: number, y: number) => number): void {
+  const x = tx * TILE;
+  const y = ty * TILE;
+  const horiz = wallLike(at(tx - 1, ty)) || wallLike(at(tx + 1, ty));
+  if (!wallLike(at(tx, ty + 1))) {
+    const g = ctx.createLinearGradient(0, y + TILE, 0, y + TILE + 12);
+    g.addColorStop(0, '#3b3935');
+    g.addColorStop(1, '#292825');
+    ctx.fillStyle = g;
+    ctx.fillRect(x, y + TILE, TILE, 12);
+  }
+  ctx.fillStyle = '#45433f';
+  ctx.fillRect(x, y, TILE, TILE);
+  // 窓枠
+  ctx.fillStyle = '#5a5246';
+  if (horiz) ctx.fillRect(x, y + 13, TILE, 14);
+  else ctx.fillRect(x + 13, y, 14, TILE);
+  // ガラス（くすんだ青灰色＋反射）
+  ctx.fillStyle = 'rgba(96,118,124,0.75)';
+  if (horiz) ctx.fillRect(x + 2, y + 16, TILE - 4, 8);
+  else ctx.fillRect(x + 16, y + 2, 8, TILE - 4);
+  ctx.fillStyle = 'rgba(220,230,230,0.25)';
+  if (horiz) ctx.fillRect(x + 6, y + 17, 10, 2);
+  else ctx.fillRect(x + 17, y + 6, 2, 10);
+  // 割れたガラス
+  if (hash(tx, ty, 5) > 0.6) {
+    ctx.strokeStyle = 'rgba(20,24,26,0.7)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (horiz) {
+      ctx.moveTo(x + 22, y + 16);
+      ctx.lineTo(x + 26, y + 20);
+      ctx.lineTo(x + 31, y + 18);
+      ctx.moveTo(x + 26, y + 20);
+      ctx.lineTo(x + 25, y + 24);
+    } else {
+      ctx.moveTo(x + 16, y + 22);
+      ctx.lineTo(x + 20, y + 26);
+      ctx.lineTo(x + 18, y + 31);
+      ctx.moveTo(x + 20, y + 26);
+      ctx.lineTo(x + 24, y + 25);
+    }
+    ctx.stroke();
+  }
+}
+
+/** 金網フェンス：支柱と網目（向こうが見える） */
+function drawFence(ctx: CanvasRenderingContext2D, tx: number, ty: number, at: (x: number, y: number) => number): void {
+  const x = tx * TILE;
+  const y = ty * TILE;
+  const horiz = at(tx - 1, ty) === T_FENCE || at(tx + 1, ty) === T_FENCE;
+  ctx.save();
+  // 影
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  if (horiz) ctx.fillRect(x, y + 22, TILE, 6);
+  else ctx.fillRect(x + 22, y, 6, TILE);
+  // 網目
+  ctx.strokeStyle = 'rgba(150,150,140,0.55)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (horiz) {
+    for (let k = -6; k < TILE; k += 6) {
+      ctx.moveTo(x + k, y + 14);
+      ctx.lineTo(x + k + 6, y + 24);
+      ctx.moveTo(x + k + 6, y + 14);
+      ctx.lineTo(x + k, y + 24);
+    }
+  } else {
+    for (let k = -6; k < TILE; k += 6) {
+      ctx.moveTo(x + 14, y + k);
+      ctx.lineTo(x + 24, y + k + 6);
+      ctx.moveTo(x + 24, y + k);
+      ctx.lineTo(x + 14, y + k + 6);
+    }
+  }
+  ctx.stroke();
+  // 支柱と上端のワイヤー
+  ctx.strokeStyle = '#6b665c';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (horiz) {
+    ctx.moveTo(x, y + 14);
+    ctx.lineTo(x + TILE, y + 14);
+  } else {
+    ctx.moveTo(x + 14, y);
+    ctx.lineTo(x + 14, y + TILE);
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#58534a';
+  if ((tx + ty) % 2 === 0) {
+    ctx.beginPath();
+    ctx.arc(x + (horiz ? 4 : 19), y + (horiz ? 19 : 4), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }

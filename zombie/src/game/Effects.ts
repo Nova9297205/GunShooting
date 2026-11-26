@@ -26,7 +26,7 @@ export interface Decal {
   y: number;
   r: number;
   rot: number;
-  kind: 'blood' | 'pool' | 'scorch';
+  kind: 'blood' | 'pool' | 'scorch' | 'foot';
   life: number;
   maxLife: number;
   seed: number;
@@ -298,7 +298,7 @@ export class Effects {
         this.burst(ev.x, ev.y, '#a59c8a', 4, 60, 0.5, 4, 'smoke', false);
         break;
       case 'dmg':
-        this.popup(ev.x, ev.y, String(ev.v), ev.p ? '#ff5c5c' : '#ffffff', ev.p ? 17 : 14);
+        this.popup(ev.x, ev.y, String(ev.v), ev.p ? '#c0573e' : '#ffffff', ev.p ? 17 : 14);
         break;
       case 'kill': {
         const big = ev.r >= 20;
@@ -333,13 +333,13 @@ export class Effects {
         break;
       case 'down':
         this.burst(ev.x, ev.y, PLAYER_COLORS[ev.id] ?? '#fff', 24, 260, 0.7, 3);
-        this.popup(ev.x, ev.y - 30, 'DOWN!', '#ff5c5c', 22);
+        this.popup(ev.x, ev.y - 30, 'DOWN!', '#c0573e', 22);
         if (ev.id === localId) this.shake(0.5);
         break;
       case 'revive':
-        this.burst(ev.x, ev.y, '#7dffb0', 28, 240, 0.8, 3);
-        this.ring(ev.x, ev.y, '#7dffb0', 60, 0.5);
-        this.popup(ev.x, ev.y - 30, 'REVIVED!', '#7dffb0', 20);
+        this.burst(ev.x, ev.y, '#8fbf8a', 28, 240, 0.8, 3);
+        this.ring(ev.x, ev.y, '#8fbf8a', 60, 0.5);
+        this.popup(ev.x, ev.y - 30, 'REVIVED!', '#8fbf8a', 20);
         break;
       case 'dead':
         break;
@@ -364,19 +364,22 @@ export class Effects {
       }
       case 'build':
         this.burst(ev.x, ev.y, '#e0f0ff', 8, 140, 0.35, 2);
-        this.ring(ev.x, ev.y, '#9fd8ff', 30, 0.3);
+        this.ring(ev.x, ev.y, '#9fb4c2', 30, 0.3);
         break;
       case 'pop':
         this.popup(ev.x, ev.y, ev.t, ev.c, ev.id === localId ? 15 : 12);
         break;
       case 'banner':
         this.showBanner(ev.t, ev.s, ev.c);
-        if (ev.c === '#ff3b3b') this.shake(0.5);
+        if (ev.c === '#b03a2e') this.shake(0.5);
         break;
       case 'burn':
-        this.burst(ev.x, ev.y, '#ff9a3d', 16, 120, 1.0, 4, 'spark', true, -Math.PI / 2, 1.2);
+        this.burst(ev.x, ev.y, '#c88a4a', 16, 120, 1.0, 4, 'spark', true, -Math.PI / 2, 1.2);
         this.burst(ev.x, ev.y, '#555', 10, 60, 1.4, 8, 'smoke', false, -Math.PI / 2, 1);
         this.decal(ev.x, ev.y, 18, 'scorch', 40);
+        break;
+      case 'door':
+        this.burst(ev.x, ev.y, '#8a8070', 5, 60, 0.6, 5, 'smoke', false);
         break;
       case 'tshot':
         this.turretAim.set(ev.id, { a: ev.a, flash: 0.06 });
@@ -386,7 +389,7 @@ export class Effects {
       case 'ping':
         this.pings = this.pings.filter((p) => p.id !== ev.id);
         this.pings.push({ id: ev.id, x: ev.x, y: ev.y, t: ev.t, life: 7 });
-        this.ring(ev.x, ev.y, ev.t === 'enemy' ? '#ff5c5c' : ev.t === 'loot' ? '#ffd84d' : PLAYER_COLORS[ev.id] ?? '#fff', 60, 0.6);
+        this.ring(ev.x, ev.y, ev.t === 'enemy' ? '#c0573e' : ev.t === 'loot' ? '#c9a85a' : PLAYER_COLORS[ev.id] ?? '#fff', 60, 0.6);
         break;
       case 'noise':
         this.ring(ev.x, ev.y, '#5a6270', 46, 0.25); // 銃声（騒音）の小さな波紋

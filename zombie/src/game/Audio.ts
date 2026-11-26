@@ -597,6 +597,43 @@ export class AudioManager {
       case 'tshot':
         this.turretShot(ev.x, ev.y);
         break;
+      case 'door': {
+        const s = this.spatial(ev.x, ev.y);
+        if (!s || !this.gate('door', 0.1)) break;
+        const t = this.ctx!.currentTime;
+        if (ev.open) {
+          // きしむ音
+          this.tone({ type: 'sawtooth', f: 180, f2: 240, dur: 0.35, g: 0.05 * s.k, lp: 900, a: 0.05, pan: s.pan, t });
+          this.noise({ dur: 0.08, g: 0.12 * s.k, filter: 'bandpass', f: 900, q: 2, pan: s.pan, t });
+        } else {
+          // バタンと閉まる音
+          this.noise({ dur: 0.14, g: 0.35 * s.k, filter: 'lowpass', f: 700, pan: s.pan, t });
+          this.tone({ f: 110, f2: 60, dur: 0.12, g: 0.3 * s.k, pan: s.pan, t });
+        }
+        break;
+      }
+      case 'search': {
+        const s = this.spatial(ev.x, ev.y);
+        if (!s) break;
+        const t = this.ctx!.currentTime;
+        if (!ev.done) {
+          // ガサゴソと漁る音
+          for (let i = 0; i < 5; i++) this.noise({ dur: 0.12, g: (0.08 + Math.random() * 0.05) * s.k, filter: 'bandpass', f: 1400 + Math.random() * 1400, q: 1.5, pan: s.pan, t: t + i * 0.28 + Math.random() * 0.08 });
+        } else if (ev.id === localId) {
+          this.tone({ type: 'triangle', f: 660, dur: 0.08, g: 0.07, t });
+          this.tone({ type: 'triangle', f: 990, dur: 0.12, g: 0.07, t: t + 0.07 });
+        }
+        break;
+      }
+      case 'alert': {
+        // 気づかれた！（短い叫び声）
+        const s = this.spatial(ev.x, ev.y);
+        if (!s || !this.gate('alert', 0.35)) break;
+        const t = this.ctx!.currentTime;
+        this.tone({ type: 'sawtooth', f: 240 + Math.random() * 60, f2: 140, dur: 0.45, g: 0.16 * s.k, lp: 1300, a: 0.03, pan: s.pan, t });
+        this.noise({ dur: 0.3, g: 0.1 * s.k, filter: 'bandpass', f: 900, q: 1, pan: s.pan, t });
+        break;
+      }
       case 'ping': {
         const t = this.ctx!.currentTime;
         const [a, b] = ev.t === 'enemy' ? [880, 660] : ev.t === 'loot' ? [988, 1318] : [784, 1046];
@@ -619,15 +656,17 @@ export class AudioManager {
   /** 毎フレーム：リスナー位置の更新と環境音（ゾンビのうめき声・焚き火） */
   update(dt: number, view: ViewState, campfires: { x: number; y: number }[]): void {
     if (!this.ready) return;
-    this.music?.setMood(view.phase);
+    // 追われているときは緊迫した曲調に
+    const chased = view.zombies.some((z) => z.alert === 2 && Math.hypot(z.x - this.listener.x, z.y - this.listener.y) < 650);
+    this.music?.setMood(chased ? 'horde' : view.phase);
     // うめき声：近くのゾンビが多いほど頻繁に
     this.groanT -= dt;
     if (this.groanT <= 0) {
       const near = view.zombies.filter((z) => Math.hypot(z.x - this.listener.x, z.y - this.listener.y) < 750);
       if (near.length > 0) {
         const z = near[Math.floor(Math.random() * near.length)];
-        this.groan(z.x, z.y, z.horde, z.type === 'brute');
-        const base = view.phase === 'horde' ? 0.5 : 1.6;
+        this.groan(z.x, z.y, z.alert === 2, z.type === 'brute');
+        const base = near.some((z) => z.alert === 2) ? 0.6 : 1.6;
         this.groanT = (base + Math.random() * base * 1.5) / Math.sqrt(near.length);
       } else this.groanT = 0.8;
     }

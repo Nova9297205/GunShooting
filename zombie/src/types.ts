@@ -1,6 +1,9 @@
 // ============================================================
 // 共通型定義（プレイヤー・ゾンビ・弾・オブジェクト・通信パケット）
 // ============================================================
+import type { Slot } from './game/items';
+
+export type { Slot, WeaponId } from './game/items';
 
 export interface Vec2 {
   x: number;
@@ -8,42 +11,50 @@ export interface Vec2 {
 }
 
 export type PlayerStatus = 'alive' | 'down' | 'dead';
-export type ZombieType = 'walker' | 'runner' | 'brute';
-export type TimePhase = 'day' | 'night' | 'horde';
+/** walker=徘徊型 / runner=俊敏型 / brute=重装型 / soldier=感染兵士 */
+export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier';
+export type TimePhase = 'day' | 'night';
 export type GameMode = 'solo' | 'host' | 'guest';
 
-/** マップ上のオブジェクト種別（資源・設備・建築物） */
+/** マップ上のオブジェクト種別（設備・家具・入れ物・ドアなど） */
 export type ObjKind =
   | 'tree'
   | 'car'
   | 'crate'
   | 'box'
   | 'campfire'
+  | 'mcrate'
+  | 'bench'
+  | 'chest'
+  | 'door'
+  | 'shelf'
+  | 'cabinet'
+  | 'locker'
+  | 'wcase'
+  | 'fridge'
+  | 'desk'
+  | 'bed'
+  | 'rubble'
+  | 'sandbag'
+  | 'stash'
+  | 'bag'
+  // 以下は旧バージョンの建築物（描画コードの互換用）
   | 'stone'
   | 'woodWall'
   | 'ironWall'
   | 'spike'
   | 'torch'
-  | 'mcrate'
-  | 'bench'
   | 'barbed'
-  | 'turret'
-  | 'chest';
+  | 'turret';
 
-export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'barbed' | 'turret';
-
-/** ホットバーのスロット番号（キー 1〜9 に対応） */
+/** ホットバーのスロット番号（キー 1〜5 に対応） */
 export const Tool = {
   Melee: 0,
-  Gun: 1,
-  Shotgun: 2,
-  Build: 3,
+  Primary: 1,
+  Secondary: 2,
+  Meds: 3,
   Food: 4,
-  Medkit: 5,
 } as const;
-
-/** 武器の種類（射撃系） */
-export type WeaponId = 'pistol' | 'rifle' | 'shotgun';
 
 /** 1フレーム分の操作入力（ゲスト→ホストへ送信） */
 export interface InputFrame {
@@ -52,7 +63,7 @@ export interface InputFrame {
   mx: number;
   my: number;
   aim: number;
-  /** 左クリック押しっぱなし（射撃 / 近接 / 建築 / 修理） */
+  /** 左クリック押しっぱなし（攻撃・使用） */
   fire: boolean;
   /** E 長押し（蘇生） */
   revive: boolean;
@@ -60,21 +71,16 @@ export interface InputFrame {
   dash: boolean;
   interact: boolean;
   reload: boolean;
-  /** クラフトするレシピID（なければ空文字） */
-  craft: string;
   eat: boolean;
   heal: boolean;
+  ping: boolean;
+  /** クラフトするレシピID（なければ空文字） */
+  craft: string;
+  /** インベントリ操作（例 "take:12:3" / "use:5" / "equip:2"、なければ空文字） */
+  op: string;
   /** 選択中のスロット (Tool.*) */
   tool: number;
-  /** 建築ツールで選んでいる設計図の番号（BLUEPRINTS のインデックス） */
-  bp: number;
-  /** 右クリック押しっぱなし（建築ツールでは修理） */
-  alt: boolean;
-  /** G キー：マウス位置にピンを立てる（押した瞬間のみ） */
-  ping: boolean;
-  /** 共有チェストの操作（例 "d:ammo:10" = 預ける / "w:ammo:10" = 受け取る、なければ空文字） */
-  chest: string;
-  /** マウスが指しているタイル座標（建築・修理対象） */
+  /** マウスが指しているタイル座標 */
   tx: number;
   ty: number;
 }
@@ -93,32 +99,6 @@ export interface MoveBody {
   staminaDelay: number;
 }
 
-export interface Inventory {
-  /** 予備弾薬（拳銃・ライフル共通） */
-  ammo: number;
-  /** 拳銃/ライフルのマガジン内の弾 */
-  mag: number;
-  /** 予備のショットガンシェル */
-  shells: number;
-  /** ショットガンの装填数 */
-  smag: number;
-  /** 銃のランク：0=拳銃 1=アサルトライフル */
-  gun: number;
-  /** ショットガン所持 0/1 */
-  shotgun: number;
-  /** 布・薬草・武器パーツ（クラフト素材） */
-  cloth: number;
-  herb: number;
-  parts: number;
-  /** タレットキット（クラフトして設置） */
-  kit: number;
-  /** 斧のランク：0=斧 1=鋼の斧 */
-  axe: number;
-  gunpowder: number;
-  food: number;
-  medkit: number;
-}
-
 export interface PlayerSnap extends MoveBody {
   id: number;
   name: string;
@@ -130,12 +110,22 @@ export interface PlayerSnap extends MoveBody {
   downTimer: number;
   reviveProgress: number;
   tool: number;
-  inv: Inventory;
+  /** バックパック（16マス） */
+  bag: (Slot | null)[];
+  /** メイン武器 / サブ武器（ハンドガン） */
+  prim: Slot | null;
+  sec: Slot | null;
   reloadT: number;
   shots: number;
   swings: number;
   kills: number;
-  builds: number;
+  /** 探索中のコンテナIDと進捗(0..1) */
+  searchId: number;
+  searchP: number;
+  /** 中身を見ているコンテナID（0 = なし） */
+  viewing: number;
+  /** 拠点の倉庫を開いているか */
+  storage: number;
   ack: number;
 }
 
@@ -148,7 +138,8 @@ export interface ZombieSnap {
   hp: number;
   maxHp: number;
   flash: number;
-  horde: boolean;
+  /** 0=徘徊 1=物音を調べている 2=追跡中 */
+  alert: number;
   /** 攻撃回数カウンタ（攻撃モーション用） */
   atk: number;
 }
@@ -170,13 +161,8 @@ export interface ObjSnap {
   ty: number;
   hp: number;
   maxHp: number;
-  /** クレート/収納箱: 1=物資あり 0=回収済み ／ タレット: 残弾数 */
+  /** ドア: 1=開 0=閉 ／ 入れ物: 1=未探索 0=探索済み */
   ready: number;
-}
-
-export interface Stash {
-  wood: number;
-  scrap: number;
 }
 
 /** イベントに付ける効果音の種類 */
@@ -201,7 +187,10 @@ export type GameEvent =
   | { k: 'burn'; x: number; y: number }
   | { k: 'noise'; x: number; y: number; r: number }
   | { k: 'tshot'; x: number; y: number; a: number; id: number }
-  | { k: 'ping'; id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go' };
+  | { k: 'ping'; id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go' }
+  | { k: 'door'; x: number; y: number; open: boolean }
+  | { k: 'search'; id: number; x: number; y: number; done: boolean }
+  | { k: 'alert'; x: number; y: number };
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {
@@ -211,13 +200,19 @@ export interface ViewState {
   /** その日の時刻（分, 0..1439） */
   minute: number;
   phase: TimePhase;
-  stash: Stash;
-  /** 拠点の共有チェストの中身 */
-  chest: Record<string, number>;
-  hordeLeft: number;
   players: PlayerSnap[];
   zombies: ZombieSnap[];
   bullets: BulletSnap[];
+  /** 誰かが中身を見ているコンテナの中身 */
+  cont: Record<number, (Slot | null)[]>;
+  /** 拠点の倉庫（共有倉庫と各プレイヤーの個人倉庫）。変化したときだけ届く */
+  storage?: StorageState;
+}
+
+export interface StorageState {
+  ver: number;
+  shared: (Slot | null)[];
+  personal: Record<number, (Slot | null)[]>;
 }
 
 /** ホスト→ゲストへ約30Hzで送るスナップショット */
@@ -243,7 +238,7 @@ export interface StartInfo {
 
 export interface GameResult {
   day: number;
-  players: { id: number; name: string; kills: number; builds: number }[];
+  players: { id: number; name: string; kills: number; value: number }[];
 }
 
 // ---------------- 通信パケット ----------------
