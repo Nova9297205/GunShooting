@@ -158,6 +158,9 @@ export class Renderer {
   private ovCache: Record<string, string> = {};
   private baseDpr = 1;
   private fpsAvg = 60;
+  /** 直前のフレームの描画時間の内訳（ms）と描画数（パフォーマンス表示用） */
+  perfT = { world: 0, light: 0, over: 0, hud: 0 };
+  perfN = { objects: 0, zombiesDrawn: 0, particles: 0 };
   private qTimer = 0;
 
   constructor(
@@ -236,6 +239,15 @@ export class Renderer {
       this.qTimer = 0;
       this.resize();
     } else if (this.qTimer > 6) this.qTimer = 0;
+  }
+
+  /** パフォーマンス表示用：解像度と地形キャッシュ */
+  perfInfo(): { res: string; terrain: string } {
+    const t = this.terrain;
+    return {
+      res: `${this.canvas.width}×${this.canvas.height}（倍率 ${this.dpr.toFixed(2)} / 自動調整 ${Math.round(this.renderScale * 100)}%）`,
+      terrain: t ? `${t.size}/24 焼込 ${t.stats.baked}` : '-',
+    };
   }
 
   resize(): void {
@@ -341,6 +353,7 @@ export class Renderer {
     const ox = Math.round(this.w / 2 - this.cam.x + shake.x);
     const oy = Math.round(this.h / 2 - this.cam.y + shake.y);
 
+    const t0 = performance.now();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     // マップの外側は深い森
     // （画面がマップの外にはみ出しているときだけ塗る）
@@ -419,10 +432,15 @@ export class Renderer {
     this.drawRoofs(me, vx0, vy0, vx1, vy1, true);
     ctx.restore();
 
+    const t1 = performance.now();
+    this.perfN.objects = visible.length;
+    this.perfN.zombiesDrawn = zombiesSeen.length;
+    this.perfN.particles = fx.particles.length;
     // ---- ライティング・天候 ----
     this.drawLighting(view, dark, ox, oy);
     this.drawWeather(view, dark, o.dt);
 
+    const t2 = performance.now();
     // ---- 光る要素・オーバーレイ ----
     ctx.save();
     ctx.translate(ox, oy);
@@ -436,6 +454,7 @@ export class Renderer {
     this.drawPopups(fx);
     ctx.restore();
 
+    const t3 = performance.now();
     // 色調・グレインは CSS（#game.fx / #fx-grain）で行う
     // 照準・バナー・ヒントなど毎フレーム変わる HUD は、色調フィルターのかからない透明キャンバスへ
     {
@@ -451,6 +470,11 @@ export class Renderer {
         this.ctx = main;
       }
     }
+    const t4 = performance.now();
+    this.perfT.world = t1 - t0;
+    this.perfT.light = t2 - t1;
+    this.perfT.over = t3 - t2;
+    this.perfT.hud = t4 - t3;
   }
 
   /** 視界の計算（昼は広く、夜は懐中電灯の届く範囲だけ） */

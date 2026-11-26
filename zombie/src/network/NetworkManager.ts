@@ -3,6 +3,7 @@
 //   - ホスト: 6桁ルームIDで Peer を作成し、最大2人のゲスト接続を受け付ける
 //   - ゲスト: ルームIDへ接続し、名前を名乗ってから入力送信・スナップショット受信
 // ============================================================
+import { netStats } from '../game/PerfOverlay';
 import { Peer, type DataConnection, type PeerOptions } from 'peerjs';
 import type {
   GameResult,
@@ -34,6 +35,7 @@ interface ChunkMsg {
 
 function sendBig(conn: DataConnection, msg: object): void {
   const s = JSON.stringify(msg);
+  netStats.out += s.length;
   if (s.length <= CHUNK) {
     conn.send(msg);
     return;
@@ -276,6 +278,8 @@ export class NetworkManager {
             const now = performance.now();
             if (lastSnapAt) this.snapInterval = this.snapInterval * 0.9 + (now - lastSnapAt) * 0.1;
             lastSnapAt = now;
+            netStats.snaps++;
+            if (netStats.measure) netStats.in += JSON.stringify(msg.s).length;
             this.handlers.onSnapshot?.(msg.s);
             break;
           }

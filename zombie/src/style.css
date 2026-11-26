@@ -1522,3 +1522,43 @@ input[type='range'] {
   opacity: 0;
   background: radial-gradient(ellipse 72% 72% at 50% 50%, rgba(150, 170, 50, 0) 40%, rgba(130, 150, 40, 0.85) 100%);
 }
+
+/* ---- パフォーマンス表示（F3 / P） ---- */
+#perf {
+  position: fixed;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 40;
+  pointer-events: none;
+  padding: 10px 12px 8px;
+  background: rgba(10, 11, 8, 0.82);
+  border: 1px solid rgba(224, 163, 58, 0.35);
+  border-left: 3px solid #e0a33a;
+  color: #d8d2b8;
+  font: 12px/1.45 'Share Tech Mono', 'Noto Sans JP', monospace;
+}
+#perf.hidden {
+  display: none;
+}
+#perf pre {
+  margin: 0 0 6px;
+  font: inherit;
+  white-space: pre;
+}
+#perf canvas {
+  display: block;
+  width: 300px;
+  height: 70px;
+}
+#perf .big {
+  font-size: 20px;
+  font-family: 'Oswald', sans-serif;
+  letter-spacing: 0.04em;
+}
+#perf .ok { color: #9fd38a; }
+#perf .warn { color: #e0a33a; }
+#perf .ng { color: #e0705a; }
+#perf b { font-weight: 500; }
+#perf i { font-style: normal; }
+#perf .dim { color: rgba(216, 210, 184, 0.45); font-size: 11px; }

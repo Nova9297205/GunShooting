@@ -5,6 +5,7 @@
 //   guest : 入力を送りつつ自機の移動・照準・射撃エフェクトをクライアント側予測で即時反映、
 //           他プレイヤー・ゾンビ・弾はスナップショット間を線形補間して描画
 // ============================================================
+import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
   BulletSnap,
   GameEvent,
@@ -99,6 +100,8 @@ export class GameSession {
   private lastPrim = '';
   private lastSave = 0;
   private mapOpen = false;
+  /** F3 / P：パフォーマンス表示 */
+  private perf = new PerfOverlay();
   private lastSec = '';
   /** ゲスト：最後に受け取った倉庫の状態（変化したときだけ届く） */
   private storage: StorageState | null = null;
@@ -186,6 +189,7 @@ export class GameSession {
 
   stop(): void {
     this.renderer.destroy();
+    this.perf.destroy();
     this.hudButtons.classList.add('hidden');
     this.craftMenu.destroy();
     this.invPanel.destroy();
@@ -451,6 +455,15 @@ export class GameSession {
     this.rafId = requestAnimationFrame(this.frame);
     const dt = Math.min(0.1, Math.max(0, (nowMs - this.lastFrame) / 1000));
     this.lastFrame = nowMs;
+    this.perf.beginFrame(nowMs);
+    try {
+      this.frameBody(nowMs, dt);
+    } finally {
+      this.perf.endFrame();
+    }
+  };
+
+  private frameBody(nowMs: number, dt: number): void {
     const localId = this.o.localId;
 
     let myPos: { x: number; y: number } | null = null;
@@ -535,6 +548,7 @@ export class GameSession {
 
     this.pendingCraft = '';
     let view: ViewState | null;
+    const tSim = performance.now();
     if (this.sim) {
       this.sim.queueInput(localId, frame);
       this.pump();
@@ -554,6 +568,7 @@ export class GameSession {
       this.updateLocalBullets(dt, view);
     }
 
+    this.perf.add('sim', performance.now() - tSim);
     if (!view) {
       this.drawWaiting();
       return;
@@ -589,11 +604,41 @@ export class GameSession {
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
       muted: audio.settings.muted,
     });
+    const pt = this.renderer.perfT;
+    this.perf.add('world', pt.world);
+    this.perf.add('light', pt.light);
+    this.perf.add('over', pt.over);
+    this.perf.add('hud', pt.hud);
+    if (this.perf.open) this.perf.counts = this.perfCounts(view);
     // 聞き手の位置＝カメラ中心。BGMの曲調と環境音を更新
     audio.listener.x = this.renderer.cam.x;
     audio.listener.y = this.renderer.cam.y;
     audio.update(dt, view, this.campfires);
-  };
+  }
+
+  /** パフォーマンス表示に出す数値 */
+  private perfCounts(view: ViewState): PerfCounts {
+    const r = this.renderer.perfInfo();
+    const n = this.renderer.perfN;
+    const sim = this.sim;
+    const act = sim ? sim.chunkActive.reduce((s, v) => s + v, 0) : 0;
+    const net =
+      this.o.mode === 'solo'
+        ? 'ソロ'
+        : this.o.mode === 'host'
+          ? `ホスト（ゲスト ${Math.max(0, view.players.length - 1)}人）`
+          : `ゲスト 同期間隔 ${Math.round(this.o.net?.snapInterval ?? 0)}ms`;
+    return {
+      zombies: sim ? sim.zombies.length : view.zombies.length,
+      zombiesDrawn: n.zombiesDrawn,
+      objects: n.objects,
+      particles: n.particles,
+      chunks: sim ? `${act}/${sim.chunkActive.length} 稼働` : '（ホスト側で計算）',
+      terrain: r.terrain,
+      res: r.res,
+      net,
+    };
+  }
 
   /** ゲスト：射撃・近接の見た目を即時に出す（判定はホスト） */
   private predictLocalActions(frame: InputFrame, status: PlayerSnap['status'], me: PlayerSnap | undefined, dt: number): void {
