@@ -1152,6 +1152,31 @@ export class VectorArt implements ArtSet {
       ctx.fill();
     }
 
+    // 感染兵士：防弾ベストとヘルメット
+    if (z.type === 'soldier') {
+      ctx.fillStyle = flash ? '#fff' : '#3b4030';
+      roundRect(ctx, -r * 0.62, -r * 0.62, r * 0.78, r * 1.24, r * 0.18);
+      ctx.fill();
+      ctx.fillStyle = flash ? '#fff' : '#2f3326';
+      ctx.fillRect(-r * 0.5, -r * 0.5, r * 0.22, r * 0.28);
+      ctx.fillRect(-r * 0.5, r * 0.22, r * 0.22, r * 0.28);
+      ctx.fillRect(-r * 0.18, -r * 0.18, r * 0.2, r * 0.36);
+      const hy = Math.sin(id) * r * 0.12;
+      ctx.fillStyle = outline;
+      ctx.beginPath();
+      ctx.arc(r * 0.16, hy, r * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = flash ? '#fff' : '#4d5539';
+      ctx.beginPath();
+      ctx.arc(r * 0.12, hy, r * 0.44, Math.PI * 0.35, Math.PI * 1.65);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.beginPath();
+      ctx.arc(r * 0.02, hy - r * 0.12, r * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
     // 目
     const ex = z.type === 'brute' ? r * 0.56 : z.type === 'runner' ? r * 0.75 : r * 0.48;
     const ey = z.type === 'brute' ? r * 0.12 : r * 0.15;

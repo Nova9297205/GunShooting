@@ -978,6 +978,19 @@ export class Renderer {
         ctx.fillRect(z.x - w / 2, y, w * clamp(z.hp / z.maxHp, 0, 1), 2);
         ctx.globalAlpha = 1;
       }
+      // 気づき具合：? = 物音を調べている / ! = 追跡中
+      if (z.alert > 0) {
+        const t = z.alert === 2 ? '!' : '?';
+        const by = z.y - r - (z.hp < z.maxHp ? 22 : 14) + Math.sin(this.time * 6 + z.id) * 1.5;
+        ctx.font = '900 15px "Segoe UI", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+        ctx.strokeText(t, z.x, by);
+        ctx.fillStyle = z.alert === 2 ? '#e0644a' : '#d8bf6a';
+        ctx.fillText(t, z.x, by);
+      }
       // 暗闇で光る目
       if (dark > 0.3 && me && Math.hypot(z.x - me.x, z.y - me.y) < 650) {
         const a = Math.cos(z.angle);

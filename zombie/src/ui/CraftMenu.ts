@@ -79,7 +79,7 @@ export class CraftMenu {
       const blocked = r.bench && !nearBench;
       const label = blocked ? '作業台が必要' : '作成';
       return `<div class="recipe${blocked || !enough ? ' dim' : ''}">
-        <div class="r-main"><b>${r.name}${r.out.n > 1 ? ` ×${r.out.n}` : ''}</b>${r.bench ? '<span class="tag">作業台</span>' : ''}<p>${r.desc}</p><div class="costs">${costs.join('')}</div></div>
+        <div class="r-main"><b>${r.name}</b>${r.bench ? '<span class="tag">作業台</span>' : ''}<p>${r.desc}</p><div class="costs">${costs.join('')}</div></div>
         <button data-id="${r.id}" ${blocked || !enough ? 'disabled' : ''}>${label}</button>
       </div>`;
     });

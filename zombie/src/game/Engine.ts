@@ -580,8 +580,11 @@ export class HostSimulation {
       this.makeNoise(p.x, p.y, p.dashTime > 0 ? 220 : 70, false);
     }
 
-    // 空腹
-    p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt);
+    // 空腹（拠点の焚き火のそばで休んでいる間は減らない）
+    const cfx = (CAMPFIRE_TILE.x + 0.5) * TILE;
+    const cfy = (CAMPFIRE_TILE.y + 0.5) * TILE;
+    const resting = Math.hypot(p.x - cfx, p.y - cfy) < 170;
+    if (!resting) p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt);
     if (p.hunger <= 0) {
       p.hp -= PLAYER.starveDps * dt;
       if (p.warnCd <= 0) {
@@ -591,10 +594,8 @@ export class HostSimulation {
       if (p.hp <= 0) this.downPlayer(p);
       if (p.status !== 'alive') return;
     }
-    // 拠点の焚き火のそばで休むと回復
-    const cfx = (CAMPFIRE_TILE.x + 0.5) * TILE;
-    const cfy = (CAMPFIRE_TILE.y + 0.5) * TILE;
-    if (Math.hypot(p.x - cfx, p.y - cfy) < 170 && p.hp < p.maxHp) p.hp = Math.min(p.maxHp, p.hp + 1.5 * dt);
+    // 拠点の焚き火のそばで休むと HP が回復
+    if (resting && p.hp < p.maxHp) p.hp = Math.min(p.maxHp, p.hp + 2 * dt);
 
     // 探索の進行（動いたり攻撃を受けたら中断）
     if (p.search) {
