@@ -47,11 +47,72 @@ function shortName(id: string): string {
   return s || id || 'コントローラー';
 }
 
-function dz(v: number): number {
-  const a = Math.abs(v);
-  if (a < DEAD) return 0;
-  return (Math.sign(v) * (a - DEAD)) / (1 - DEAD);
+/** 設定：デッドゾーン（0.05〜0.35）とエイム補助の強さ（0=オフ〜3=強） */
+export const padPrefs = { dead: DEAD, assist: 2 };
+try {
+  const v = JSON.parse(localStorage.getItem('dn2d.padprefs') || '{}');
+  if (typeof v.dead === 'number') padPrefs.dead = Math.max(0.05, Math.min(0.35, v.dead));
+  if (typeof v.assist === 'number') padPrefs.assist = Math.max(0, Math.min(3, Math.round(v.assist)));
+} catch {
+  /* 既定値 */
 }
+export function savePadPrefs(): void {
+  try {
+    localStorage.setItem('dn2d.padprefs', JSON.stringify(padPrefs));
+  } catch {
+    /* 無視 */
+  }
+}
+
+/**
+ * 円形のデッドゾーン：スティックを倒した「量」で判定し、その先を 0〜1 になめらかにつなぎ直す
+ * （軸ごとに切ると斜めがすべり、照準の向きがずれる）
+ */
+export function radial(x: number, y: number, dead = padPrefs.dead): [number, number] {
+  const m = Math.hypot(x, y);
+  if (m < dead) return [0, 0];
+  const k = Math.min(1, (m - dead) / (1 - dead)) / m;
+  return [x * k, y * k];
+}
+
+// ---------------- ボタン表記（Xbox / PlayStation） ----------------
+export type Glyphs = Record<'A' | 'B' | 'X' | 'Y' | 'LB' | 'RB' | 'LT' | 'RT' | 'START' | 'BACK' | 'L3' | 'R3' | 'UP' | 'DOWN' | 'LEFT' | 'RIGHT', string>;
+const XBOX: Glyphs = { A: 'A', B: 'B', X: 'X', Y: 'Y', LB: 'LB', RB: 'RB', LT: 'LT', RT: 'RT', START: 'START', BACK: 'BACK', L3: 'L3', R3: 'R3', UP: '十字↑', DOWN: '十字↓', LEFT: '十字←', RIGHT: '十字→' };
+const PS: Glyphs = { A: '✕', B: '○', X: '□', Y: '△', LB: 'L1', RB: 'R1', LT: 'L2', RT: 'R2', START: 'OPTIONS', BACK: 'CREATE', L3: 'L3', R3: 'R3', UP: '十字↑', DOWN: '十字↓', LEFT: '十字←', RIGHT: '十字→' };
+/** コントローラーの名前から、ボタンの表記を選ぶ */
+export function glyphsFor(id: string | undefined): Glyphs {
+  return id && /054c|dualsense|dualshock|playstation|ps4|ps5/i.test(id) ? PS : XBOX;
+}
+/** キーボード・マウスの案内文を、コントローラーのボタン名に置き換える */
+const KB2PAD: [RegExp, string][] = [
+  [/\[F\]/g, '{A}'],
+  [/\[H\]/g, '{R3}'],
+  [/\[Q\]/g, '{L3}'],
+  [/\[E\] ?長押し/g, '{LT} 長押し'],
+  [/\[V\]/g, '{DOWN}'],
+  [/\[C\]/g, '{LEFT}'],
+  [/\[B\]/g, '{BACK}'],
+  [/\[G\]/g, '{UP}'],
+  [/\[T\]/g, '{RIGHT}'],
+  [/\[R\]/g, '{X}'],
+  [/\[Tab\]/g, '{START}'],
+  [/\[Esc\]/g, '{B}'],
+  [/\[1〜6\]\/ホイール/g, '{LB}/{RB}'],
+  [/移動キー/g, '左スティック'],
+  [/Shift\+クリック/g, '{Y}'],
+  [/右クリック/g, '{X}'],
+  [/左クリック/g, '{A}'],
+  [/クリック/g, '{A}'],
+];
+export function padText(t: string, g: Glyphs): string {
+  let s = t;
+  for (const [re, to] of KB2PAD) s = s.replace(re, to);
+  // 置き換えたボタン名には見えない印（U+2060）を付け、もう一度通しても変わらないようにする（[B] ボタン ≠ キーボードの [B]）
+  return s.replace(/\{(\w+)\}/g, (_, k: keyof Glyphs) => `[\u2060${g[k] ?? k}]`);
+}
+
+/** メニュー・パネルで、十字キー／左スティックで選べる要素 */
+const FOCUSABLE = '[data-act], [data-tab], [data-id], [data-build], [data-upg], [data-mod], [data-pick], button:not([disabled]), input, select';
 
 /**
  * 1台のコントローラーの読み取り：スティック・ボタン（押した瞬間）・メニュー用のカーソル・振動。
@@ -74,6 +135,17 @@ export class PadReader {
   onBack: (() => void) | null = null;
   /** カーソルを動かせる範囲（画面分割では自分の枠の中） */
   area: (() => DOMRect) | null = null;
+  /** 十字キーで選ぶ範囲（開いているパネル）。null なら画面に出ているメニューを探す */
+  scope: (() => HTMLElement | null) | null = null;
+  /** 選択中の要素（十字キーの選択） */
+  focusEl: HTMLElement | null = null;
+  private focusKey = '';
+  private navT = 0;
+  private navHeld = '';
+  /** 最後に使ったのが十字キーの選択か、カーソルか */
+  private useCursor = false;
+  /** 選択を自動で決めた（まだ本人が動かしていない） */
+  private focusAuto = true;
   private prev: boolean[] = [];
   private cursor: HTMLDivElement | null = null;
   cx = typeof window !== 'undefined' ? window.innerWidth / 2 : 0;
@@ -88,6 +160,11 @@ export class PadReader {
 
   current(): Gamepad | null {
     return this.resolve();
+  }
+
+  /** このコントローラーのボタン表記 */
+  glyphs(): Glyphs {
+    return glyphsFor(this.resolve()?.id);
   }
 
   /** いま押しっぱなしのボタンを「押した瞬間」に数えないようにする（画面が切り替わった直後など） */
@@ -115,10 +192,8 @@ export class PadReader {
       if (p && !this.prev[i]) this.pressed.add(i);
     });
     this.prev = now;
-    this.lx = dz(g.axes[0] ?? 0);
-    this.ly = dz(g.axes[1] ?? 0);
-    this.rx = dz(g.axes[2] ?? 0);
-    this.ry = dz(g.axes[3] ?? 0);
+    [this.lx, this.ly] = radial(g.axes[0] ?? 0, g.axes[1] ?? 0);
+    [this.rx, this.ry] = radial(g.axes[2] ?? 0, g.axes[3] ?? 0);
     this.lt = g.buttons[PAD.LT]?.value ?? 0;
     this.rt = g.buttons[PAD.RT]?.value ?? 0;
     if (this.held.size || this.lx || this.ly || this.rx || this.ry) this.usedT = performance.now();
@@ -141,11 +216,14 @@ export class PadReader {
     }
   }
 
-  // ---------------- 画面上のカーソル（メニュー・パネル用） ----------------
+  // ---------------- メニュー・パネルの操作 ----------------
+  //   十字キー／左スティック：選ぶ（明るい枠）・A 決定・X 右クリック・Y 捨てる・LB/RB タブ・B 戻る
+  //   右スティック：自由に動くカーソル（マス目でない所を押したいとき）
   updateCursor(dt: number): void {
     const g = this.resolve();
     if (!g || this.gameplay) {
       if (this.cursor) this.cursor.style.display = 'none';
+      this.setFocus(null);
       return;
     }
     if (!this.cursor) {
@@ -156,30 +234,104 @@ export class PadReader {
       document.body.appendChild(this.cursor);
     }
     const r = this.area?.() ?? new DOMRect(0, 0, window.innerWidth, window.innerHeight);
-    const sx = this.lx || this.rx;
-    const sy = this.ly || this.ry;
-    if (sx || sy) {
-      const sp = 900 * dt * (0.35 + 0.65 * Math.hypot(sx, sy));
-      this.cx += sx * sp;
-      this.cy += sy * sp;
+    const scope = this.scope ? this.scope() : defaultScope();
+    // 右スティック：カーソル
+    if (this.rx || this.ry) {
+      const sp = 900 * dt * (0.35 + 0.65 * Math.hypot(this.rx, this.ry));
+      this.cx += this.rx * sp;
+      this.cy += this.ry * sp;
       this.cursorShownAt = performance.now();
+      this.useCursor = true;
     }
-    // 十字キーでも動かせる（細かい位置合わせ）
-    const step = 18;
-    if (this.pressed.has(PAD.LEFT)) this.cx -= step;
-    if (this.pressed.has(PAD.RIGHT)) this.cx += step;
-    if (this.pressed.has(PAD.UP)) this.cy -= step;
-    if (this.pressed.has(PAD.DOWN)) this.cy += step;
     this.cx = Math.max(r.left + 2, Math.min(r.right - 2, this.cx));
     this.cy = Math.max(r.top + 2, Math.min(r.bottom - 2, this.cy));
+    // 十字キー・左スティック：選ぶ（押しっぱなしで連続）
+    const dir = this.pressed.has(PAD.LEFT) ? 'L' : this.pressed.has(PAD.RIGHT) ? 'R' : this.pressed.has(PAD.UP) ? 'U' : this.pressed.has(PAD.DOWN) ? 'D' : '';
+    const ax = Math.abs(this.lx) > 0.55 || Math.abs(this.ly) > 0.55 ? (Math.abs(this.lx) > Math.abs(this.ly) ? (this.lx > 0 ? 'R' : 'L') : this.ly > 0 ? 'D' : 'U') : '';
+    const heldDir = this.held.has(PAD.LEFT) ? 'L' : this.held.has(PAD.RIGHT) ? 'R' : this.held.has(PAD.UP) ? 'U' : this.held.has(PAD.DOWN) ? 'D' : ax;
+    let move = dir;
+    if (!move && heldDir) {
+      if (heldDir !== this.navHeld) {
+        move = heldDir;
+        this.navT = 0.38;
+      } else {
+        this.navT -= dt;
+        if (this.navT <= 0) {
+          move = heldDir;
+          this.navT = 0.11;
+        }
+      }
+    }
+    if (dir) this.navT = 0.38;
+    this.navHeld = heldDir;
+    if (scope) {
+      const items = focusables(scope);
+      // 自動で選んだのが「閉じる」やタブなら、中身が描かれた時点で中身に移す
+      const weak = (e: HTMLElement | null) => !e || e.classList.contains('x-btn') || !!e.dataset.tab;
+      if (this.focusAuto && weak(this.focusEl) && items.some((e) => !weak(e))) this.setFocus(null);
+      // 描き直しで要素が入れ替わっても、同じ物を選び続ける
+      if (!this.focusEl || !this.focusEl.isConnected || !scope.contains(this.focusEl)) {
+        this.focusAuto = !(this.focusKey && items.some((e) => keyOf(e) === this.focusKey));
+        const again = this.focusKey ? items.find((e) => keyOf(e) === this.focusKey) : undefined;
+        // 最初は中身（持ち物のマス・作成ボタン）を選ぶ。閉じるボタン（✕）やタブからは始めない
+        this.setFocus(
+          again ??
+            // 設定画面などは、いま選ばれている項目から（A を押しても選択が変わらない）
+            items.find((e) => e.dataset.pick !== undefined && e.classList.contains('on')) ??
+            items.find((e) => e.dataset.act === 'cont') ??
+            items.find((e) => e.dataset.act === 'bag') ??
+            items.find((e) => e.dataset.id || e.dataset.build || e.dataset.upg || e.dataset.mod || e.dataset.pick) ??
+            items.find((e) => !e.classList.contains('x-btn') && !e.dataset.tab) ??
+            items[0] ??
+            null,
+        );
+      }
+      // スライダー（音量など）は、左右で値を変える
+      const rng = this.focusEl instanceof HTMLInputElement && this.focusEl.type === 'range' ? this.focusEl : null;
+      if (rng && (move === 'L' || move === 'R')) {
+        const step = Number(rng.step) || Math.max(1, (Number(rng.max) - Number(rng.min)) / 20);
+        rng.value = String(Number(rng.value) + (move === 'R' ? step : -step));
+        rng.dispatchEvent(new Event('input', { bubbles: true }));
+        rng.dispatchEvent(new Event('change', { bubbles: true }));
+        move = '';
+      }
+      if (move && this.focusEl) {
+        const next = nearestIn(this.focusEl, items, move);
+        if (next) this.setFocus(next);
+        this.useCursor = false;
+        this.focusAuto = false;
+      } else if (move && !this.focusEl && items[0]) this.setFocus(items[0]);
+      // LB / RB：タブの切り替え
+      if (this.pressed.has(PAD.LB) || this.pressed.has(PAD.RB)) {
+        const tabs = [...scope.querySelectorAll<HTMLElement>('[data-tab]')].filter(visible);
+        if (tabs.length) {
+          const cur = Math.max(0, tabs.findIndex((t) => t.classList.contains('on') || t.classList.contains('active')));
+          const t = tabs[(cur + (this.pressed.has(PAD.RB) ? 1 : -1) + tabs.length) % tabs.length];
+          this.click(t, 0);
+          this.setFocus(null);
+          this.focusKey = '';
+        }
+      }
+    } else this.setFocus(null);
+    this.focusEl?.classList.toggle('pad-focus-cur', !this.useCursor);
     if (this.pressed.size) this.cursorShownAt = performance.now();
-    this.cursor.style.display = 'block';
+    // カーソルは右スティックを使ったときだけ見せる（十字キーで選んでいる間は選択の枠が目印）
+    const showCursor = this.useCursor || !scope;
+    this.cursor.style.display = showCursor ? 'block' : 'none';
     this.cursor.style.transform = `translate(${this.cx}px, ${this.cy}px)`;
     this.cursor.style.opacity = performance.now() - this.cursorShownAt < 6000 ? '1' : '0.35';
-    const el = document.elementFromPoint(this.cx, this.cy) as HTMLElement | null;
-    this.cursor.classList.toggle('over', !!el?.closest('button, a, input, label, [data-slot], .slot, select'));
-    if (this.pressed.has(PAD.A)) this.click(el, 0);
-    if (this.pressed.has(PAD.X)) this.click(el, 2);
+    const under = document.elementFromPoint(this.cx, this.cy) as HTMLElement | null;
+    this.cursor.classList.toggle('over', !!under?.closest('button, a, input, label, [data-act], select'));
+    const target = !showCursor || (!this.useCursor && this.focusEl) ? this.focusEl : under;
+    if (!scope && !this.useCursor && (this.lx || this.ly)) {
+      // メニューが見つからない画面では、左スティックもカーソル
+      const sp = 900 * dt * (0.35 + 0.65 * Math.hypot(this.lx, this.ly));
+      this.cx += this.lx * sp;
+      this.cy += this.ly * sp;
+    }
+    if (this.pressed.has(PAD.A)) this.click(target, 0);
+    if (this.pressed.has(PAD.X)) this.click(target, 2);
+    if (this.pressed.has(PAD.Y) && target) this.click(target, 0, true);
     if (this.pressed.has(PAD.B)) {
       if (this.onBack) this.onBack();
       else {
@@ -190,10 +342,28 @@ export class PadReader {
     }
   }
 
-  /** カーソルの位置を押す（0 = 左クリック、2 = 右クリック） */
-  private click(el: HTMLElement | null, button: 0 | 2): void {
+  /** 選択を移す：明るい枠を付け、マウスを乗せたときと同じ説明を出す */
+  private setFocus(el: HTMLElement | null): void {
+    if (el === this.focusEl) return;
+    this.focusEl?.classList.remove('pad-focus', 'pad-focus-cur');
+    this.focusEl = el;
     if (!el) return;
-    const o = { bubbles: true, cancelable: true, clientX: this.cx, clientY: this.cy, button, buttons: button === 0 ? 1 : 2, view: window };
+    this.focusKey = keyOf(el);
+    el.classList.add('pad-focus');
+    el.style.setProperty('--pad-c', this.color);
+    el.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    const b = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: b.x + b.width / 2, clientY: b.y + b.height / 2 }));
+  }
+
+  /** カーソルの位置を押す（0 = 左クリック、2 = 右クリック） */
+  private click(el: HTMLElement | null, button: 0 | 2, shift = false): void {
+    if (!el) return;
+    const useFocus = el === this.focusEl && !this.useCursor;
+    const bb = el.getBoundingClientRect();
+    const x = useFocus ? bb.x + bb.width / 2 : this.cx;
+    const y = useFocus ? bb.y + bb.height / 2 : this.cy;
+    const o = { bubbles: true, cancelable: true, clientX: x, clientY: y, button, buttons: button === 0 ? 1 : 2, shiftKey: shift, view: window };
     el.dispatchEvent(new MouseEvent('mousedown', o));
     el.dispatchEvent(new MouseEvent('mouseup', o));
     if (button === 0) {
@@ -393,17 +563,9 @@ export class GamepadSettings {
         <p class="pad-note">使うコントローラーを選んでください。複数つないでいるときは、ここで選んだ 1 台だけで操作します（設定は保存されます）。</p>
         <div class="pad-list"></div>
         <div class="pad-test"></div>
-        <table class="pad-map">
-          <tr><th>左スティック</th><td>移動</td><th>右スティック</th><td>照準</td></tr>
-          <tr><th>RT</th><td>射撃・建てる</td><th>LT（長押し）</th><td>蘇生</td></tr>
-          <tr><th>A</th><td>調べる・乗る・眠る</td><th>B</th><td>ダッシュ／閉じる</td></tr>
-          <tr><th>X</th><td>リロード（建設中は撤去）</td><th>Y / RB / LB</th><td>武器・建てる物の切り替え</td></tr>
-          <tr><th>START</th><td>持ち物</td><th>BACK</th><td>地図</td></tr>
-          <tr><th>十字 ↑</th><td>ピン</td><th>十字 ↓</th><td>建設モード</td></tr>
-          <tr><th>十字 ←</th><td>作業台</td><th>十字 →</th><td>弾種の切り替え</td></tr>
-          <tr><th>L3</th><td>食事</td><th>R3</th><td>回復</td></tr>
-        </table>
-        <p class="pad-note">メニューや持ち物では画面のカーソルをスティックで動かし、A で押す・X で右クリック・B で閉じる。</p>
+        <table class="pad-map"></table>
+        <div class="pad-prefs"></div>
+        <p class="pad-note">メニューや持ち物：十字キー／左スティックで選び（明るい枠）、決定・右クリック・捨てる・閉じるは右下の 4 つのボタン。LB/RB でタブ。右スティックで自由に動くカーソル。</p>
       </div>`;
     document.body.appendChild(this.el);
     this.list = this.el.querySelector('.pad-list') as HTMLDivElement;
@@ -413,6 +575,14 @@ export class GamepadSettings {
       if (t === this.el || t.closest('[data-close]')) this.toggle(false);
       const pick = t.closest('[data-pick]') as HTMLElement | null;
       if (pick) gamepad.setChoice(pick.dataset.pick!);
+      const as = t.closest('[data-assist]') as HTMLElement | null;
+      const de = t.closest('[data-dead]') as HTMLElement | null;
+      if (as || de) {
+        if (as) padPrefs.assist = Number(as.dataset.assist);
+        if (de) padPrefs.dead = Number(de.dataset.dead);
+        savePadPrefs();
+        this.render();
+      }
     });
     window.addEventListener('keydown', (e) => {
       if (this.open && e.code === 'Escape') this.toggle(false);
@@ -449,6 +619,23 @@ export class GamepadSettings {
       html += row(gamepad.choice, `${shortName(gamepad.choice.split('|').slice(1).join('|'))}（未接続）`, 'つなぐと自動で使われます', false);
     }
     this.list.innerHTML = html;
+    // ボタン表は、使っているコントローラーの表記で
+    const g = glyphsFor(cur?.id);
+    const rows: [string, string, string, string][] = [
+      ['左スティック', '移動', '右スティック', '照準（エイム補助つき）'],
+      [`${g.RT}`, '射撃・建てる', `${g.LT}（長押し）`, '蘇生'],
+      [`${g.A}`, '調べる・乗る・眠る', `${g.B}`, 'ダッシュ／閉じる'],
+      [`${g.X}`, 'リロード（建設中は撤去）', `${g.Y} / ${g.RB} / ${g.LB}`, '武器・建てる物の切り替え'],
+      [`${g.START}`, '持ち物', `${g.BACK}`, '地図'],
+      ['十字 ↑', 'ピン', '十字 ↓', '建設モード'],
+      ['十字 ←', '作業台', '十字 →', '弾種の切り替え'],
+      [`${g.L3}`, '食事', `${g.R3}`, '回復'],
+    ];
+    (this.el.querySelector('.pad-map') as HTMLElement).innerHTML = rows.map((r) => `<tr><th>${r[0]}</th><td>${r[1]}</td><th>${r[2]}</th><td>${r[3]}</td></tr>`).join('');
+    const lv = ['オフ', '弱', '中', '強'];
+    (this.el.querySelector('.pad-prefs') as HTMLElement).innerHTML = `
+      <div class="pad-pref"><span>エイム補助</span>${lv.map((n, i) => `<button class="btn small ${padPrefs.assist === i ? 'primary' : 'ghost'}" data-assist="${i}">${n}</button>`).join('')}</div>
+      <div class="pad-pref"><span>スティックの遊び</span>${[0.08, 0.14, 0.2, 0.28].map((d) => `<button class="btn small ${Math.abs(padPrefs.dead - d) < 0.01 ? 'primary' : 'ghost'}" data-dead="${d}">${d === 0.08 ? '小' : d === 0.14 ? 'やや小' : d === 0.2 ? '標準' : '大'}</button>`).join('')}</div>`;
   }
 
   private renderTest(): void {
@@ -471,4 +658,66 @@ export function padSettings(): GamepadSettings {
   return settingsInstance;
 }
 
-if (import.meta.env?.DEV && typeof window !== 'undefined') Object.assign(window, { __pad: gamepad });
+if (import.meta.env?.DEV && typeof window !== 'undefined') Object.assign(window, { __pad: gamepad, __padPrefs: padPrefs });
+
+// ---------------- 十字キーで選ぶ（空間ナビゲーション） ----------------
+function visible(el: HTMLElement): boolean {
+  const r = el.getBoundingClientRect();
+  if (r.width < 4 || r.height < 4) return false;
+  return !el.closest('.hidden') && getComputedStyle(el).visibility !== 'hidden';
+}
+
+function focusables(scope: HTMLElement): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  for (const el of scope.querySelectorAll<HTMLElement>(FOCUSABLE)) {
+    // ボタンの中の要素など、入れ子は外側だけ
+    if (el.parentElement?.closest(FOCUSABLE) && scope.contains(el.parentElement.closest(FOCUSABLE))) continue;
+    if ((el as HTMLButtonElement).disabled) continue;
+    if (visible(el)) out.push(el);
+  }
+  return out;
+}
+
+/** 描き直しても同じ物を指す鍵 */
+function keyOf(el: HTMLElement): string {
+  const d = el.dataset;
+  return [d.act, d.i, d.slot, d.tab, d.id, d.build, d.upg, d.mod, d.pick, el.id, el.tagName === 'INPUT' ? 'in' : '', (el.textContent ?? '').trim().slice(0, 24)].join('|');
+}
+
+/** その方向で、いちばん近い要素（向きのずれは重く数える） */
+function nearestIn(from: HTMLElement, items: HTMLElement[], dir: string): HTMLElement | null {
+  const a = from.getBoundingClientRect();
+  const ax = a.x + a.width / 2;
+  const ay = a.y + a.height / 2;
+  let best: HTMLElement | null = null;
+  let bs = Infinity;
+  for (const el of items) {
+    if (el === from) continue;
+    const b = el.getBoundingClientRect();
+    const bx = b.x + b.width / 2;
+    const by = b.y + b.height / 2;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const main = dir === 'R' ? dx : dir === 'L' ? -dx : dir === 'D' ? dy : -dy;
+    // 横のずれは「辺と辺のすき間」（重なっていれば 0）：2 列に並んだボタンも、真下・真横として選べる
+    const side = dir === 'R' || dir === 'L' ? Math.max(0, b.top - a.bottom, a.top - b.bottom) : Math.max(0, b.left - a.right, a.left - b.right);
+    // 進む方向の「辺のすき間」も見る（大きな要素どうしでも近い順に）
+    const gap = dir === 'R' ? b.left - a.right : dir === 'L' ? a.left - b.right : dir === 'D' ? b.top - a.bottom : a.top - b.bottom;
+    if (main <= 4 || gap < -Math.min(a.width, a.height) * 0.5) continue;
+    const score = Math.max(0, gap) + main * 0.15 + side * 2.5;
+    if (score < bs) {
+      bs = score;
+      best = el;
+    }
+  }
+  return best;
+}
+
+/** 画面に出ているメニュー（設定・準備画面・パネル・タイトル） */
+function defaultScope(): HTMLElement | null {
+  for (const sel of ['#pad-modal:not(.hidden) .pad-card', '#local-modal:not(.hidden) .lp-card', 'body > .modal:not(.hidden)', '.screen:not(.hidden)']) {
+    const el = document.querySelector<HTMLElement>(sel);
+    if (el && visible(el)) return el;
+  }
+  return null;
+}

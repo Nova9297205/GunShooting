@@ -43,6 +43,7 @@ import { roofCanvas } from './RoofArt';
 import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
+import { type Glyphs, padText } from '../ui/Gamepad';
 import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -74,6 +75,8 @@ export interface RenderOptions {
   touch?: boolean;
   /** コントローラーで遊んでいる */
   pad?: boolean;
+  /** そのコントローラーのボタン表記（Xbox / PlayStation） */
+  glyphs?: Glyphs | null;
 }
 
 /** 射撃・近接・リロードを検出したときに呼ばれるフック（効果音用） */
@@ -143,6 +146,10 @@ export class Renderer {
   private terrain: TerrainCache | null = null;
   private miniCanvas: HTMLCanvasElement | null = null;
   private vision = new Vision();
+  /** その位置が自分（と仲間）の視界に入っているか（エイム補助用） */
+  canSee(x: number, y: number): boolean {
+    return this.vision.isVisible(x, y);
+  }
   private lightCanvas = document.createElement('canvas');
   private lightCtx = this.lightCanvas.getContext('2d')!;
   private pAnim = new Map<number, PlayerAnim>();
@@ -463,7 +470,7 @@ export class Renderer {
     ctx.font = `bold 12px ${UI}`;
     ctx.fillStyle = '#e0a33a';
     ctx.fillText(
-      this.padUI ? '建設モード — [RB/LB] 選ぶ・右スティックで場所・[RT] 建てる・[X] 撤去・[A] 修理・[十字↓] 終了' : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜6]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
+      this.glyphs ? padText('建設モード — {LB}/{RB} 選ぶ・右スティックで場所・{RT} 建てる・{X} 撤去・{A} 修理・{DOWN} 終了', this.glyphs) : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜6]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
       this.w / 2,
       y0 - 12,
     );
@@ -707,6 +714,7 @@ export class Renderer {
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
     this.touchUI = !!o.touch;
     this.padUI = !!o.pad;
+    this.glyphs = o.pad ? (o.glyphs ?? null) : null;
     this.vehLights = (view.vehicles ?? []).filter((v) => v.seats[0] >= 0 && !v.broken).map((v) => ({ x: v.x + Math.cos(v.a) * 90, y: v.y + Math.sin(v.a) * 90 }));
     for (const v of view.vehicles ?? []) if (v.x > vx0 - 60 && v.y > vy0 - 60 && v.x < vx1 + 60 && v.y < vy1 + 60) this.drawVehicle(v, view);
     for (const p of view.players) if (p.veh === undefined) this.drawPlayerMarker(p, p.id === o.localId);
@@ -1337,9 +1345,10 @@ export class Renderer {
       ctx.font = `800 ${p.size}px "Noto Sans JP", "Segoe UI", sans-serif`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-      ctx.strokeText(p.text, p.x, p.y);
+      const pt = this.kw(p.text);
+      ctx.strokeText(pt, p.x, p.y);
       ctx.fillStyle = p.color;
-      ctx.fillText(p.text, p.x, p.y);
+      ctx.fillText(pt, p.x, p.y);
     }
     ctx.globalAlpha = 1;
   }
@@ -1370,6 +1379,11 @@ export class Renderer {
   /** タッチ操作の端末（ボタン名で案内する） */
   private touchUI = false;
   private padUI = false;
+  private glyphs: Glyphs | null = null;
+  /** 案内文のキー名を、使っている機器のボタン名に */
+  private kw(t: string): string {
+    return this.glyphs ? padText(t, this.glyphs) : t;
+  }
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
     const out: { x: number; y: number; r: number; warm: number }[] = [];
     for (const l of this.vehLights) out.push({ x: l.x, y: l.y, r: 230, warm: 0.15 });
@@ -1679,7 +1693,8 @@ export class Renderer {
       const a = Math.min(1, f.life / 1.2, (9 - f.life) * 5);
       ctx.globalAlpha = a;
       ctx.font = `bold 11px ${UI}`;
-      const tw = Math.min(430, ctx.measureText(f.t).width) + 56;
+      const ft = this.kw(f.t);
+      const tw = Math.min(430, ctx.measureText(ft).width) + 56;
       ctx.fillStyle = f.cat === 'danger' ? 'rgba(48,16,10,0.82)' : 'rgba(14,15,11,0.8)';
       ctx.fillRect(x, y, tw, 20);
       ctx.fillStyle = col;
@@ -1692,7 +1707,7 @@ export class Renderer {
       ctx.textAlign = 'left';
       ctx.font = `bold 11px ${UI}`;
       ctx.fillStyle = f.cat === 'danger' ? '#f4b4a2' : '#e6e1cc';
-      ctx.fillText(f.t, x + 48, y + 10.5, 430);
+      ctx.fillText(ft, x + 48, y + 10.5, 430);
       y += 23;
     }
     ctx.globalAlpha = 1;
@@ -2228,7 +2243,7 @@ export class Renderer {
     ctx.fillText(t.text, w / 2, y + 4);
     ctx.font = `bold 11px ${UI}`;
     ctx.fillStyle = '#d8d2b8';
-    ctx.fillText(t.sub, w / 2, y + 19);
+    ctx.fillText(this.kw(t.sub), w / 2, y + 19);
     if (t.sub2) {
       ctx.fillStyle = '#e0b862';
       ctx.fillText(t.sub2, w / 2, y + 33);
@@ -2581,7 +2596,7 @@ export class Renderer {
     const { ctx } = this;
     const items: { t: string; fix: string; c: string; bad: boolean }[] = [];
     const has = (id: ItemId) => countItem(me.bag, id) > 0;
-    const H = this.padUI ? '[R3]' : this.touchUI ? '[回復]' : '[H]';
+    const H = this.touchUI && !this.padUI ? '[回復]' : '[H]';
     if (me.bleed) items.push({ t: '出血', fix: has('bandage') || has('medkit') ? `${H} 包帯で止血` : '包帯がない！ 布2で作れる', c: '#e0583e', bad: true });
     if (me.frac === 1) items.push({ t: '骨折', fix: has('splint') ? `${H} 添え木を当てる` : '添え木（布2・鉄くず1）を作る', c: '#e0583e', bad: true });
     else if (me.frac === 2) items.push({ t: '骨折（手当て済み）', fix: '少し足が遅い・じきに治る', c: '#c9a050', bad: false });
@@ -2595,6 +2610,7 @@ export class Renderer {
     let y = bottom;
     for (const it of items) {
       y -= 22;
+      it.fix = this.kw(it.fix);
       ctx.font = `bold 11px ${UI}`;
       const tw = ctx.measureText(it.t).width;
       ctx.font = `10px ${UI}`;
@@ -2750,7 +2766,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = `9px ${UI}`;
     ctx.fillStyle = '#6f6c5a';
-    ctx.fillText(this.padUI ? 'A 調べる ・ START 持ち物 ・ X 装填 ・ 十字← 作業台 ・ 十字↓ 建設 ・ BACK 地図' : 'F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
+    ctx.fillText(this.glyphs ? padText('{A} 調べる ・ {START} 持ち物 ・ {X} 装填 ・ {LEFT} 作業台 ・ {DOWN} 建設 ・ {BACK} 地図', this.glyphs) : 'F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
     void view;
   }
 

@@ -9,7 +9,7 @@ import { isTouchDevice, TouchControls } from '../ui/TouchControls';
 import { clearSave, writeSave } from './save';
 import { buildDef, buildSpotError, canAfford } from './build';
 import { seatPos, trunkPos, VEHICLE } from './vehicles';
-import { gamepad, PAD, type PadReader, padSettings } from '../ui/Gamepad';
+import { gamepad, PAD, type PadReader, padPrefs, padSettings, padText } from '../ui/Gamepad';
 import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
   VehicleSnap,
@@ -175,6 +175,7 @@ export class GameSession {
         this.mapOpen = false;
       };
       this.pad.centerCursor();
+      this.pad.scope = () => root.querySelector<HTMLElement>('.modal:not(.hidden)');
     }
     if (o.secondary) {
       this.perf.destroy();
@@ -805,6 +806,7 @@ export class GameSession {
     // パネル・地図を開いている間は、タッチのスティックを止めてパネルを触れるようにする
     this.touch?.show(!this.mapOpen && !this.craftMenu.open && !this.invPanel.open);
     if (this.o.root) this.fitPanels();
+    this.padifyPanels();
     this.renderer.render(view, {
       localId,
       mode: this.o.mode,
@@ -822,6 +824,7 @@ export class GameSession {
       build: this.buildKind && this.buildGhost ? { kind: this.buildKind, ...this.buildGhost } : null,
       touch: !!this.touch,
       pad: !!this.pad?.active && this.pad.usedT > this.input.mouseT,
+      glyphs: this.pad?.active ? this.pad.glyphs() : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
       muted: audio.settings.muted,
     });
@@ -1052,6 +1055,8 @@ export class GameSession {
     // 照準（右スティック）：自分から見た向きと距離。マウスを最後に使っていたらマウスを優先
     const m = Math.hypot(pad.rx, pad.ry);
     if (m > 0.15) this.padAim = { x: (pad.rx / m) * (90 + m * 230), y: (pad.ry / m) * (90 + m * 230) };
+    // エイム補助：狙っている向きの細い範囲に見えているゾンビがいれば、照準をそちらへ寄せる
+    if (myPos && padPrefs.assist > 0 && (m > 0.15 || fire) && !this.buildKind) this.padAim = this.aimAssist(myPos, this.padAim);
     if (myPos && pad.usedT > this.input.mouseT) {
       const s = this.renderer.worldToScreen(myPos.x, myPos.y);
       this.input.mouseX = s.x + this.padAim.x;
@@ -1076,6 +1081,38 @@ export class GameSession {
     key(PAD.RIGHT, 'KeyT');
   }
 
+  /** コントローラーで遊んでいる間は、パネルの説明文もボタン名に（戻せるよう元の文を覚えておく） */
+  private padified = false;
+  private padifyPanels(): void {
+    const on = !!this.pad?.active && this.pad.usedT > this.input.mouseT;
+    const panels = [this.o.root ? this.o.root.querySelector<HTMLElement>('#inv-panel') : document.getElementById('inv-panel'), this.o.root ? this.o.root.querySelector<HTMLElement>('#craft-panel') : document.getElementById('craft-panel')];
+    if (!on && !this.padified) return;
+    const g = on ? this.pad!.glyphs() : null;
+    for (const panel of panels) {
+      if (!panel || panel.classList.contains('hidden')) continue;
+      // 閉じ方・操作の一行は丸ごと差し替え
+      for (const el of panel.querySelectorAll<HTMLElement>('.modal-hint, .ph-sub')) {
+        if (el.dataset.orig === undefined) el.dataset.orig = el.innerHTML;
+        const want = g
+          ? el.classList.contains('ph-sub')
+            ? padText('{A} 移す／使う ・ {X} 使う・装備 ・ {Y} 捨てる ・ {LB}/{RB} タブ', g)
+            : padText('{B} で閉じる ・ 十字キーで選ぶ ・ 右スティックでカーソル ・ ゲームは止まりません', g)
+          : el.dataset.orig;
+        if (el.innerHTML !== want) el.innerHTML = want;
+      }
+      if (!g) continue;
+      // それ以外の説明文（作業台の注意書き・アイテムの説明）は語句を置き換え
+      const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const v = n.nodeValue ?? '';
+        if (!/\[|クリック|移動キー/.test(v)) continue;
+        const t = padText(v, g);
+        if (t !== v) n.nodeValue = t;
+      }
+    }
+    this.padified = on;
+  }
+
   /** 画面分割：開いているパネルが枠に収まるよう縮める */
   private fitted = new WeakMap<HTMLElement, string>();
   private fitPanels(): void {
@@ -1096,10 +1133,38 @@ export class GameSession {
     }
   }
 
+  /** エイム補助（強さ：弱・中・強で、寄せる範囲と量が増える）。照準の距離は変えず向きだけ寄せる */
+  private aimAssist(me: { x: number; y: number }, aim: { x: number; y: number }): { x: number; y: number } {
+    const cone = [0, 0.12, 0.2, 0.28][padPrefs.assist];
+    const pull = [0, 0.45, 0.7, 0.9][padPrefs.assist];
+    const a = Math.atan2(aim.y, aim.x);
+    let best = 0;
+    let bs = Infinity;
+    for (const z of this.prevView?.zombies ?? []) {
+      const dx = z.x - me.x;
+      const dy = z.y - me.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 720 || d < 8) continue;
+      const diff = Math.atan2(Math.sin(Math.atan2(dy, dx) - a), Math.cos(Math.atan2(dy, dx) - a));
+      // 遠いほど小さく見えるので、範囲は「角度」と「横のずれ（最大 60px）」の広いほう
+      const lim = Math.max(cone, Math.atan2(cone * 260, d));
+      if (Math.abs(diff) > lim) continue;
+      if (!this.renderer.canSee(z.x, z.y)) continue;
+      const score = Math.abs(diff) / lim + d / 2000;
+      if (score < bs) {
+        bs = score;
+        best = diff;
+      }
+    }
+    if (bs === Infinity) return aim;
+    const na = a + best * pull;
+    const len = Math.hypot(aim.x, aim.y);
+    return { x: Math.cos(na) * len, y: Math.sin(na) * len };
+  }
+
   /** タッチ端末では、キーの名前をボタンの名前に置き換える */
   private touchWords(h: string | null): string | null {
-    if (h && this.pad?.active && this.pad.usedT > this.input.mouseT)
-      return h.replace(/\[F\]/g, '[A]').replace(/\[E\] 長押し/g, '[LT] 長押し').replace(/\[Q\]/g, '[L3]').replace(/\[H\]/g, '[R3]').replace(/\[C\]/g, '[十字←]').replace(/移動キー/g, '左スティック');
+    if (h && this.pad?.active && this.pad.usedT > this.input.mouseT) return padText(h, this.pad.glyphs());
     if (!h || !this.touch) return h;
     return h.replace(/\[F\]/g, '[調べる]').replace(/\[E\] 長押し/g, '[蘇生] 長押し').replace(/\[Q\]/g, '[食事]').replace(/\[C\]/g, '[作業台]').replace(/移動キー/g, '左スティック');
   }

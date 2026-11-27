@@ -2115,3 +2115,31 @@ input[type='range'] {
   max-width: none;
   max-height: none;
 }
+
+/* コントローラーの選択（十字キー） */
+.pad-focus {
+  outline: 2px solid var(--pad-c, #e0a33a) !important;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.6), 0 0 14px var(--pad-c, #e0a33a) !important;
+  position: relative;
+  z-index: 2;
+}
+.pad-prefs {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pad-pref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pad-pref span {
+  width: 110px;
+  color: #e0a33a;
+  font-size: 12px;
+}
+.pad-pref .btn {
+  margin: 0;
+}
