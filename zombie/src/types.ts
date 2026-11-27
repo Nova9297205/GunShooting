@@ -41,6 +41,9 @@ export type ObjKind =
   | 'stash'
   | 'bag'
   | 'drop'
+  // 拠点に建てる物
+  | 'raintank'
+  | 'stove'
   // 以下は旧バージョンの建築物（描画コードの互換用）
   | 'stone'
   | 'woodWall'
@@ -206,6 +209,8 @@ export type GameEvent =
   | { k: 'chop'; x: number; y: number; kind: ObjKind }
   | { k: 'build'; x: number; y: number; kind: ObjKind }
   | { k: 'smash'; x: number; y: number; kind: ObjKind }
+  /** 拠点に建てた・修理した */
+  | { k: 'built'; x: number; y: number; kind: ObjKind; id: number; repair?: boolean }
   | { k: 'break'; x: number; y: number; kind: ObjKind }
   | { k: 'pop'; x: number; y: number; t: string; c: string; id: number; s?: SoundKey }
   | { k: 'banner'; t: string; s: string; c: string; snd?: SoundKey }

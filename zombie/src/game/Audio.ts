@@ -593,7 +593,7 @@ export class AudioManager {
       case 'chop':
         this.chop(ev.x, ev.y, ev.kind);
         break;
-      case 'build':
+      case 'built':
         this.hammer(ev.x, ev.y);
         break;
       case 'smash':

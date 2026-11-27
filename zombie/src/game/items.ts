@@ -36,7 +36,10 @@ export type ItemId =
   | 'valuables'
   | 'antitox'
   | 'herbs'
-  | 'intel';
+  | 'intel'
+  | 'water'
+  | 'stew'
+  | 'tea';
 
 export type ItemCat = 'ammo' | 'med' | 'food' | 'mat' | 'att' | 'weapon' | 'misc';
 /** レア度（0=ありふれた 1=普通 2=レア 3=非常にレア）。UIの枠色に使う */
@@ -106,6 +109,9 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   valuables: D('valuables', '貴重品', 10, 'misc', 25, 1, '時計や貴金属。持ち帰ると評価が上がる'),
   antitox: D('antitox', '解毒剤', 3, 'med', 35, 2, '汚染度 -60・HP +10（市街中心部の病院で見つかる）'),
   herbs: D('herbs', '薬草', 8, 'med', 4, 0, 'HP +12・汚染度 -10（森林で採れる）'),
+  water: D('water', 'きれいな水', 6, 'mat', 2, 0, '雨水タンクに貯まる。かまどで料理に使う'),
+  stew: D('stew', '温かいシチュー', 3, 'food', 14, 1, '空腹 +60・HP +20・6分間「休息済み」（かまどで作る）'),
+  tea: D('tea', 'ハーブティー', 4, 'food', 8, 1, '汚染度 -30・HP +8・2分間「休息済み」（かまどで作る）'),
   intel: D('intel', '軍の機密書類', 5, 'misc', 90, 3, '軍用地でしか手に入らない。持ち帰ると評価が大きく上がる'),
 };
 

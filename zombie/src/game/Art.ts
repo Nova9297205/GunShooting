@@ -136,6 +136,88 @@ export class VectorArt implements ArtSet {
       return true;
     }
     switch (o.kind) {
+      case 'raintank': {
+        // 雨水タンク：青いドラム＋じょうご。水位を窓で見せる
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(cx + 4, cy + 9, 16, 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+        const g = ctx.createLinearGradient(x + 6, 0, x + 34, 0);
+        g.addColorStop(0, '#2f5470');
+        g.addColorStop(0.5, '#4f7ea0');
+        g.addColorStop(1, '#294a62');
+        ctx.fillStyle = g;
+        ctx.fillRect(x + 7, y + 10, 26, 26);
+        ctx.fillStyle = '#5f90b4';
+        ctx.beginPath();
+        ctx.ellipse(cx, y + 10, 13, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // じょうご
+        ctx.fillStyle = '#7a8088';
+        ctx.beginPath();
+        ctx.moveTo(cx - 12, y + 2);
+        ctx.lineTo(cx + 12, y + 2);
+        ctx.lineTo(cx + 4, y + 9);
+        ctx.lineTo(cx - 4, y + 9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(x + 7, y + 22, 26, 2);
+        // 水位
+        const lv = Math.min(1, o.ready / 6);
+        ctx.fillStyle = '#163044';
+        ctx.fillRect(cx - 3, y + 14, 6, 18);
+        ctx.fillStyle = '#8fd0f0';
+        ctx.fillRect(cx - 3, y + 32 - 18 * lv, 6, 18 * lv);
+        if (o.ready > 0) {
+          ctx.fillStyle = `rgba(160,220,255,${0.25 + Math.sin(t * 3 + o.id) * 0.15})`;
+          ctx.beginPath();
+          ctx.ellipse(cx, y + 10, 9, 3, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        return true;
+      }
+      case 'stove': {
+        // 調理かまど：石組み＋鍋。湯気
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(cx + 4, cy + 8, 17, 9, 0, 0, Math.PI * 2);
+        ctx.fill();
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2;
+          ctx.fillStyle = i % 2 ? '#6c665d' : '#888175';
+          ctx.beginPath();
+          ctx.arc(cx + Math.cos(a) * 13, cy + 2 + Math.sin(a) * 10, 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.fillStyle = '#2a1a10';
+        ctx.beginPath();
+        ctx.ellipse(cx, cy + 2, 10, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+        this.flame(ctx, cx, cy + 4, 0.5, t + o.id);
+        ctx.fillStyle = '#3c3f44';
+        ctx.beginPath();
+        ctx.ellipse(cx, cy - 3, 11, 8, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#a07a3e';
+        ctx.beginPath();
+        ctx.ellipse(cx, cy - 4, 8, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#6a6e74';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy - 3, 12, Math.PI * 1.1, Math.PI * 1.9);
+        ctx.stroke();
+        for (let i = 0; i < 2; i++) {
+          const k = (t * 0.6 + i * 0.5 + o.id * 0.13) % 1;
+          ctx.fillStyle = `rgba(230,230,230,${0.25 * (1 - k)})`;
+          ctx.beginPath();
+          ctx.arc(cx - 3 + i * 6 + Math.sin(t * 2 + i) * 2, cy - 8 - k * 16, 3 + k * 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        if (o.hp < o.maxHp) cracks(ctx, x, y, o.hp / o.maxHp, o.id);
+        return true;
+      }
       case 'spike': {
         const ratio = o.hp / o.maxHp;
         ctx.fillStyle = 'rgba(0,0,0,0.25)';

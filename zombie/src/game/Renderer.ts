@@ -31,6 +31,9 @@ import {
   WORLD_H,
   WORLD_W,
   ZOMBIE,
+  BUILD_KINDS,
+  BUILDS,
+  type BuildKind,
 } from './constants';
 import type { Decal, Effects } from './Effects';
 import { clamp } from './physics';
@@ -40,7 +43,7 @@ import { roofCanvas } from './RoofArt';
 import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
-import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
+import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
 /** 落ち影と側面を持つ「高い」建築物 */
@@ -65,6 +68,10 @@ export interface RenderOptions {
   interactHint: string | null;
   syncMs?: number;
   muted?: boolean;
+  /** 建設モード：置く場所と、置けない理由 */
+  build?: { kind: BuildKind; tx: number; ty: number; err: string | null } | null;
+  /** タッチ操作の端末 */
+  touch?: boolean;
 }
 
 /** 射撃・近接・リロードを検出したときに呼ばれるフック（効果音用） */
@@ -262,6 +269,103 @@ export class Renderer {
   uiScale = 1;
 
   /** HUD の要素を縮小して描く（仮想的な画面の大きさで配置される） */
+  /** 建設モード：拠点の敷地の枠・置く場所の緑/赤の影・建てた物の耐久 */
+  private drawBuildGhost(b: NonNullable<RenderOptions['build']>, visible: ObjSnap[]): void {
+    const { ctx } = this;
+    const sh = SAFEHOUSE;
+    ctx.save();
+    ctx.setLineDash([8, 6]);
+    ctx.lineDashOffset = -this.time * 20;
+    ctx.strokeStyle = 'rgba(224,163,58,0.55)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sh.x * TILE + 1, sh.y * TILE + 1, sh.w * TILE - 2, sh.h * TILE - 2);
+    ctx.setLineDash([]);
+    // 建てた物の耐久バー
+    for (const ob of visible) {
+      if (!BUILD_KINDS.has(ob.kind)) continue;
+      const r = ob.hp / ob.maxHp;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(ob.tx * TILE + 4, ob.ty * TILE - 6, TILE - 8, 4);
+      ctx.fillStyle = r > 0.6 ? '#93b77c' : r > 0.3 ? '#e0a33a' : '#d0583e';
+      ctx.fillRect(ob.tx * TILE + 4, ob.ty * TILE - 6, (TILE - 8) * r, 4);
+    }
+    const x = b.tx * TILE;
+    const y = b.ty * TILE;
+    const ok = !b.err;
+    ctx.globalAlpha = 0.55 + Math.sin(this.time * 6) * 0.1;
+    const ghost: ObjSnap = { id: 0, kind: b.kind, tx: b.tx, ty: b.ty, hp: 1, maxHp: 1, ready: 0 };
+    if (!this.art.drawLowObject(ctx, ghost, this.time, () => false)) this.art.drawTallObject(ctx, ghost, this.time);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = ok ? 'rgba(120,220,120,0.22)' : 'rgba(230,80,60,0.25)';
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.strokeStyle = ok ? '#8fe08a' : '#e0583e';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
+    if (b.err) {
+      ctx.font = `bold 12px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      const tw = ctx.measureText(b.err).width + 12;
+      ctx.fillStyle = 'rgba(20,10,8,0.85)';
+      ctx.fillRect(x + TILE / 2 - tw / 2, y - 24, tw, 18);
+      ctx.fillStyle = '#ef8a70';
+      ctx.fillText(b.err, x + TILE / 2, y - 9);
+    }
+    ctx.restore();
+  }
+
+  /** 建設モードの選択バー（画面下） */
+  private drawBuildBar(view: ViewState, b: NonNullable<RenderOptions['build']>, me: PlayerSnap, touch: boolean): void {
+    const { ctx } = this;
+    const n = BUILDS.length;
+    const cw = 108;
+    const gap = 6;
+    const W = n * cw + (n - 1) * gap;
+    const x0 = this.w / 2 - W / 2;
+    const y0 = this.h - 214;
+    const shared = view.storage?.shared ?? [];
+    ctx.save();
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.font = `bold 12px ${UI}`;
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText(
+      touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜6]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
+      this.w / 2,
+      y0 - 12,
+    );
+    BUILDS.forEach((d, i) => {
+      const x = x0 + i * (cw + gap);
+      const sel = d.kind === b.kind;
+      const lock = (d.lv ?? 1) > (view.base.bench ?? 1);
+      panel(ctx, x, y0, cw, 66, sel ? 'rgba(60,48,22,0.92)' : undefined, sel ? '#e0a33a' : undefined);
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = lock ? '#77735f' : sel ? '#ffe0a0' : '#d8d2b8';
+      ctx.fillText(`${i + 1} ${d.name}`, x + 8, y0 + 12);
+      ctx.font = `9px ${UI}`;
+      ctx.fillStyle = '#9c967c';
+      ctx.fillText(lock ? `🔒 作業台Lv${d.lv}` : d.role, x + 8, y0 + 26);
+      // 素材（1行に収まらなければ2行目へ）
+      let cx = x + 8;
+      let cy = y0 + 40;
+      ctx.font = `9px ${UI}`;
+      for (const [m, need] of Object.entries(d.cost) as [ItemId, number][]) {
+        const have = countItem(me.bag, m) + countItem(shared, m);
+        const t = `${ITEMS[m].name} ${have}/${need}`;
+        const tw = ctx.measureText(t).width;
+        if (cx + tw > x + cw - 6 && cx > x + 8) {
+          cx = x + 8;
+          cy += 13;
+        }
+        ctx.fillStyle = have >= need ? '#93b77c' : '#d0583e';
+        ctx.fillText(t, cx, cy);
+        cx += tw + 7;
+      }
+    });
+    ctx.restore();
+  }
+
   private withUiScale(fn: () => void): void {
     const s = this.uiScale;
     if (s >= 0.999) return fn();
@@ -468,6 +572,7 @@ export class Renderer {
     for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
+    if (o.build) this.drawBuildGhost(o.build, visible);
     this.drawCloudShadows(view.minute, vx0, vy0, vx1, vy1);
     this.drawEdgeHaze(vx0, vy0, vx1, vy1);
     this.drawStructureBars(visible);
@@ -1654,6 +1759,10 @@ export class Renderer {
       if (o.reviveHint && !reviving) hint = '[E] 長押しで蘇生';
       else if (o.interactHint) hint = o.interactHint;
       if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
+    }
+    if (o.build && me && me.status === 'alive' && !o.mapOpen) {
+      const b = o.build;
+      this.withUiScale(() => this.drawBuildBar(view, b, me, !!o.touch));
     }
 
     // 朝まで眠った：暗転してから明ける

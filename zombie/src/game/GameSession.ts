@@ -7,6 +7,7 @@
 // ============================================================
 import { isTouchDevice, TouchControls } from '../ui/TouchControls';
 import { clearSave, writeSave } from './save';
+import { buildDef, buildSpotError, canAfford } from './build';
 import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
   BulletSnap,
@@ -26,9 +27,9 @@ import { Tool } from '../types';
 import { audio } from './Audio';
 import { CraftMenu } from '../ui/CraftMenu';
 import { InventoryPanel } from '../ui/InventoryPanel';
-import { AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
+import { BUILD_KINDS, BUILDS, type BuildKind, AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
 import { CONTAINER_KINDS, GIVE_RANGE, inBase, STORAGE_KINDS } from './Engine';
-import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon } from './items';
+import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS } from './items';
 import { loadProfile, saveProfile } from './progression';
 import { Effects } from './Effects';
 import type { HostSimulation } from './Engine';
@@ -82,6 +83,8 @@ export class GameSession {
   // guest
   private snaps: BufferedSnap[] = [];
   private latest: Snapshot | null = null;
+  /** 直前のフレームの表示状態（ホストでもゲストでも使える） */
+  private prevView: ViewState | null = null;
   private timeOffset: number | null = null;
   private pred: MoveBody | null = null;
   private pendingInputs: InputFrame[] = [];
@@ -96,6 +99,11 @@ export class GameSession {
   private pendingCraft = '';
   private invPanel: InventoryPanel;
   private ops: string[] = [];
+  /** 建設モード：選んでいる建築物（null = 建設モードでない） */
+  private buildKind: BuildKind | null = null;
+  private lastBuild: BuildKind = 'woodWall';
+  private buildGhost: { tx: number; ty: number; err: string | null } | null = null;
+  private touchFirePrev = false;
   /** 入れ物・倉庫を開いたことで自動的にパネルを開いたか */
   private autoOpened = false;
   private lastViewing = 0;
@@ -153,6 +161,12 @@ export class GameSession {
       },
       (fac) => {
         this.ops.push(`upg:${fac}`);
+        audio.click();
+      },
+      (kind) => {
+        this.craftMenu.toggle(false);
+        this.buildKind = kind;
+        this.lastBuild = kind;
         audio.click();
       },
     );
@@ -518,12 +532,36 @@ export class GameSession {
 
     // ---- 入力 ----
     const prevTool = this.localTool;
-    this.handleToolKeys();
+    // V：建設モード（建てる物は 1〜6・ホイールで選ぶ）
+    if (this.input.consume('KeyV')) {
+      this.buildKind = this.buildKind ? null : this.lastBuild;
+      if (this.buildKind) {
+        this.craftMenu.toggle(false);
+        this.invPanel.toggle(false);
+      }
+      audio.click();
+    }
+    if (this.buildKind) {
+      for (let i = 0; i < BUILDS.length; i++)
+        if (this.input.consume(`Digit${i + 1}`)) {
+          this.buildKind = BUILDS[i].kind;
+          audio.click();
+        }
+      const wheel = this.input.consumeWheel();
+      if (wheel) {
+        const i = BUILDS.findIndex((b) => b.kind === this.buildKind);
+        this.buildKind = BUILDS[(i + (wheel > 0 ? 1 : -1) + BUILDS.length) % BUILDS.length].kind;
+        audio.click();
+      }
+      this.lastBuild = this.buildKind;
+      if (myStatus !== 'alive') this.buildKind = null;
+    } else this.handleToolKeys();
     if (this.localTool !== prevTool) audio.click();
     if (this.input.consume('KeyM')) audio.toggleMute();
     this.muteBtn.textContent = audio.settings.muted ? '🔇' : '🔊';
     // Esc を先に処理する（重くて Esc と Tab/C が同じフレームに入っても、後から押したほうが効く）
     if (this.input.consume('Escape')) {
+      this.buildKind = null;
       this.craftMenu.toggle(false);
       this.invPanel.toggle(false);
       this.mapOpen = false;
@@ -550,6 +588,9 @@ export class GameSession {
     } else if (interact && myPos && this.nearestUsable(myPos) === 'bench') {
       this.craftMenu.toggle(true);
       interact = false;
+    } else if (interact && myPos && this.nearestUsable(myPos) === 'stove') {
+      this.craftMenu.openTab('craft');
+      interact = false;
     }
     // T：弾種（通常弾 ⇄ 徹甲弾/スラッグ）の切り替え
     if (this.input.consume('KeyT') && (this.localTool === Tool.Primary || this.localTool === Tool.Secondary)) {
@@ -560,13 +601,44 @@ export class GameSession {
     const mw = this.renderer.screenToWorld(this.input.mouseX, this.input.mouseY);
     const aim = myPos ? Math.atan2(mw.y - myPos.y, mw.x - myPos.x) : this.localAim;
     this.localAim = aim;
+    // 建設モード：置く場所（マウスのマス。タッチは向いている方向の2マス先）と、置けるかどうか
+    let fireNow = this.input.consumeFire();
+    const clickNow = this.input.consumeClick();
+    const altNow = this.input.consumeAltClick() || this.input.consume('KeyX');
+    const touchEdge = this.input.touchFire && !this.touchFirePrev;
+    this.touchFirePrev = this.input.touchFire;
+    const pv = this.prevView;
+    if (this.buildKind && myPos && pv) {
+      const gx = this.touch ? myPos.x + Math.cos(aim) * TILE * 2.2 : mw.x;
+      const gy = this.touch ? myPos.y + Math.sin(aim) * TILE * 2.2 : mw.y;
+      const tx = Math.floor(gx / TILE);
+      const ty = Math.floor(gy / TILE);
+      const occ = [...pv.players.filter((p) => p.status !== 'dead' && !p.away), ...pv.zombies];
+      let err = buildSpotError(this.world, this.buildKind, tx, ty, myPos.x, myPos.y, occ);
+      const me = pv.players.find((p) => p.id === localId);
+      const def = buildDef(this.buildKind)!;
+      if (!err && (def.lv ?? 1) > (pv.base.bench ?? 1)) err = `作業台 Lv${def.lv} が必要`;
+      if (!err && me) {
+        const short = canAfford(def, me.bag, (pv.storage ?? this.storage)?.shared ?? null);
+        if (short) err = `素材が足りない（${ITEMS[short].name}）`;
+      }
+      this.buildGhost = { tx, ty, err };
+      if (clickNow || touchEdge) {
+        this.ops.push(`build:${this.buildKind}:${tx}:${ty}`);
+      }
+      if (altNow) {
+        const ob = this.world.objAt(tx, ty);
+        if (ob && BUILD_KINDS.has(ob.kind)) this.ops.push(`unbuild:${ob.id}`);
+      }
+      fireNow = false;
+    } else this.buildGhost = null;
     const frame: InputFrame = {
       seq: ++this.seq,
       dt,
       mx: mv.x,
       my: mv.y,
       aim,
-      fire: this.input.consumeFire(),
+      fire: fireNow,
       revive: this.input.isDown('KeyE'),
       dash: this.input.consumeDash(),
       interact,
@@ -612,7 +684,7 @@ export class GameSession {
     const me = view.players.find((p) => p.id === localId);
     if (me) {
       this.syncPanels(me, view);
-      this.craftMenu.update(me.bag, me.prim, me.sec, this.nearBench(me), view.base, view.storage ?? this.storage);
+      this.craftMenu.update(me.bag, me.prim, me.sec, this.nearBench(me), view.base, view.storage ?? this.storage, this.nearKind(me, 'stove'));
       this.saveProgress(me, view.day);
     }
     // 弾切れのカチッという音
@@ -640,10 +712,13 @@ export class GameSession {
       mapOpen: this.mapOpen,
       panelOpen: this.craftMenu.open || this.invPanel.open,
       reviveHint,
-      interactHint: me && me.status === 'alive' ? (this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
+      interactHint: me && me.status === 'alive' && !this.buildKind ? (this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
+      build: this.buildKind && this.buildGhost ? { kind: this.buildKind, ...this.buildGhost } : null,
+      touch: !!this.touch,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
       muted: audio.settings.muted,
     });
+    this.prevView = view;
     const pt = this.renderer.perfT;
     this.perf.add('world', pt.world);
     this.perf.add('light', pt.light);
@@ -787,7 +862,12 @@ export class GameSession {
       for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
         const ob = this.world.objAt(tx, ty);
         if (!ob) continue;
-        const usable = ob.kind === 'door' || STORAGE_KINDS.has(ob.kind) || (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0));
+        const usable =
+          ob.kind === 'door' ||
+          ob.kind === 'stove' ||
+          STORAGE_KINDS.has(ob.kind) ||
+          (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) ||
+          (BUILD_KINDS.has(ob.kind) && (ob.hp < ob.maxHp || (ob.kind === 'raintank' && ob.ready > 0)));
         if (!usable) continue;
         const d = Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) - (ob.kind === 'door' ? 0 : 6);
         if (d < bd) {
@@ -797,6 +877,18 @@ export class GameSession {
       }
     if (best) return best;
     return this.nearBench(pos) ? 'bench' : null;
+  }
+
+  private nearKind(pos: { x: number; y: number }, kind: string): boolean {
+    const r = Math.ceil(BENCH_RANGE / TILE) + 1;
+    const ptx = Math.floor(pos.x / TILE);
+    const pty = Math.floor(pos.y / TILE);
+    for (let ty = pty - r; ty <= pty + r; ty++)
+      for (let tx = ptx - r; tx <= ptx + r; tx++) {
+        const ob = this.world.objAt(tx, ty);
+        if (ob && ob.kind === kind && Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) < BENCH_RANGE) return true;
+      }
+    return false;
   }
 
   private nearBench(pos: { x: number; y: number }): boolean {
@@ -827,8 +919,11 @@ export class GameSession {
         let h: string | null = null;
         if (ob.kind === 'door') h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
         else if (STORAGE_KINDS.has(ob.kind)) h = '[F] 倉庫を開く（個人・共有）';
+        else if (ob.kind === 'stove') h = ob.hp < ob.maxHp * 0.6 ? '[F] 料理（かまどが傷んでいる：撤去して建て直せる）' : '[F] 調理かまど：温かい料理を作る';
+        else if (ob.kind === 'raintank') h = ob.ready > 0 ? `[F] 水を回収（${ob.ready}/6）` : ob.hp < ob.maxHp ? '[F] 修理（鉄くず1）' : '雨水タンク：雨の日と毎朝に水が貯まる（0/6）';
+        else if (BUILD_KINDS.has(ob.kind) && ob.hp < ob.maxHp) h = `[F] 修理（鉄くず1） ${Math.round((ob.hp / ob.maxHp) * 100)}%`;
         else if (ob.kind === 'bed' && inBase((tx + 0.5) * TILE, (ty + 0.5) * TILE)) {
-          const m = this.latest?.minute ?? 0;
+          const m = this.prevView?.minute ?? 0;
           h = m >= 20 * 60 || m < 5 * 60 ? (me.sleeping ? null : '[F] ベッドで眠る（全員が眠ると朝 6:00 まで進む）') : '眠れるのは夜 20:00〜05:00';
         }
         else if (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) {

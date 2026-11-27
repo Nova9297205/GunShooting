@@ -3,7 +3,7 @@
 // ============================================================
 
 /** 押した瞬間だけ拾いたいキー */
-const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'KeyG', 'Escape', 'Tab', 'KeyT', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
+const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'KeyG', 'Escape', 'Tab', 'KeyT', 'KeyV', 'KeyX', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
 
 export class InputController {
   private keys = new Set<string>();
@@ -91,6 +91,21 @@ export class InputController {
     return true;
   }
 
+  private clickEdge = false;
+  private altEdge = false;
+  /** 左クリックの押した瞬間だけ（建設などで連打にならないように） */
+  consumeClick(): boolean {
+    const c = this.clickEdge;
+    this.clickEdge = false;
+    return c;
+  }
+  /** 右クリックの押した瞬間だけ */
+  consumeAltClick(): boolean {
+    const c = this.altEdge;
+    this.altEdge = false;
+    return c;
+  }
+
   /** 左ボタンが押されている、またはこのフレームまでにクリックがあった */
   consumeFire(): boolean {
     const f = this.mouseDown || this.clickQueued || this.touchFire;
@@ -140,8 +155,12 @@ export class InputController {
     if (e.button === 0) {
       this.mouseDown = true;
       this.clickQueued = true;
+      this.clickEdge = true;
     }
-    if (e.button === 2) this.altDown = true;
+    if (e.button === 2) {
+      this.altDown = true;
+      this.altEdge = true;
+    }
     if (e.button === 1) {
       e.preventDefault();
       this.edges.add('KeyG'); // 中クリックでもピン

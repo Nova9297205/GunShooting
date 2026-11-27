@@ -28,6 +28,7 @@ const BUTTONS: { label: string; act: string; hold?: boolean }[] = [
   { label: '回復', act: 'KeyH' },
   { label: '食事', act: 'KeyQ' },
   { label: 'ピン', act: 'KeyG' },
+  { label: '建設', act: 'KeyV' },
   { label: '武器', act: 'wheel' },
 ];
 

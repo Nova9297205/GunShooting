@@ -32,6 +32,9 @@ import {
   BASE_TX,
   BASE_TY,
   BREAKABLE_KINDS,
+  BUILD_KINDS,
+  BUILD_DAMAGE_MUL,
+  RAINTANK_MAX,
   CHUNK,
   CHUNKS_X,
   CHUNKS_Y,
@@ -58,6 +61,7 @@ import {
   WORLD_W,
   ZOMBIE,
 } from './constants';
+import { buildDef, buildSpotError, canAfford } from './build';
 import {
   addItem,
   ammoOf,
@@ -178,6 +182,9 @@ export function cycleToMinute(cycleT: number): number {
   if (cycleT < DAY_SECONDS) return 360 + (cycleT * 840) / DAY_SECONDS;
   return (1200 + ((cycleT - DAY_SECONDS) * 600) / NIGHT_SECONDS) % 1440;
 }
+
+const STOVE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stove']);
+const BUILD_RANGE_PX = 6 * TILE + 20;
 
 /** 大群の夜が来る日（4日ごと） */
 export const isHordeDay = (day: number): boolean => day % 4 === 0;
@@ -360,6 +367,7 @@ export class HostSimulation {
   private hordeReward = false;
   /** 昼の 13:00 に天候が変わることがある（長い昼が単調にならないように） */
   private noonRolled = false;
+  private barricadeWarnT = -99;
   weather: Weather = 'clear';
   /** 天候の強さ（0..1 でなめらかに切り替わる） */
   wx = 0;
@@ -853,6 +861,7 @@ export class HostSimulation {
     this.time += dt;
     this.tick++;
     this.updateClock(dt);
+    this.updateBuilds(dt);
     this.updateSleep();
     this.updateReturnAdvice();
     if (this.hordeNight && this.hordeWaves > 0) {
@@ -942,6 +951,12 @@ export class HostSimulation {
         }
         this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: '大群の夜を越えた！ 拠点の収納箱に特別な補給が届いている', c: '#e0cfa8', snd: 'clear' });
       } else this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: '夜を越えた。物資を集めて拠点へ持ち帰れ', c: '#e0cfa8', snd: 'day' });
+      // 夜露：雨水タンクに毎朝少しだけ水が貯まる
+      for (const o of this.world.objects.values())
+        if (o.kind === 'raintank' && o.ready < RAINTANK_MAX) {
+          o.ready++;
+          this.changed.add(o.id);
+        }
       // 戦闘不能者は拠点で復帰（持ち物は倒れた場所に落ちたまま）
       const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
       const cy = (CAMPFIRE_TILE.y + 0.5) * TILE;
@@ -1248,6 +1263,22 @@ export class HostSimulation {
   }
 
   private eat(p: SimPlayer, id: ItemId): void {
+    if (id === 'stew' || id === 'tea') {
+      removeItem(p.bag, id, 1);
+      const was = (p.rested ?? 0) > 0;
+      if (id === 'stew') {
+        p.hunger = Math.min(100, p.hunger + 60);
+        p.hp = Math.min(p.maxHp, p.hp + 20);
+        p.rested = Math.max(p.rested ?? 0, 360);
+      } else {
+        p.tox = Math.max(0, p.tox - 30);
+        p.hp = Math.min(p.maxHp, p.hp + 8);
+        p.rested = Math.max(p.rested ?? 0, 120);
+      }
+      if (!was) this.applySkills(p);
+      this.pop(p, id === 'stew' ? '温かいシチュー！ 空腹+60・HP+20・休息済み' : 'ハーブティー：汚染 -30・休息済み', '#e0b25a', 'eat');
+      return;
+    }
     removeItem(p.bag, id, 1);
     p.hunger = Math.min(100, p.hunger + (id === 'mre' ? 70 : 35));
     if (id === 'mre') p.hp = Math.min(p.maxHp, p.hp + 10);
@@ -1445,6 +1476,12 @@ export class HostSimulation {
         this.storage.ver++;
         break;
       }
+      case 'build':
+        this.build(p, a, n(b), n(parts[3]));
+        break;
+      case 'unbuild':
+        this.unbuild(p, n(a));
+        break;
       case 'ammo': {
         // 弾種の切り替え：ammo:prim|sec → 弾倉の中身をバッグに戻し、もう一方の弾で装填し直す
         const key = a === 'prim' ? 'prim' : 'sec';
@@ -1565,9 +1602,104 @@ export class HostSimulation {
     return null;
   }
 
+  // ======================== 拠点づくり ========================
+
+  /** 素材をバックパック → 共有倉庫の順に払う */
+  private payCost(p: SimPlayer, cost: Partial<Record<ItemId, number>>): void {
+    for (const [m, need] of Object.entries(cost) as [ItemId, number][]) {
+      const got = removeItem(p.bag, m, need);
+      if (got < need) removeItem(this.storage.shared, m, need - got);
+    }
+    this.storage.ver++;
+  }
+
+  private build(p: SimPlayer, kind: string, tx: number, ty: number): void {
+    if (p.status !== 'alive') return;
+    const def = buildDef(kind);
+    if (!def) return;
+    if ((def.lv ?? 1) > this.base.bench) return this.pop(p, `作業台 Lv${def.lv} が必要`, '#c87a6a', 'error');
+    const occ = [...this.players.filter((q) => q.status !== 'dead' && !q.away), ...this.zombies.filter((z) => !z.dead)];
+    const err = buildSpotError(this.world, def.kind, tx, ty, p.x, p.y, occ);
+    if (err) return this.pop(p, err, '#c87a6a', 'error');
+    const short = canAfford(def, p.bag, this.storage.shared);
+    if (short) return this.pop(p, `素材が足りない（${ITEMS[short].name}）`, '#c87a6a', 'error');
+    this.payCost(p, def.cost);
+    const o: SimObj = { id: this.nextObjId++, kind: def.kind, tx, ty, hp: def.hp, maxHp: def.hp, ready: 0, regrowT: 0 };
+    this.world.setObj(o);
+    this.changed.add(o.id);
+    this.flowTimer = Math.min(this.flowTimer, 0.1);
+    this.events.push({ k: 'built', x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE, kind: def.kind, id: p.id });
+    this.gainXp(p, 2, 2);
+    this.makeNoise((tx + 0.5) * TILE, (ty + 0.5) * TILE, 120, false);
+  }
+
+  /** 建てた物を撤去：素材の半分が戻る */
+  private unbuild(p: SimPlayer, id: number): void {
+    const o = this.world.objects.get(id);
+    if (!o || !BUILD_KINDS.has(o.kind) || p.status !== 'alive') return;
+    if (Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) > BUILD_RANGE_PX) return this.pop(p, '遠すぎる', '#c87a6a', 'error');
+    const def = buildDef(o.kind)!;
+    for (const [m, n] of Object.entries(def.cost) as [ItemId, number][]) {
+      const back = Math.floor((n * o.hp) / o.maxHp / 2);
+      if (back > 0) {
+        const left = addItem(p.bag, m, back);
+        if (left > 0) {
+          const bag = this.groundBag(p.x, p.y);
+          if (bag) addItem(this.contents.get(bag.id)!, m, left);
+        }
+      }
+    }
+    if (o.kind === 'raintank' && o.ready > 0) addItem(p.bag, 'water', o.ready);
+    this.world.removeObj(o.id);
+    this.changed.delete(o.id);
+    this.removed.push(o.id);
+    this.flowTimer = Math.min(this.flowTimer, 0.1);
+    this.pop(p, `${def.name}を撤去（素材が半分戻った）`, '#d8c48a', 'craft');
+  }
+
+  /** [F]：雨水タンクの水を回収／傷んだ物を修理 */
+  private useBuilt(p: SimPlayer, o: SimObj): void {
+    const def = buildDef(o.kind)!;
+    if (o.kind === 'raintank' && o.ready > 0) {
+      const left = addItem(p.bag, 'water', o.ready);
+      const got = o.ready - left;
+      if (got <= 0) return this.pop(p, 'バックパックがいっぱい', '#c87a6a', 'error');
+      o.ready = left;
+      this.changed.add(o.id);
+      this.pop(p, `きれいな水 ×${got} を回収`, '#8ac0e0', 'loot');
+      return;
+    }
+    if (o.hp >= o.maxHp) return;
+    if (countItem(p.bag, 'scrap') + countItem(this.storage.shared, 'scrap') < 1) return this.pop(p, '修理には鉄くずが1つ必要', '#c87a6a', 'error');
+    this.payCost(p, { scrap: 1 });
+    o.hp = Math.min(o.maxHp, o.hp + o.maxHp * 0.4);
+    this.changed.add(o.id);
+    this.events.push({ k: 'built', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind, id: p.id, repair: true });
+    this.pop(p, `${def.name}を修理（${Math.round((o.hp / o.maxHp) * 100)}%）`, '#d8c48a', 'craft');
+  }
+
+  /** 雨水タンクに水が貯まる */
+  private updateBuilds(dt: number): void {
+    const rate = this.weather === 'storm' ? 1 / 25 : this.weather === 'rain' ? 1 / 45 : 0;
+    if (!rate) return;
+    for (const o of this.world.objects.values()) {
+      if (o.kind !== 'raintank' || o.ready >= RAINTANK_MAX) continue;
+      o.regrowT += rate * dt;
+      if (o.regrowT >= 1) {
+        o.regrowT -= 1;
+        o.ready++;
+        this.changed.add(o.id);
+      }
+    }
+  }
+
   private craft(p: SimPlayer, id: string): void {
     const r = RECIPES.find((x) => x.id === id);
     if (!r) return;
+    if (r.station === 'stove' && !this.nearKind(p, STOVE_KINDS, BENCH_RANGE)) {
+      this.pop(p, '調理かまどの近くで作る（拠点に建てられる）', '#c87a6a');
+      return;
+    }
     if (r.bench && !this.nearKind(p, BENCH_KINDS, BENCH_RANGE)) {
       this.pop(p, '作業台の近くでないと作れない', '#c87a6a');
       return;
@@ -1667,7 +1799,8 @@ export class HostSimulation {
           o.kind === 'door' ||
           STORAGE_KINDS.has(o.kind) ||
           (CONTAINER_KINDS.has(o.kind) && (o.kind !== 'car' || o.hp > 0)) ||
-          (o.kind === 'bed' && inBase((o.tx + 0.5) * TILE, (o.ty + 0.5) * TILE));
+          (o.kind === 'bed' && inBase((o.tx + 0.5) * TILE, (o.ty + 0.5) * TILE)) ||
+          (BUILD_KINDS.has(o.kind) && (o.hp < o.maxHp || (o.kind === 'raintank' && o.ready > 0)));
         if (!usable) continue;
         const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) - (o.kind === 'door' ? 0 : 6);
         if (d < bd) {
@@ -1677,6 +1810,10 @@ export class HostSimulation {
       }
     if (best && best.kind === 'bed') {
       this.trySleep(p);
+      return;
+    }
+    if (best && BUILD_KINDS.has(best.kind)) {
+      this.useBuilt(p, best);
       return;
     }
     if (!best) {
@@ -2557,6 +2694,16 @@ export class HostSimulation {
     const px = z.x;
     const py = z.y;
     const collided: { tx: number; ty: number }[] = [];
+    // 釘の罠：踏むと大きなダメージと足止め。罠は使うほど傷む
+    const trap = this.world.objAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE));
+    if (trap && trap.kind === 'spike') {
+      speed *= 0.4;
+      trap.hp -= 9 * dt;
+      if (Math.random() < dt * 4) this.changed.add(trap.id);
+      this.damageZombie(z, 60 * dt, -1, 0, 0, 0, true);
+      if (trap.hp <= 0) this.destroyObj(trap);
+      if (z.dead) return;
+    }
     moveCircle(z, (dx * speed + z.kx) * dt, (dy * speed + z.ky) * dt, st.radius, this.world, collided);
     // 拠点（安全地帯）には入れない（大群の夜は除く）
     if (this.safeIn(z.x, z.y)) {
@@ -2598,7 +2745,14 @@ export class HostSimulation {
       }
     }
     if (target) {
-      target.hp -= st.wallDamage;
+      const built = BUILD_KINDS.has(target.kind);
+      target.hp -= st.wallDamage * (built ? BUILD_DAMAGE_MUL : 1);
+      // 拠点のバリケードが攻撃されている：仲間に知らせる（修理・迎撃の合図）
+      if (built && this.time - this.barricadeWarnT > 10) {
+        this.barricadeWarnT = this.time;
+        const dir = directionName(target.tx, target.ty);
+        this.events.push({ k: 'feed', cat: 'danger', t: `拠点の${dir}側のバリケードが攻撃されている！（残り ${Math.round((Math.max(0, target.hp) / target.maxHp) * 100)}%）[F] で修理`, c: '#e0583e' });
+      }
       this.changed.add(target.id);
       z.attackCd = st.attackInterval;
       z.atk++;
