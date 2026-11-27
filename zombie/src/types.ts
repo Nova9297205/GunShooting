@@ -153,6 +153,8 @@ export interface PlayerSnap extends MoveBody {
   tut?: number;
   /** 背負っているリュック（バッグのマスと重さが増える） */
   pack?: ItemId;
+  /** 装備している近接武器（耐久は w.mag に入れる） */
+  mel?: Slot;
   /** 乗っている車の ID と座席（0 = 運転席） */
   veh?: number;
   seat?: number;

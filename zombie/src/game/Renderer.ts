@@ -13,6 +13,8 @@ import {
   BASE_TY,
   CYCLE_SECONDS,
   INDOOR_FLOORS,
+  MELEE_STATS,
+  type MeleeId,
   DAY_SECONDS,
   MAP_H,
   MAP_W,
@@ -2999,10 +3001,17 @@ export class Renderer {
       const cx = x + size / 2;
       const cy = yy + size / 2 - 4;
       switch (t.id) {
-        case Tool.Melee:
+        case Tool.Melee: {
           drawSlotIcon(ctx, 'axe', cx, cy);
-          label = 'MELEE';
+          // 近接武器：名前と耐久（残り%）
+          const mm = me.mel ? MELEE_STATS[me.mel.id as MeleeId] : null;
+          if (mm) {
+            const pct = Math.round(((me.mel!.w?.mag ?? mm.dur) / mm.dur) * 100);
+            label = `${mm.name} ${pct}%`;
+            warn = pct <= 20;
+          } else label = 'MELEE';
           break;
+        }
         case Tool.Primary:
         case Tool.Secondary: {
           const s = heldWeapon({ ...me, tool: t.id });

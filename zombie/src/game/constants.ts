@@ -76,6 +76,15 @@ export const AXE = {
   noiseRadius: 160,
 };
 
+/** 近接武器の性能（none = 何も持っていないときの斧。壊れない） */
+export type MeleeId = 'crowbar' | 'machete' | 'fireaxe';
+export const MELEE_STATS: Record<MeleeId | 'none', { name: string; interval: number; range: number; arc: number; damage: number; hits: number; knock: number; noise: number; stamina: number; dur: number }> = {
+  none: { name: '斧', interval: AXE.interval, range: AXE.range, arc: AXE.arc, damage: AXE.damage, hits: 3, knock: 260, noise: AXE.noiseRadius, stamina: 8, dur: 0 },
+  crowbar: { name: 'バール', interval: 0.5, range: 60, arc: Math.PI * 0.55, damage: 36, hits: 2, knock: 440, noise: 170, stamina: 9, dur: 240 },
+  machete: { name: 'マチェテ', interval: 0.3, range: 56, arc: Math.PI * 0.8, damage: 25, hits: 3, knock: 160, noise: 100, stamina: 6, dur: 170 },
+  fireaxe: { name: '消防斧', interval: 0.72, range: 66, arc: Math.PI * 0.65, damage: 64, hits: 4, knock: 380, noise: 210, stamina: 13, dur: 200 },
+};
+
 /** 火薬 → 弾薬クラフト */
 export const CRAFT = { gunpowder: 2, ammo: 12 };
 
@@ -254,6 +263,9 @@ export const RECIPES: Recipe[] = [
   { id: 'pipebomb', name: 'パイプ爆弾', desc: '投げて2秒後に爆発。群れをまとめて倒す', bench: true, lv: 2, cost: { gunpowder: 3, scrap: 2, chem: 1 }, out: { id: 'pipebomb', n: 1 } },
   { id: 'upkit', name: '武器強化キット', desc: '手に持っている武器の品質を1段上げる（希少まで）', bench: true, lv: 2, cost: { parts: 3, scrap: 4, tools: 1 }, out: { id: 'upkit', n: 1 } },
   { id: 'heartkit', name: '強化キット ×2', desc: '巨像の心臓から武器強化キットを作る', bench: true, lv: 2, cost: { bheart: 1 }, out: { id: 'upkit', n: 2 } },
+  { id: 'crowbar', name: 'バール', desc: '鉄くずを叩いて作る近接武器', bench: true, cost: { scrap: 6 }, out: { id: 'crowbar', n: 1 } },
+  { id: 'machete', name: 'マチェテ', desc: '速く静かに振れる近接武器', bench: true, lv: 2, cost: { scrap: 5, cloth: 2, tools: 1 }, out: { id: 'machete', n: 1 } },
+  { id: 'meleefix', name: '近接武器の修理', desc: '装備している近接武器の耐久を元に戻す', bench: true, cost: { scrap: 3, cloth: 1 }, out: { id: 'scrap', n: 0 } },
   { id: 'pack1', name: '学生かばん', desc: '背負うとバッグ +3マス・+6kg', bench: false, cost: { cloth: 5, scrap: 1 }, out: { id: 'pack1', n: 1 } },
   { id: 'pack2', name: '登山リュック', desc: '背負うとバッグ +6マス・+13kg', bench: true, lv: 2, cost: { cloth: 9, scrap: 4, parts: 1 }, out: { id: 'pack2', n: 1 } },
   { id: 'coat', name: '防寒コート', desc: '持っているだけで雨・夜の冷えが半分に', bench: true, cost: { cloth: 6, scrap: 1 }, out: { id: 'coat', n: 1 } },

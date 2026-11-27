@@ -33,6 +33,8 @@ import type {
 import { Tool } from '../types';
 import {
   AXE,
+  MELEE_STATS,
+  type MeleeId,
   BENCH_RANGE,
   BASE_TX,
   BASE_TY,
@@ -259,13 +261,13 @@ export function inBase(x: number, y: number): boolean {
 type LootRow = [ItemId | 'weapon' | 'attach', number, number, number];
 const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
   // 序盤の詰まりを減らす：棚・机・木箱・車からも少し弾と包帯が出る。食料は出すぎないように控えめ
-  shelf: [['pack1', 0.25, 1, 1], ['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
+  shelf: [['machete', 0.12, 1, 1], ['pack1', 0.25, 1, 1], ['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
   fridge: [['can', 4.5, 1, 2], ['mre', 1, 1, 1]],
   cabinet: [['bandage', 5, 1, 2], ['chem', 4, 1, 2], ['medkit', 1.2, 1, 1], ['cloth', 2, 1, 2], ['stim', 0.35, 1, 1]],
-  locker: [['pack1', 0.5, 1, 1], ['pack2', 0.15, 1, 1], ['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
+  locker: [['fireaxe', 0.3, 1, 1], ['crowbar', 0.25, 1, 1], ['pack1', 0.5, 1, 1], ['pack2', 0.15, 1, 1], ['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
   desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
-  crate: [['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
-  car: [['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
+  crate: [['crowbar', 0.35, 1, 1], ['fireaxe', 0.12, 1, 1], ['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
+  car: [['crowbar', 0.3, 1, 1], ['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
   wcase: [['ammo762', 4, 8, 20], ['ammo9', 3, 10, 20], ['shells', 3, 4, 8], ['weapon', 2, 1, 1], ['attach', 1.5, 1, 1], ['parts', 2, 1, 2], ['ammo762ap', 1, 5, 12], ['slug', 0.8, 3, 6]],
   mcrate: [['pack3', 0.35, 1, 1], ['pack2', 0.3, 1, 1], ['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
   box: [['can', 3, 1, 2], ['bandage', 2, 1, 1], ['ammo9', 2, 6, 10], ['cloth', 1, 1, 2]],
@@ -339,7 +341,7 @@ export interface SaveData {
     tool: number;
     kills: number;
     xp: number[];
-    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number; pack?: ItemId; home?: { x: number; y: number }; tut?: number };
+    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number; pack?: ItemId; mel?: Slot; home?: { x: number; y: number }; tut?: number };
   }[];
   extra?: Record<string, unknown>;
 }
@@ -690,7 +692,7 @@ export class HostSimulation {
         tool: p.tool,
         kills: p.kills,
         xp: p.xp,
-        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0, pack: p.pack, home: p.home, tut: p.tut ?? 0 },
+        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0, pack: p.pack, mel: p.mel, home: p.home, tut: p.tut ?? 0 },
       })),
       extra: this.saveExtra(),
     };
@@ -940,6 +942,7 @@ export class HostSimulation {
         ...(p.sleeping ? { sleeping: true } : {}),
         ...(p.veh !== undefined ? { veh: p.veh, seat: p.seat } : {}),
         ...(p.pack ? { pack: p.pack } : {}),
+        ...(p.mel ? { mel: p.mel } : {}),
         ...((p.tut ?? 0) !== TUT_ALL ? { tut: p.tut ?? 0 } : {}),
         ...((p.rested ?? 0) > 0 ? { rested: Math.ceil(p.rested ?? 0) } : {}),
         x: r1(p.x),
@@ -1346,7 +1349,7 @@ export class HostSimulation {
       case Tool.Melee:
         if (p.swingCd <= 0) {
           this.swingAxe(p);
-          p.swingCd = AXE.interval;
+          p.swingCd = MELEE_STATS[(p.mel?.id as MeleeId) ?? 'none']?.interval ?? AXE.interval;
         }
         break;
       case Tool.Primary:
@@ -1693,6 +1696,7 @@ export class HostSimulation {
           this.heal(p, s.id);
         } else if (isWeapon(s.id)) this.equip(p, n(a));
         else if (PACKS[s.id]) this.wearPack(p, n(a));
+        else if (MELEE_STATS[s.id as MeleeId]) this.equipMelee(p, n(a));
         else if (s.id === 'decoy' || s.id === 'pipebomb') this.throwItem(p, s.id);
         else if (s.id === 'upkit') this.upgradeWeapon(p);
         break;
@@ -1703,6 +1707,14 @@ export class HostSimulation {
       case 'unequip': {
         if (a === 'pack') {
           this.takeOffPack(p);
+          break;
+        }
+        if (a === 'mel') {
+          if (!p.mel) return;
+          if (freeSlots(p.bag) <= 0) return this.pop(p, this.fullMsg(p), '#c87a6a');
+          const i = p.bag.findIndex((q) => !q);
+          p.bag[i] = p.mel;
+          p.mel = undefined;
           break;
         }
         const key = a === 'prim' ? 'prim' : 'sec';
@@ -2720,6 +2732,19 @@ export class HostSimulation {
   private craft(p: SimPlayer, id: string): void {
     const r = RECIPES.find((x) => x.id === id);
     if (!r) return;
+    if (r.id === 'meleefix') {
+      const ms = p.mel ? MELEE_STATS[p.mel.id as MeleeId] : null;
+      if (!ms) return this.pop(p, '修理する近接武器を装備していない', '#c87a6a');
+      if ((p.mel!.w?.mag ?? ms.dur) >= ms.dur) return this.pop(p, `${ms.name}は傷んでいない`, '#cccccc');
+      if (!this.nearKind(p, BENCH_KINDS, BENCH_RANGE)) return this.pop(p, '作業台の近くでないと修理できない', '#c87a6a');
+      const short = (Object.entries(r.cost) as [ItemId, number][]).find(([m, k]) => countItem(p.bag, m) + countItem(this.storage.shared, m) < k);
+      if (short) return this.pop(p, '素材が足りない', '#c87a6a');
+      this.payCost(p, r.cost);
+      p.mel!.w = { mag: ms.dur };
+      this.pop(p, `${ms.name}を修理した`, '#c9a85a', 'craft');
+      this.tutMark(p, TUT_CRAFT);
+      return;
+    }
     if (r.station === 'stove' && !this.nearKind(p, STOVE_KINDS, BENCH_RANGE)) {
       this.pop(p, '調理かまどの近くで作る（拠点に建てられる）', '#c87a6a');
       return;
@@ -3020,32 +3045,55 @@ export class HostSimulation {
   // ======================== 近接・ダウン・蘇生 ========================
 
   private swingAxe(p: SimPlayer): void {
-    if (p.stamina < PLAYER.meleeStamina) {
+    const ms = MELEE_STATS[(p.mel?.id as MeleeId) ?? 'none'] ?? MELEE_STATS.none;
+    if (p.stamina < ms.stamina) {
       if (p.warnCd <= 0) {
         this.pop(p, 'スタミナ切れ！', '#c99a5a');
         p.warnCd = 1;
       }
       return;
     }
-    p.stamina -= PLAYER.meleeStamina;
+    p.stamina -= ms.stamina;
     p.staminaDelay = PLAYER.staminaDelay;
     p.swings++;
-    this.makeNoise(p.x, p.y, AXE.noiseRadius, false);
+    this.makeNoise(p.x, p.y, ms.noise, false);
     let hits = 0;
     for (const z of this.zombies) {
-      if (z.dead || hits >= 3) continue;
+      if (z.dead || hits >= ms.hits) continue;
       const r = ZOMBIE[z.type].radius;
       const dx = z.x - p.x;
       const dy = z.y - p.y;
       const d = Math.hypot(dx, dy);
-      if (d > AXE.range + r) continue;
-      if (Math.abs(angleDiff(p.aim, Math.atan2(dy, dx))) > AXE.arc / 2 && d > r + PLAYER.radius) continue;
+      if (d > ms.range + r) continue;
+      if (Math.abs(angleDiff(p.aim, Math.atan2(dy, dx))) > ms.arc / 2 && d > r + PLAYER.radius) continue;
       // 気づいていない相手への奇襲は大ダメージ
       const sneak = z.state !== 'chase' ? 2.2 : 1;
       this.events.push({ k: 'hit', x: z.x - (dx / (d || 1)) * r * 0.6, y: z.y - (dy / (d || 1)) * r * 0.6, o: p.id, a: Math.atan2(dy, dx), m: 1 });
-      this.damageZombie(z, AXE.damage * sneak, p.id, dx, dy, 260);
+      this.damageZombie(z, ms.damage * sneak, p.id, dx, dy, ms.knock);
+      // 近接の手応え：当たると一瞬ひるむ（次の攻撃が遅れる）。巨体はひるみにくい
+      z.attackCd = Math.max(z.attackCd, z.type === 'titan' || z.type === 'brute' ? 0.3 : 0.6);
       hits++;
     }
+    // 耐久：当てた数だけ減る。尽きたら壊れて、ふつうの斧に戻る
+    if (hits && p.mel) {
+      const w = (p.mel.w ??= { mag: ms.dur });
+      w.mag -= hits;
+      if (w.mag <= 0) {
+        this.pop(p, `${ms.name}が壊れた！（作業台で修理できたのに…）`, '#e07a60', 'error');
+        p.mel = undefined;
+      } else if (w.mag === Math.floor(ms.dur * 0.2)) this.pop(p, `${ms.name}が傷んできた（残り 20%）— 作業台で修理`, '#e0a33a');
+    }
+  }
+
+  /** 近接武器を持ち替える（持っていた物はバッグへ） */
+  private equipMelee(p: SimPlayer, idx: number): void {
+    const s = p.bag[idx];
+    if (!s || !MELEE_STATS[s.id as MeleeId]) return;
+    const prev = p.mel;
+    p.mel = { id: s.id, n: 1, w: s.w ?? { mag: MELEE_STATS[s.id as MeleeId].dur } };
+    p.bag[idx] = prev ?? null;
+    p.tool = Tool.Melee;
+    this.pop(p, `${MELEE_STATS[s.id as MeleeId].name}を構えた`, '#c9a85a');
   }
 
   private updateRevive(dt: number): void {
