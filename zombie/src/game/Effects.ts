@@ -406,6 +406,26 @@ export class Effects {
       case 'noise':
         this.ring(ev.x, ev.y, '#5a6270', 46, 0.25); // 銃声（騒音）の小さな波紋
         break;
+      case 'gas':
+        // 膨張体の破裂：黄緑の毒ガスが広がる
+        this.burst(ev.x, ev.y, '#a8c060', 26, 120, 2.2, 14, 'smoke', false);
+        this.burst(ev.x, ev.y, '#d0e070', 12, 220, 0.5, 3, 'dot', false);
+        this.ring(ev.x, ev.y, '#b8d070', 150, 0.6);
+        this.decal(ev.x, ev.y, 34, 'scorch', 50);
+        break;
+      case 'scream':
+        // 叫び声の大きな波紋
+        this.ring(ev.x, ev.y, '#e8c8b0', 220, 0.9);
+        this.ring(ev.x, ev.y, '#e09070', 120, 0.6);
+        break;
+      case 'boom':
+        this.burst(ev.x, ev.y, '#ffb050', 30, 380, 0.5, 4, 'spark', true);
+        this.burst(ev.x, ev.y, '#ff7030', 14, 160, 0.7, 10, 'smoke', true, -Math.PI / 2, 2);
+        this.burst(ev.x, ev.y, '#3a3632', 18, 90, 2.4, 16, 'smoke', false, -Math.PI / 2, 1.6);
+        this.ring(ev.x, ev.y, '#ffc070', 140, 0.4);
+        this.decal(ev.x, ev.y, 40, 'scorch', 80);
+        this.shake(0.7);
+        break;
     }
   }
 }

@@ -6,7 +6,7 @@
 //   3) 廃墟の壁：ぼかした落ち影＋南側の側面（2.5D）＋レンガの天面
 //   ★ スプライト化する場合はこのファイルの代わりにタイル画像を並べる処理を書けばOK
 // ============================================================
-import { CHUNK, MAP_H, MAP_W, T_DIRT, T_FENCE, T_FLOOR, T_GRASS, T_ROAD, T_TILE, T_WALL, T_WINDOW, T_WOOD, TILE } from './constants';
+import { CHUNK, MAP_H, MAP_W, T_BRIDGE, T_DIRT, T_FENCE, T_FLOOR, T_GRASS, T_ROAD, T_SHALLOW, T_TILE, T_WALL, T_WATER, T_WINDOW, T_WOOD, TILE } from './constants';
 
 const wallLike = (t: number) => t === T_WALL || t === T_WINDOW;
 import type { TileWorld } from './world';
@@ -68,12 +68,21 @@ export function sceneryAt(world: TileWorld, tx: number, ty: number): number {
   const outY = ty < 0 || ty >= MAP_H;
   // （幹線は地図の端まで通っているので、端のタイルが道路ならその道は外へ続いている）
   if (e === T_ROAD && outX !== outY) return T_ROAD;
+  // 川も地図の外へ流れ続ける
+  if ((e === T_WATER || e === T_SHALLOW || e === T_BRIDGE) && outX !== outY) return T_WATER;
   return fbm(tx / 9, ty / 9, 77, 2) > 0.56 ? T_DIRT : T_GRASS;
 }
 
 /** 1チャンク分の地形を、何回かに分けて焼き込む（1フレームで固まらないように yield する） */
 export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out: { canvas?: HTMLCanvasElement }): Generator<void> {
   const terrainAt = (tx: number, ty: number) => sceneryAt(world, tx, ty);
+  // 見た目用の地形：カーブ道路は下地を草地として描き（道はベクターで上に描く）、橋の下は水
+  const visualAt = (tx: number, ty: number) => {
+    const t = terrainAt(tx, ty);
+    if (t === T_BRIDGE) return T_WATER;
+    if (t === T_ROAD && world.inBounds(tx, ty) && world.vec[ty * MAP_W + tx]) return T_GRASS;
+    return t;
+  };
   const tx0 = ccx * CHUNK;
   const ty0 = ccy * CHUNK;
   const tx1 = tx0 + CHUNK;
@@ -92,18 +101,90 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
   const bctx = base.getContext('2d')!;
   const img = bctx.createImageData(bw, bh);
   const d = img.data;
+  // 水らしさ（3×3 でぼかした値）をタイルの中心に置き、ピクセルごとに補間して岸の形を決める
+  const WM = 3;
+  const WW = CHUNK + WM * 2;
+  const wetRaw = new Float32Array(WW * WW);
+  const wetBlur = new Float32Array(WW * WW);
+  const deepRaw = new Float32Array(WW * WW);
+  const deepBlur = new Float32Array(WW * WW);
+  let anyWet = false;
+  for (let y = 0; y < WW; y++)
+    for (let x = 0; x < WW; x++) {
+      const v = visualAt(tx0 - WM + x, ty0 - WM + y);
+      const w = v === T_WATER || v === T_SHALLOW ? 1 : 0;
+      wetRaw[y * WW + x] = w;
+      deepRaw[y * WW + x] = v === T_WATER ? 1 : 0;
+      if (w) anyWet = true;
+    }
+  const blur = (src: Float32Array, dst: Float32Array) => {
+    for (let y = 1; y < WW - 1; y++)
+      for (let x = 1; x < WW - 1; x++) {
+        let sum = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) sum += src[(y + dy) * WW + x + dx] * (dx === 0 && dy === 0 ? 2 : 1);
+        dst[y * WW + x] = sum / 10;
+      }
+  };
+  if (anyWet) {
+    blur(wetRaw, wetBlur);
+    blur(deepRaw, deepBlur);
+  }
+  const fieldAt = (raw: Float32Array, bl: Float32Array, x: number, y: number) => {
+    const lx = x - tx0 + WM;
+    const ly = y - ty0 + WM;
+    return lx < 1 || ly < 1 || lx >= WW - 1 || ly >= WW - 1 ? raw[Math.max(0, Math.min(WW - 1, ly)) * WW + Math.max(0, Math.min(WW - 1, lx))] : bl[ly * WW + lx];
+  };
+  const wetAt = (x: number, y: number) => fieldAt(wetRaw, wetBlur, x, y);
+  const deepAt = (x: number, y: number) => fieldAt(deepRaw, deepBlur, x, y);
   for (let py = 0; py < bh; py++) {
     if (py % 50 === 49) yield;
     for (let px = 0; px < bw; px++) {
       const wx = X0 + px * S;
       const wy = Y0 + py * S;
-      let t = terrainAt(Math.floor(wx / TILE), Math.floor(wy / TILE));
+      let t = visualAt(Math.floor(wx / TILE), Math.floor(wy / TILE));
       // 自然地形の境界をノイズで歪ませる
-      if (t === T_GRASS || t === T_DIRT) {
+      const natural = (v: number) => v === T_GRASS || v === T_DIRT || v === T_WATER || v === T_SHALLOW;
+      let shore = 9;
+      if (natural(t)) {
         const ox = (fbm(wx / 90, wy / 90, 11, 2) - 0.5) * 46;
         const oy = (fbm(wx / 90, wy / 90, 23, 2) - 0.5) * 46;
-        const t2 = terrainAt(Math.floor((wx + ox) / TILE), Math.floor((wy + oy) / TILE));
-        if (t2 === T_GRASS || t2 === T_DIRT) t = t2;
+        const t2 = visualAt(Math.floor((wx + ox) / TILE), Math.floor((wy + oy) / TILE));
+        const wetA = t === T_WATER || t === T_SHALLOW;
+        const wetB = t2 === T_WATER || t2 === T_SHALLOW;
+        if (natural(t2) && !wetA && !wetB) t = t2;
+        // 水辺：ぼかした「水らしさ」を補間して岸の形を決める（階段状にならず、なめらかな岸になる）
+        if (anyWet) {
+          const fx = wx / TILE - 0.5;
+          const fy = wy / TILE - 0.5;
+          const ix = Math.floor(fx);
+          const iy = Math.floor(fy);
+          const w00 = wetAt(ix, iy);
+          const w10 = wetAt(ix + 1, iy);
+          const w01 = wetAt(ix, iy + 1);
+          const w11 = wetAt(ix + 1, iy + 1);
+          if (w00 + w10 + w01 + w11 > 0 && w00 + w10 + w01 + w11 < 4) {
+            const ax = fx - ix;
+            const ay = fy - iy;
+            const wet = (w00 * (1 - ax) + w10 * ax) * (1 - ay) + (w01 * (1 - ax) + w11 * ax) * ay;
+            const thr = 0.5 + (fbm(wx / 50, wy / 50, 71, 2) - 0.5) * 0.25;
+            shore = wet - thr;
+            if (wet > thr && !wetA) t = T_SHALLOW;
+            else if (wet <= thr && wetA) t = T_DIRT;
+          }
+          // 深みと浅瀬の境目も同じようになめらかに
+          if (t === T_WATER || t === T_SHALLOW) {
+            const d00 = deepAt(ix, iy);
+            const d10 = deepAt(ix + 1, iy);
+            const d01 = deepAt(ix, iy + 1);
+            const d11 = deepAt(ix + 1, iy + 1);
+            if (d00 + d10 + d01 + d11 > 0) {
+              const ax = fx - ix;
+              const ay = fy - iy;
+              const deep = (d00 * (1 - ax) + d10 * ax) * (1 - ay) + (d01 * (1 - ax) + d11 * ax) * ay;
+              t = deep > 0.5 + (fbm(wx / 40, wy / 40, 83, 2) - 0.5) * 0.3 ? T_WATER : T_SHALLOW;
+            } else t = T_SHALLOW;
+          }
+        }
       }
       let r = 0;
       let g = 0;
@@ -147,6 +228,22 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
           }
           break;
         }
+        case T_WATER: {
+          // 濁った深い水：流れの筋と深さのムラ
+          const k = n1 * 0.6 + fbm(wx / 40, wy / 120, 61, 2) * 0.4;
+          r = mix(26, 40, k) + (grain - 0.5) * 6;
+          g = mix(40, 56, k) + (grain - 0.5) * 6;
+          b = mix(44, 58, k) + (grain - 0.5) * 6;
+          break;
+        }
+        case T_SHALLOW: {
+          // 浅瀬：川底の砂利が透けて見える
+          const k = n2;
+          r = mix(52, 70, k) + (grain - 0.5) * 14;
+          g = mix(72, 88, k) + (grain - 0.5) * 12;
+          b = mix(76, 90, k) + (grain - 0.5) * 10;
+          break;
+        }
         case T_WOOD: {
           // フローリング：板ごとの色ムラ
           const plank = Math.floor(wy / 10);
@@ -184,6 +281,18 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
           g = 60;
           b = 56;
         }
+      }
+      // 岸辺：水側は白い泡、陸側は湿った黒い土
+      if (shore < 0.07 && shore > 0 && (t === T_WATER || t === T_SHALLOW)) {
+        const k2 = 1 - shore / 0.07;
+        r += 34 * k2 * (grain > 0.4 ? 1 : 0.4);
+        g += 36 * k2 * (grain > 0.4 ? 1 : 0.4);
+        b += 32 * k2 * (grain > 0.4 ? 1 : 0.4);
+      } else if (shore <= 0 && shore > -0.12) {
+        const k2 = 1 + shore / 0.12;
+        r -= 26 * k2;
+        g -= 24 * k2;
+        b -= 20 * k2;
       }
       const i = (py * bw + px) * 4;
       d[i] = r;
@@ -228,10 +337,14 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
 
   for (let ty = ty0 - 1; ty <= ty1; ty++)
     for (let tx = tx0 - 1; tx <= tx1; tx++) {
-      const t = terrainAt(tx, ty);
+      const t = visualAt(tx, ty);
       const x = tx * TILE;
       const y = ty * TILE;
       const r = hash(tx, ty, 1);
+      if (t === T_WATER || t === T_SHALLOW) {
+        drawWaterDetails(ctx, tx, ty, t);
+        continue;
+      }
       if (t === T_GRASS) {
         // 草の葉
         ctx.lineWidth = 1;
@@ -260,7 +373,7 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
           ctx.fillRect(x + hash(tx, ty, i + 13) * TILE, y + hash(tx, ty, i + 17) * TILE, 1.5, 1.5);
         }
       } else if (t === T_ROAD) {
-        drawRoadDetails(ctx, tx, ty, terrainAt);
+        drawRoadDetails(ctx, tx, ty, visualAt);
       } else if (t === T_WOOD) {
         // 板の継ぎ目
         ctx.strokeStyle = 'rgba(30,18,10,0.35)';
@@ -342,7 +455,10 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
     }
 
   yield;
-  detailPass(ctx, world, terrainAt, tx0 - 1, ty0 - 1, tx1 + 1, ty1 + 1);
+  detailPass(ctx, world, visualAt, tx0 - 1, ty0 - 1, tx1 + 1, ty1 + 1);
+  yield;
+  // カーブの旧道・橋・国道の車線（タイルに縛られないベクターで描く）
+  drawRoadFeatures(ctx, world, terrainAt, tx0, ty0, tx1, ty1);
   yield;
 
   // ---------- 3) 壁の落ち影（ぼかし） ----------
@@ -476,10 +592,16 @@ export function bakeMini(world: TileWorld): HTMLCanvasElement {
     [T_WALL]: [150, 142, 130],
     [T_WINDOW]: [140, 150, 150],
     [T_FENCE]: [120, 120, 110],
+    [T_WATER]: [42, 70, 86],
+    [T_SHALLOW]: [76, 104, 106],
+    [T_BRIDGE]: [128, 118, 100],
   };
+  const hwy = (tx: number, ty: number) => world.features.highways.some((h) => (h.horiz ? ty >= h.at && ty < h.at + h.w : tx >= h.at && tx < h.at + h.w));
   for (let ty = 0; ty < MAP_H; ty++)
     for (let tx = 0; tx < MAP_W; tx++) {
-      const c = col[world.terrainAt(tx, ty)] ?? [60, 60, 60];
+      const t = world.terrainAt(tx, ty);
+      // 国道は明るく太く見えるように
+      const c = t === T_ROAD && hwy(tx, ty) ? [104, 100, 88] : (col[t] ?? [60, 60, 60]);
       const n = (hash(tx, ty, 5) - 0.5) * 8;
       for (let k = 0; k < 4; k++) {
         const i = ((ty * 2 + (k >> 1)) * MAP_W * 2 + tx * 2 + (k & 1)) * 4;
@@ -1137,4 +1259,206 @@ export function wallWear(ctx: CanvasRenderingContext2D, at: (x: number, y: numbe
         ctx.fillRect(x, y, TILE, TILE);
       }
     }
+}
+
+
+/** 水面：さざ波・浅瀬の小石（岸の泡と湿った土は下地の色で描く） */
+function drawWaterDetails(ctx: CanvasRenderingContext2D, tx: number, ty: number, t: number): void {
+  const x = tx * TILE;
+  const y = ty * TILE;
+  const R = (i: number) => hash(tx, ty, 600 + i);
+  // さざ波（流れに沿った短い光の筋）
+  ctx.strokeStyle = t === T_WATER ? 'rgba(150,175,170,0.16)' : 'rgba(190,200,180,0.18)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < 3; i++) {
+    const px = x + R(i) * TILE;
+    const py = y + R(i + 5) * TILE;
+    ctx.moveTo(px - 5, py);
+    ctx.quadraticCurveTo(px, py - 2, px + 5, py);
+  }
+  ctx.stroke();
+  if (t === T_SHALLOW) {
+    for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = i % 2 ? 'rgba(150,140,115,0.45)' : 'rgba(40,46,40,0.4)';
+      ctx.beginPath();
+      ctx.ellipse(x + R(i + 10) * TILE, y + R(i + 20) * TILE, 2 + R(i + 30) * 2, 1.5 + R(i + 40), R(i + 50) * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+/** 折れ線を両端から len だけ短くする（交差点の中に車線の線を描かない） */
+function trimPolyline(pts: [number, number][], len: number): [number, number][] {
+  const out = pts.slice();
+  for (const end of [0, 1]) {
+    let left = len;
+    while (out.length > 2 && left > 0) {
+      const a = end ? out[out.length - 1] : out[0];
+      const b = end ? out[out.length - 2] : out[1];
+      const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (d <= left) {
+        if (end) out.pop();
+        else out.shift();
+        left -= d;
+      } else {
+        const k = left / d;
+        const p: [number, number] = [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+        if (end) out[out.length - 1] = p;
+        else out[0] = p;
+        left = 0;
+      }
+    }
+  }
+  return out;
+}
+
+/** カーブの旧道・橋・国道の車線をチャンクに描く */
+function drawRoadFeatures(ctx: CanvasRenderingContext2D, world: TileWorld, at: (x: number, y: number) => number, tx0: number, ty0: number, tx1: number, ty1: number): void {
+  const F = world.features;
+  const roadLike = (t: number) => t === T_ROAD || t === T_BRIDGE;
+  const M = 4;
+  // ---- カーブの旧道 ----
+  for (const c of F.curves) {
+    if (!c.pts.some(([x, y]) => x > tx0 - M && x < tx1 + M && y > ty0 - M && y < ty1 + M)) continue;
+    const W = c.w * TILE;
+    const path = (pts: [number, number][]) => {
+      ctx.beginPath();
+      pts.forEach(([x, y], i) => (i ? ctx.lineTo(x * TILE, y * TILE) : ctx.moveTo(x * TILE, y * TILE)));
+    };
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    path(c.pts);
+    ctx.strokeStyle = 'rgba(72,70,58,0.9)'; // 路肩の砂利
+    ctx.lineWidth = W + 10;
+    ctx.stroke();
+    ctx.strokeStyle = '#3b3b39';
+    ctx.lineWidth = W;
+    ctx.stroke();
+    // 骨材のムラ（細い筋を何本か）
+    ctx.lineWidth = W * 0.35;
+    ctx.strokeStyle = 'rgba(70,70,66,0.25)';
+    ctx.setLineDash([30, 50]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineCap = 'butt';
+    const inner = trimPolyline(c.pts, 1.8);
+    path(inner);
+    ctx.strokeStyle = 'rgba(210,210,200,0.32)';
+    ctx.lineWidth = W - 8;
+    ctx.stroke();
+    ctx.strokeStyle = '#3b3b39';
+    ctx.lineWidth = W - 12;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(225,190,80,0.55)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([16, 20]);
+    ctx.stroke();
+    ctx.restore();
+  }
+  // ---- 橋（崩落したものは岸から突き出た残骸だけ） ----
+  for (const b of F.bridges) {
+    if (b.x + b.w < tx0 - 1 || b.x > tx1 + 1 || b.y + b.h < ty0 - 1 || b.y > ty1 + 1) continue;
+    const x0 = b.x * TILE;
+    const y0 = b.y * TILE;
+    const w = b.w * TILE;
+    const h = b.h * TILE;
+    if (b.broken) {
+      for (const side of [0, 1]) {
+        const ex = side ? x0 + w : x0;
+        const dir = side ? -1 : 1;
+        const len = TILE * (1 + hash(b.x, b.y, side) * 0.8);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(Math.min(ex, ex + dir * len) + 6, y0 + 10, len, h);
+        ctx.fillStyle = '#5a5750';
+        ctx.beginPath();
+        ctx.moveTo(ex, y0 - 6);
+        ctx.lineTo(ex + dir * len, y0 - 6);
+        for (let k = 0; k <= 6; k++) ctx.lineTo(ex + dir * (len - 4 - hash(b.x + k, b.y, side + 3) * 16), y0 - 6 + ((h + 12) * k) / 6);
+        ctx.lineTo(ex, y0 + h + 6);
+        ctx.closePath();
+        ctx.fill();
+        // 鉄筋
+        ctx.strokeStyle = 'rgba(120,80,50,0.8)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        for (let k = 1; k < 5; k++) {
+          const yy = y0 - 6 + ((h + 12) * k) / 5;
+          ctx.moveTo(ex + dir * (len - 10), yy);
+          ctx.lineTo(ex + dir * (len + 6 + hash(k, b.x, 9) * 8), yy + (hash(k, b.y, 8) - 0.5) * 8);
+        }
+        ctx.stroke();
+      }
+      // 川に落ちたコンクリート片
+      for (let k = 0; k < 5; k++) {
+        ctx.fillStyle = 'rgba(90,88,80,0.85)';
+        ctx.beginPath();
+        ctx.ellipse(x0 + w * (0.3 + hash(b.x, k, 4) * 0.4), y0 + h * hash(b.y, k, 5), 8 + hash(k, b.x, 6) * 8, 5 + hash(k, b.y, 7) * 5, hash(k, k, 8) * 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      continue;
+    }
+    const ext = TILE * 0.5;
+    // 水面に落ちる影
+    ctx.fillStyle = 'rgba(0,0,0,0.38)';
+    ctx.fillRect(x0 - ext + 8, y0 + 14, w + ext * 2, h);
+    // 床版（コンクリート）
+    ctx.fillStyle = '#5b5850';
+    ctx.fillRect(x0 - ext, y0 - 8, w + ext * 2, h + 16);
+    ctx.fillStyle = '#44433f';
+    ctx.fillRect(x0 - ext, y0, w + ext * 2, h);
+    // 伸縮継手
+    ctx.fillStyle = 'rgba(20,20,20,0.6)';
+    for (let xx = x0; xx <= x0 + w; xx += TILE * 2) ctx.fillRect(xx - 1, y0, 2, h);
+    // 欄干（柱＋手すり）
+    for (const ry of [y0 - 8, y0 + h + 2]) {
+      ctx.fillStyle = '#7d796e';
+      ctx.fillRect(x0 - ext, ry, w + ext * 2, 6);
+      ctx.fillStyle = '#2f2e2a';
+      for (let xx = x0 - ext; xx <= x0 + w + ext; xx += 14) ctx.fillRect(xx, ry + 1, 3, 4);
+    }
+    if (!b.hwy) {
+      ctx.fillStyle = 'rgba(225,190,80,0.55)';
+      for (let xx = x0; xx < x0 + w; xx += TILE) ctx.fillRect(xx + 6, y0 + h / 2 - 1.5, TILE - 12, 3);
+    }
+  }
+  // ---- 国道：路肩の実線・車線の破線・中央の黄色の二重線 ----
+  for (const hw of F.highways) {
+    const a0 = hw.at;
+    if (hw.horiz ? a0 + hw.w < ty0 - 1 || a0 > ty1 + 1 : a0 + hw.w < tx0 - 1 || a0 > tx1 + 1) continue;
+    const W = hw.w * TILE;
+    const P = a0 * TILE;
+    const from = hw.horiz ? tx0 - 1 : ty0 - 1;
+    const to = hw.horiz ? tx1 + 1 : ty1 + 1;
+    for (let k = from; k < to; k++) {
+      // 交差点（横から道路が入ってくる所）には線を引かない
+      const side1 = hw.horiz ? at(k, a0 - 1) : at(a0 - 1, k);
+      const side2 = hw.horiz ? at(k, a0 + hw.w) : at(a0 + hw.w, k);
+      if (roadLike(side1) || roadLike(side2)) continue;
+      const self = hw.horiz ? at(k, a0) : at(a0, k);
+      if (!roadLike(self)) continue;
+      const Q = k * TILE;
+      const rect = (off: number, len0: number, thick: number, len: number) => {
+        if (hw.horiz) ctx.fillRect(Q + len0, P + off - thick / 2, len, thick);
+        else ctx.fillRect(P + off - thick / 2, Q + len0, thick, len);
+      };
+      // 路肩（少し明るい帯）
+      ctx.fillStyle = 'rgba(150,145,130,0.12)';
+      rect(6, 0, 12, TILE);
+      rect(W - 6, 0, 12, TILE);
+      ctx.fillStyle = 'rgba(215,215,205,0.5)';
+      rect(12, 0, 2.5, TILE);
+      rect(W - 12, 0, 2.5, TILE);
+      // 車線の破線
+      if (k % 2 === 0) {
+        ctx.fillStyle = 'rgba(215,215,205,0.42)';
+        rect(W * 0.28, 8, 2.5, TILE - 16);
+        rect(W * 0.72, 8, 2.5, TILE - 16);
+      }
+      ctx.fillStyle = 'rgba(225,185,70,0.6)';
+      rect(W / 2 - 3, 0, 2.5, TILE);
+      rect(W / 2 + 3, 0, 2.5, TILE);
+    }
+  }
 }

@@ -99,6 +99,10 @@ export const ZOMBIE: Record<ZombieType, ZombieStats> = {
   runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#5c5048', skin: '#a2968a', armor: 0 },
   soldier: { radius: 14, hp: 150, daySpeed: 55, nightSpeed: 92, damage: 16, wallDamage: 30, attackInterval: 0.9, color: '#4a4f3c', skin: '#8a8c76', armor: 0.4 },
   brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#46483e', skin: '#7a7e6a', armor: 0.3 },
+  /** 膨張体：遅いが倒すと毒ガスを撒く（工業地区・病院） */
+  bloater: { radius: 18, hp: 130, daySpeed: 30, nightSpeed: 56, damage: 9, wallDamage: 20, attackInterval: 1.2, color: '#4e5a3a', skin: '#9aa06a', armor: 0 },
+  /** 叫び屋：獲物を見つけると叫び、周りのゾンビを呼び寄せる（商業地区・荒野） */
+  screamer: { radius: 12, hp: 45, daySpeed: 52, nightSpeed: 112, damage: 5, wallDamage: 6, attackInterval: 0.8, color: '#5a5450', skin: '#b8b0a0', armor: 0 },
 };
 
 export const ZOMBIE_SENSE = {
@@ -137,10 +141,12 @@ export const OBJ_HP: Record<ObjKind, number> = {
   stash: 1,
   bag: 1,
   drop: 1,
+  barrel: 30,
 };
 
 /** 衝突する（通れない）オブジェクト */
 export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
+  'barrel',
   'tree',
   'car',
   'crate',
@@ -165,7 +171,7 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */
-export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench', 'chest', 'door', 'shelf', 'locker', 'fridge', 'sandbag', 'stash']);
+export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench', 'chest', 'door', 'shelf', 'locker', 'fridge', 'sandbag', 'stash', 'barrel']);
 
 /** ゾンビが破壊して進む建築物 */
 export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall', 'turret', 'door']);
@@ -236,6 +242,11 @@ export const T_WINDOW = 5; // ガラス窓（通れないが、見通せて撃�
 export const T_WOOD = 6; // フローリング
 export const T_TILE = 7; // タイル床
 export const T_FENCE = 8; // 金網フェンス（通れないが見通せる）
+export const T_WATER = 9; // 川・池（泳いで渡れない。見通せて、弾は水面を越えて飛ぶ）
+export const T_SHALLOW = 10; // 浅瀬（歩いて渡れるが足が遅くなる）
+export const T_BRIDGE = 11; // 橋（道路と同じく通れる）
+/** 浅瀬での移動速度の倍率 */
+export const SHALLOW_SPEED = 0.55;
 
 /** 屋内の床 */
 export const INDOOR_FLOORS: ReadonlySet<number> = new Set([T_FLOOR, T_WOOD, T_TILE]);

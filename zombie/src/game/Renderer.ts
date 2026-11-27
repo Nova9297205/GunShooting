@@ -17,7 +17,9 @@ import {
   MAP_W,
   PLAYER,
   PLAYER_COLORS,
+  T_BRIDGE,
   T_ROAD,
+  T_SHALLOW,
   T_WALL,
   T_WINDOW,
   TILE,
@@ -139,7 +141,7 @@ export class Renderer {
   private bloom = 0;
   private forest: CanvasPattern | null = null;
   private curLoc: string | null = null;
-  private locToast: { text: string; sub: string; color: string; life: number } | null = null;
+  private locToast: { text: string; sub: string; sub2?: string; color: string; life: number } | null = null;
 
   // ---- 軽量化 ----
   /** HUD のパネル類（時計・チーム・ステータス・ホットバー・ミニマップ）は別キャンバスに描き、約15Hzで更新 */
@@ -1603,7 +1605,7 @@ export class Renderer {
         this.curDist = dkey;
         if (dist && !loc) {
           const info = DISTRICT_INFO[dist.kind];
-          this.locToast = { text: `${dist.name}  ${'★'.repeat(dist.tier)}`, sub: `地区：${info.loot}`, color: info.color, life: 3.5 };
+          this.locToast = { text: `${dist.name}  ${'★'.repeat(dist.tier)}`, sub: `物資：${info.loot}　脅威：${info.threat}`, sub2: `推奨：${info.advice}`, color: info.color, life: 4.5 };
         }
       }
     }
@@ -1617,16 +1619,17 @@ export class Renderer {
       return;
     }
     const { ctx, w } = this;
-    ctx.globalAlpha = Math.min(1, t.life, (3.5 - t.life) * 4);
+    ctx.globalAlpha = Math.min(1, t.life, (4.5 - t.life) * 4);
     // 場所に入ったときの表示：上部中央の細い帯
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = `bold 12px ${UI}`;
-    const bw = Math.max(300, ctx.measureText(t.sub).width + 60);
+    const bw = Math.max(300, ctx.measureText(t.sub).width + 60, t.sub2 ? ctx.measureText(t.sub2).width + 60 : 0);
     const y = 96;
+    const bh = t.sub2 ? 64 : 50;
     ctx.fillStyle = 'rgba(12,13,10,0.78)';
-    ctx.fillRect(w / 2 - bw / 2, y - 22, bw, 50);
-    brackets(ctx, w / 2 - bw / 2, y - 22, bw, 50, t.color, 8, 1.5);
+    ctx.fillRect(w / 2 - bw / 2, y - 22, bw, bh);
+    brackets(ctx, w / 2 - bw / 2, y - 22, bw, bh, t.color, 8, 1.5);
     ctx.font = `9px ${MONO}`;
     ctx.fillStyle = 'rgba(189,183,158,0.7)';
     ctx.fillText('ENTERING AREA', w / 2, y - 12);
@@ -1636,6 +1639,10 @@ export class Renderer {
     ctx.font = `bold 11px ${UI}`;
     ctx.fillStyle = '#d8d2b8';
     ctx.fillText(t.sub, w / 2, y + 19);
+    if (t.sub2) {
+      ctx.fillStyle = '#e0b862';
+      ctx.fillText(t.sub2, w / 2, y + 33);
+    }
     ctx.globalAlpha = 1;
   }
 
@@ -1846,8 +1853,27 @@ export class Renderer {
         tag = 'SAFE';
       } else {
         const dist = districtAt(this.world.districts, tx, ty);
-        const onRoad = this.world.terrainAt(tx, ty) === T_ROAD;
-        sub = loc ? loc.name : edge ? '外縁の汚染帯' : dist ? `${dist.name} ${'★'.repeat(tier)}` : `${onRoad ? '幹線道路' : '野外'} ${'★'.repeat(tier)}`;
+        const tt = this.world.terrainAt(tx, ty);
+        const F = this.world.features;
+        const onRoad = tt === T_ROAD;
+        const bridge = tt === T_BRIDGE ? F.bridges.find((b) => tx >= b.x && tx < b.x + b.w && ty >= b.y && ty < b.y + b.h) : undefined;
+        const hwy = onRoad || tt === T_BRIDGE ? F.highways.find((h) => (h.horiz ? ty >= h.at && ty < h.at + h.w : tx >= h.at && tx < h.at + h.w)) : undefined;
+        const stars = '★'.repeat(tier);
+        sub = loc
+          ? loc.name
+          : edge
+            ? '外縁の汚染帯'
+            : bridge
+              ? `${bridge.name}（${F.river?.name ?? '川'}）${stars}`
+              : tt === T_SHALLOW
+                ? '浅瀬 — 足が遅くなる'
+                : hwy
+                  ? `${hwy.name} ${stars}`
+                  : onRoad && this.world.vec[ty * MAP_W + tx]
+                    ? `旧道 ${stars}`
+                    : dist
+                      ? `${dist.name} ${stars}`
+                      : `${onRoad ? '幹線道路' : '野外'} ${stars}`;
         col = edge || loc?.hot ? '#c8d070' : tier >= 4 ? '#e05a40' : tier >= 3 ? '#e07a5e' : tier === 2 ? '#e0b862' : '#bdb79e';
         // 拠点はどっち？（拠点から見た自分の方角の逆）
         const back = directionName(BASE_TX * 2 - tx, BASE_TY * 2 - ty);
@@ -2102,7 +2128,7 @@ export class Renderer {
           break;
         }
         case Tool.Meds: {
-          const n = countItem(me.bag, 'bandage') + countItem(me.bag, 'medkit') + countItem(me.bag, 'stim');
+          const n = countItem(me.bag, 'bandage') + countItem(me.bag, 'medkit') + countItem(me.bag, 'stim') + countItem(me.bag, 'herbs') + countItem(me.bag, 'antitox');
           drawSlotIcon(ctx, 'medkit', cx, cy, n <= 0);
           label = `×${n}`;
           warn = n <= 0;
@@ -2423,6 +2449,23 @@ export class Renderer {
     ctx.clip();
     for (const lm of this.world.landmarks) if (Math.hypot(lm.x * TILE - me.x, lm.y * TILE - me.y) < 110 * TILE) marker(lm.x * TILE, lm.y * TILE, '#a8a490', '', 'lm', lm.kind);
     marker((BASE_TX + 0.5) * TILE, (BASE_TY + 0.5) * TILE, '#93b77c', '⌂', 'base');
+    // 川の近くにいるときは、いちばん近い（渡れる）橋の方角
+    const rv = this.world.features.river;
+    if (rv && rv.pts.some(([x, y]) => Math.hypot(x * TILE - me.x, y * TILE - me.y) < 45 * TILE)) {
+      let best: { x: number; y: number } | null = null;
+      let bd = 90 * TILE;
+      for (const b of this.world.features.bridges) {
+        if (b.broken) continue;
+        const bx = (b.x + b.w / 2) * TILE;
+        const by = (b.y + b.h / 2) * TILE;
+        const d = Math.hypot(bx - me.x, by - me.y);
+        if (d < bd) {
+          bd = d;
+          best = { x: bx, y: by };
+        }
+      }
+      if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
+    }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
     if (this.fx) for (const p of this.fx.pings) marker(p.x, p.y, p.t === 'enemy' ? '#d0583e' : p.t === 'loot' ? '#e0a33a' : (PLAYER_COLORS[p.id] ?? '#fff'), '', 'dot');
     for (const p of view.players) if (p.id !== localId && p.status !== 'dead') marker(p.x, p.y, p.status === 'down' ? '#ff6a50' : (PLAYER_COLORS[p.id] ?? '#fff'), p.status === 'down' ? 'SOS ' : '', 'dot');
@@ -2522,6 +2565,7 @@ export class Renderer {
     }
     ctx.globalAlpha = 1;
     ctx.lineWidth = 1;
+    this.drawMapRoutes(ctx, X, Y, s);
     // 施設（探索済みは名前つき）
     for (const loc of this.world.locations) {
       if (loc.kind === 'base') continue;
@@ -2576,7 +2620,7 @@ export class Renderer {
     ctx.font = `10px ${UI}`;
     ctx.textAlign = 'left';
     ctx.fillStyle = '#bdb79e';
-    ctx.fillText('⌂ 拠点　▲ 通信塔　● 煙・炎　■ 補給物資　◯ ピン　点線の輪＝危険度の境目', mx, my + mh + 14);
+    ctx.fillText('⌂ 拠点　▲ 通信塔　● 煙・炎　■ 補給物資　◯ ピン　▭ 橋（✕ 崩落）　青い標識＝国道　点線の輪＝危険度の境目', mx, my + mh + 14);
     let lx = mx;
     for (const kd of Object.keys(DISTRICT_INFO) as (keyof typeof DISTRICT_INFO)[]) {
       const info = DISTRICT_INFO[kd];
@@ -2586,6 +2630,96 @@ export class Renderer {
       ctx.fillText(info.name, lx + 14, my + mh + 30);
       lx += ctx.measureText(info.name).width + 30;
     }
+  }
+
+  /** 全体地図：川の名前・国道の標識・橋（崩落は×）・浅瀬・旧道 */
+  private drawMapRoutes(ctx: CanvasRenderingContext2D, X: (t: number) => number, Y: (t: number) => number, s: number): void {
+    const F = this.world.features;
+    ctx.save();
+    // 旧道（カーブ）は地図上で少し明るく縁取る
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (const c of F.curves) {
+      ctx.beginPath();
+      c.pts.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
+      ctx.strokeStyle = 'rgba(200,190,150,0.55)';
+      ctx.lineWidth = Math.max(2, c.w * s * 0.8);
+      ctx.stroke();
+    }
+    const label = (text: string, x: number, y: number, fg: string, bg: string, font = `bold 10px ${UI}`) => {
+      ctx.font = font;
+      const tw = ctx.measureText(text).width;
+      ctx.fillStyle = bg;
+      ctx.fillRect(x - tw / 2 - 4, y - 7, tw + 8, 14);
+      ctx.fillStyle = fg;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, x, y + 0.5);
+    };
+    // 国道の標識（青地に白）を道沿いに数か所
+    for (const h of F.highways) {
+      for (const f of [0.22, 0.5, 0.78]) {
+        const along = (h.horiz ? MAP_W : MAP_H) * f;
+        const x = h.horiz ? X(along) : X(h.at + h.w / 2);
+        const y = h.horiz ? Y(h.at + h.w / 2) : Y(along);
+        label(h.name, x, y, '#ffffff', 'rgba(40,80,140,0.9)');
+      }
+    }
+    for (const c of F.curves) {
+      const [x, y] = c.pts[Math.floor(c.pts.length / 2)];
+      label(c.name, X(x), Y(y), '#2a2418', 'rgba(210,195,150,0.85)', `bold 9px ${UI}`);
+    }
+    // 川の名前
+    if (F.river) {
+      const [x, y] = F.river.pts[Math.floor(F.river.pts.length * 0.35)];
+      ctx.font = `bold 12px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(8,9,7,0.8)';
+      ctx.strokeText(F.river.name, X(x), Y(y));
+      ctx.fillStyle = '#8fc0e0';
+      ctx.fillText(F.river.name, X(x), Y(y));
+    }
+    // 橋と浅瀬
+    for (const b of F.bridges) {
+      const x = X(b.x + b.w / 2);
+      const y = Y(b.y + b.h / 2);
+      if (b.broken) {
+        ctx.strokeStyle = '#e0583e';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x - 4, y - 4);
+        ctx.lineTo(x + 4, y + 4);
+        ctx.moveTo(x + 4, y - 4);
+        ctx.lineTo(x - 4, y + 4);
+        ctx.stroke();
+        continue;
+      }
+      ctx.fillStyle = '#d8cfb0';
+      ctx.fillRect(x - 6, y - 4, 12, 8);
+      ctx.strokeStyle = '#2a2418';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x - 6, y - 4, 12, 8);
+      if (s >= 2) {
+        ctx.font = `bold 9px ${UI}`;
+        ctx.textAlign = 'left';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(8,9,7,0.8)';
+        ctx.strokeText(b.name, x + 9, y);
+        ctx.fillStyle = '#d8cfb0';
+        ctx.fillText(b.name, x + 9, y);
+      }
+    }
+    for (const f of F.fords) {
+      ctx.font = `bold 9px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(8,9,7,0.8)';
+      ctx.strokeText('浅瀬', X(f.x), Y(f.y));
+      ctx.fillStyle = '#a8d0d8';
+      ctx.fillText('浅瀬', X(f.x), Y(f.y));
+    }
+    ctx.restore();
   }
 
   /** 遠くから見える目印（霧の上に描く）：煙の柱・炎・通信塔の赤いランプ・給水塔 */

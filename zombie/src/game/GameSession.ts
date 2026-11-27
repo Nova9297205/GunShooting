@@ -120,6 +120,8 @@ export class GameSession {
       this.world.buildings = gen.buildings;
       this.world.landmarks = gen.landmarks;
       this.world.districts = gen.districts;
+      this.world.features = gen.features;
+      this.world.vec = gen.vec;
       for (const ob of gen.objs) this.world.setObj({ ...ob });
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
     }

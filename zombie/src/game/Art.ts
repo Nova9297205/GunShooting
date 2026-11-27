@@ -669,6 +669,42 @@ export class VectorArt implements ArtSet {
         }
         return true;
       }
+      case 'barrel': {
+        // 燃料のドラム缶（赤錆・危険マーク）
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.ellipse(cx + 5, cy + 7, 15, 13, 0, 0, Math.PI * 2);
+        ctx.fill();
+        const g = ctx.createRadialGradient(cx - 5, cy - 5, 2, cx, cy, 16);
+        g.addColorStop(0, '#b0543a');
+        g.addColorStop(1, '#6a2a1c');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#3a1810';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(30,14,10,0.6)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        // 注ぎ口
+        ctx.fillStyle = '#2a1a14';
+        ctx.beginPath();
+        ctx.arc(cx + 6, cy - 6, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        // 危険マーク（黄色い三角）
+        ctx.fillStyle = '#d8b040';
+        ctx.beginPath();
+        ctx.moveTo(cx - 4, cy + 5);
+        ctx.lineTo(cx + 4, cy + 5);
+        ctx.lineTo(cx, cy - 2);
+        ctx.closePath();
+        ctx.fill();
+        return true;
+      }
       case 'sandbag': {
         ctx.fillStyle = 'rgba(0,0,0,0.3)';
         ctx.fillRect(x + 4, y + 12, 38, 26);

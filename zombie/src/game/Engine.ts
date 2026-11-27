@@ -47,7 +47,9 @@ import {
   SAFEHOUSE,
   START_MINUTE,
   T_FENCE,
+  T_SHALLOW,
   T_WALL,
+  T_WATER,
   T_WINDOW,
   TILE,
   USABLE_SLOTS,
@@ -73,7 +75,7 @@ import {
 } from './items';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
 import { type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
-import { BUILD_ID_START, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
+import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
 
 interface SimPlayer extends PlayerSnap {
   queue: InputFrame[];
@@ -195,6 +197,34 @@ const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
   mcrate: [['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
   box: [['can', 3, 1, 2], ['bandage', 2, 1, 1], ['ammo9', 2, 6, 10], ['cloth', 1, 1, 2]],
   drop: [['ammo762ap', 3, 10, 20], ['weapon', 2.5, 1, 1], ['attach', 3, 1, 1], ['stim', 2, 1, 2], ['medkit', 2, 1, 2], ['tools', 2, 1, 2], ['mre', 1.5, 1, 2], ['electronics', 1.5, 1, 3], ['valuables', 1.5, 1, 3]],
+};
+
+// ---------------- 地区ごとの特色（物資の出やすさ・専用品・ゾンビの構成・群れ） ----------------
+type LootMul = Partial<Record<ItemId | 'weapon' | 'attach', number>>;
+const DISTRICT_LOOT: Record<DistrictKind, { mul: LootMul; extra: LootRow[] }> = {
+  residential: { mul: { can: 1.6, cloth: 1.6, bandage: 1.4, valuables: 1.3 }, extra: [] },
+  commercial: { mul: { can: 1.7, mre: 1.4, electronics: 1.7, valuables: 1.8, chem: 1.3 }, extra: [] },
+  industrial: { mul: { scrap: 2.2, parts: 2, tools: 3, gunpowder: 1.7, electronics: 1.4, can: 0.6 }, extra: [] },
+  civic: { mul: { bandage: 1.5, medkit: 2.2, stim: 2, chem: 1.8, ammo9: 1.4, ammo9ap: 1.6 }, extra: [['antitox', 1.6, 1, 1]] },
+  military: { mul: { ammo762: 1.6, ammo762ap: 2.2, weapon: 1.7, attach: 1.7, mre: 1.6, slug: 1.6 }, extra: [['intel', 0.9, 1, 1]] },
+  forest: { mul: { shells: 2, cloth: 1.3, can: 0.6, valuables: 0.5 }, extra: [['herbs', 3.5, 1, 3]] },
+  wild: { mul: { scrap: 1.5, gunpowder: 1.5, valuables: 1.3, parts: 1.2 }, extra: [] },
+};
+/** 地区ごとのゾンビの出やすさ（危険度ごとの基本の重みに掛ける・足す） */
+const DISTRICT_ZOMBIES: Record<DistrictKind, { mul: Partial<Record<ZombieType, number>>; add: Partial<Record<ZombieType, number>>; density: number; pack: number }> = {
+  residential: { mul: { walker: 1.7, runner: 1, brute: 0.6, soldier: 0.3 }, add: { screamer: 2 }, density: 1.35, pack: 0.45 },
+  commercial: { mul: { walker: 1, runner: 1.9, brute: 0.6, soldier: 0.4 }, add: { screamer: 9 }, density: 1.1, pack: 0.3 },
+  industrial: { mul: { walker: 1, runner: 0.6, brute: 2.2, soldier: 0.5 }, add: { bloater: 13 }, density: 1, pack: 0.15 },
+  civic: { mul: { walker: 1, runner: 1, brute: 0.8, soldier: 1.5 }, add: { bloater: 8, screamer: 3 }, density: 1.1, pack: 0.2 },
+  military: { mul: { walker: 0.5, runner: 0.6, brute: 1.2, soldier: 2.4 }, add: {}, density: 1.2, pack: 0.2 },
+  forest: { mul: { walker: 0.9, runner: 2.3, brute: 0.5, soldier: 0.3 }, add: { screamer: 2 }, density: 0.7, pack: 0.1 },
+  wild: { mul: { walker: 1.2, runner: 1.2, brute: 1, soldier: 0.7 }, add: { screamer: 7 }, density: 1.15, pack: 0.4 },
+};
+const BASE_ZOMBIE_WEIGHTS: Record<number, Partial<Record<ZombieType, number>>> = {
+  1: { walker: 82, runner: 18 },
+  2: { walker: 60, runner: 22, brute: 10, soldier: 8 },
+  3: { walker: 12, runner: 20, brute: 18, soldier: 50 },
+  4: { walker: 8, runner: 22, brute: 25, soldier: 45 },
 };
 
 // ---------------- 小さな二分ヒープ（Dijkstra 用） ----------------
@@ -320,6 +350,8 @@ export class HostSimulation {
     this.world.buildings = gen.buildings;
     this.world.landmarks = gen.landmarks;
     this.world.districts = gen.districts;
+    this.world.features = gen.features;
+    this.world.vec = gen.vec;
     this.cycleT = ((START_MINUTE - 360) * DAY_SECONDS) / 840;
 
     const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
@@ -912,9 +944,11 @@ export class HostSimulation {
 
   private heal(p: SimPlayer, id: ItemId): void {
     removeItem(p.bag, id, 1);
-    const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : 25) * skillMods(p.xp).healMul);
+    const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : id === 'antitox' ? 10 : id === 'herbs' ? 12 : 25) * skillMods(p.xp).healMul);
     p.hp = Math.min(p.maxHp, p.hp + v);
     if (id === 'medkit') p.tox = Math.max(0, p.tox - 25);
+    if (id === 'antitox') p.tox = Math.max(0, p.tox - 60);
+    if (id === 'herbs') p.tox = Math.max(0, p.tox - 10);
     if (id === 'stim') {
       p.tox = Math.max(0, p.tox - 15);
       p.stimT = 30;
@@ -923,7 +957,7 @@ export class HostSimulation {
       p.staminaDelay = 0;
     }
     this.gainXp(p, 3, id === 'medkit' ? 5 : 2);
-    this.pop(p, id === 'stim' ? `興奮剤！ HP +${v}・スタミナ全快` : `HP +${v}`, '#8fbf8a', 'heal');
+    this.pop(p, id === 'stim' ? `興奮剤！ HP +${v}・スタミナ全快` : id === 'antitox' ? '解毒剤：汚染度 -60' : `HP +${v}`, '#8fbf8a', 'heal');
   }
 
   private useFood(p: SimPlayer, explicit: boolean): boolean {
@@ -941,6 +975,11 @@ export class HostSimulation {
   }
 
   private useMeds(p: SimPlayer, explicit: boolean): boolean {
+    // 汚染が重いときは解毒剤を優先
+    if (p.tox >= 45 && countItem(p.bag, 'antitox') > 0) {
+      this.heal(p, 'antitox');
+      return true;
+    }
     if (p.hp >= p.maxHp) {
       if (explicit) this.pop(p, 'HPは満タン', '#cccccc');
       return false;
@@ -949,7 +988,8 @@ export class HostSimulation {
     const big = p.maxHp - p.hp > 45;
     const hasK = countItem(p.bag, 'medkit') > 0;
     const hasB = countItem(p.bag, 'bandage') > 0;
-    const id: ItemId | null = big && hasK ? 'medkit' : hasB ? 'bandage' : hasK ? 'medkit' : null;
+    const hasH = countItem(p.bag, 'herbs') > 0;
+    const id: ItemId | null = big && hasK ? 'medkit' : hasB ? 'bandage' : hasH ? 'herbs' : hasK ? 'medkit' : null;
     if (!id) {
       if (explicit) this.pop(p, '回復アイテムがない', '#c87a6a');
       return false;
@@ -1018,7 +1058,8 @@ export class HostSimulation {
           if (p.hunger >= 98) return this.pop(p, 'お腹はいっぱい', '#cccccc');
           this.eat(p, s.id);
         } else if (cat === 'med') {
-          if (p.hp >= p.maxHp) return this.pop(p, 'HPは満タン', '#cccccc');
+          const cleans = s.id === 'antitox' || s.id === 'herbs' || s.id === 'medkit' || s.id === 'stim';
+          if (p.hp >= p.maxHp && !(cleans && p.tox > 0)) return this.pop(p, 'HPは満タン', '#cccccc');
           this.heal(p, s.id);
         } else if (isWeapon(s.id)) this.equip(p, n(a));
         break;
@@ -1352,7 +1393,7 @@ export class HostSimulation {
   /** 入れ物の中身を生成（遠く危険な場所ほど多く・レアに） */
   private rollLoot(o: SimObj): (Slot | null)[] {
     const out = emptyBag(o.kind === 'mcrate' || o.kind === 'wcase' || o.kind === 'drop' ? 8 : 6);
-    const table = LOOT[o.kind];
+    let table = LOOT[o.kind];
     if (!table) return out;
     const tier = o.kind === 'box' ? 0 : o.kind === 'drop' ? 4 : this.tierAt(o.tx, o.ty);
     const R = Math.random;
@@ -1360,7 +1401,11 @@ export class HostSimulation {
     // まれに「当たり」の入れ物がある（同じ場所でも毎回中身が違う）
     if (R() < 0.06 + tier * 0.02) rolls += 2;
     const rare = (id: string) => id === 'weapon' || id === 'attach' || id === 'parts' || id === 'valuables';
-    const weights = table.map(([id, w]) => (rare(id) ? w * (0.6 + tier * 0.5) : w));
+    // 地区の特色：出やすい物資と、その地区だけの専用品
+    const dist = o.kind === 'box' || o.kind === 'drop' ? null : districtAt(this.world.districts, o.tx, o.ty);
+    const dl = dist ? DISTRICT_LOOT[dist.kind] : null;
+    if (dl && dl.extra.length && o.kind !== 'car') table = [...table, ...dl.extra];
+    const weights = table.map(([id, w]) => (rare(id) ? w * (0.6 + tier * 0.5) : w) * ((dl?.mul as Record<string, number> | undefined)?.[id] ?? 1));
     const total = weights.reduce((a, b) => a + b, 0);
     for (let r = 0; r < rolls; r++) {
       if (R() < 0.18 - tier * 0.04) continue; // 空振り
@@ -1375,7 +1420,7 @@ export class HostSimulation {
       }
       const [id, , min, max] = row;
       if (id === 'weapon') {
-        const pool: WeaponId[] =
+        const pool: WeaponId[] = dist?.kind === 'forest' ? ['hunting', 'shotgun', 'hunting', 'pistol'] :
           tier >= 4 ? ['dmr', 'rifle', 'dmr', 'hunting'] : tier >= 3 ? ['rifle', 'shotgun', 'hunting', 'smg', 'dmr'] : tier === 2 ? ['smg', 'shotgun', 'pistol', 'hunting'] : ['pistol', 'smg', 'shotgun'];
         const wid = pool[Math.floor(R() * pool.length)];
         addItem(out, wid, 1, { mag: Math.floor(WEAPON_STATS[wid].magSize * R()) });
@@ -1537,8 +1582,19 @@ export class HostSimulation {
     }
   }
 
+  private lastScream = new Map<number, number>();
+
   private startChase(z: SimZombie): void {
     if (z.state !== 'chase') this.events.push({ k: 'alert', x: z.x, y: z.y });
+    // 叫び屋：獲物を見つけると叫び、遠くのゾンビまで呼び寄せる（10秒に1回）
+    if (z.type === 'screamer' && z.state !== 'chase' && this.time - (this.lastScream.get(z.id) ?? -99) > 10) {
+      this.lastScream.set(z.id, this.time);
+      this.events.push({ k: 'scream', x: z.x, y: z.y });
+      z.state = 'chase';
+      this.makeNoise(z.x, z.y, 760, true);
+      for (const p of this.players)
+        if (p.status === 'alive' && Math.hypot(p.x - z.x, p.y - z.y) < 900) this.events.push({ k: 'feed', t: '叫び屋が叫んだ — 周りのゾンビが集まってくる', c: '#e0905e', id: p.id, cat: 'danger' });
+    }
     z.state = 'chase';
     z.stateT = 6;
   }
@@ -1553,14 +1609,15 @@ export class HostSimulation {
       const y = (i - x) / MAP_W;
       if (!this.chunkActive[Math.floor(y / CHUNK) * CHUNKS_X + Math.floor(x / CHUNK)]) return -1;
     }
-    if (t === T_WALL || t === T_WINDOW || t === T_FENCE) return -1;
+    if (t === T_WALL || t === T_WINDOW || t === T_FENCE || t === T_WATER) return -1;
     const x = i % MAP_W;
     const y = (i - x) / MAP_W;
     // 拠点（安全地帯）にはゾンビは入らない
     const sh = SAFEHOUSE;
     if (x >= sh.x && y >= sh.y && x < sh.x + sh.w && y < sh.y + sh.h) return -1;
     const o = this.world.objAt(x, y);
-    if (!o) return 1;
+    // 浅瀬は遅いので遠回りでも橋を選びがち
+    if (!o) return t === T_SHALLOW ? 2.5 : 1;
     if (BREAKABLE_KINDS.has(o.kind) && objIsSolid(o)) return 3 + o.hp / 35;
     return objIsSolid(o) ? -1 : 1;
   }
@@ -1687,7 +1744,9 @@ export class HostSimulation {
     const mid = Math.hypot(x0 + CHUNK / 2 - BASE_TX, y0 + CHUNK / 2 - BASE_TY);
     const tier = tierAtDistance(mid);
     const edge = edgeDistance(x0 + CHUNK / 2, y0 + CHUNK / 2) < EDGE_BAND ? 2 : 0;
-    const wanderers = mid < 16 ? 0 : tier + edge + (this.phase === 'night' ? 1 : 0);
+    const cd = districtAt(this.world.districts, x0 + CHUNK / 2, y0 + CHUNK / 2);
+    const dens = cd ? DISTRICT_ZOMBIES[cd.kind].density : 1;
+    const wanderers = mid < 16 ? 0 : Math.round((tier + edge + (this.phase === 'night' ? 1 : 0)) * dens);
     for (let k = 0; k < wanderers && this.zombies.length < MAX_ZOMBIES && room > 0; k++, room--) this.spawnOutdoorIn(i, minDist);
   }
 
@@ -1707,6 +1766,22 @@ export class HostSimulation {
 
 
 
+  /** 危険度と地区からゾンビの種類を選ぶ（例：軍用地は感染兵士、工業地区は巨漢と膨張体） */
+  private typeAt(tier: number, tx: number, ty: number): ZombieType {
+    const d = districtAt(this.world.districts, tx, ty);
+    if (!d) return this.typeForTier(tier);
+    const tr = DISTRICT_ZOMBIES[d.kind];
+    const base = BASE_ZOMBIE_WEIGHTS[Math.max(1, Math.min(4, tier))];
+    const w: [ZombieType, number][] = [];
+    for (const t of ['walker', 'runner', 'brute', 'soldier', 'bloater', 'screamer'] as ZombieType[]) {
+      const v = (base[t] ?? 0) * (tr.mul[t] ?? 1) + (tr.add[t] ?? 0) * (tier >= 2 ? 1 : 0.4);
+      if (v > 0) w.push([t, v]);
+    }
+    let r = Math.random() * w.reduce((a, [, v]) => a + v, 0);
+    for (const [t, v] of w) if ((r -= v) <= 0) return t;
+    return 'walker';
+  }
+
   private typeForTier(tier: number): ZombieType {
     const r = Math.random();
     if (tier >= 4) return r < 0.45 ? 'soldier' : r < 0.7 ? 'brute' : r < 0.92 ? 'runner' : 'walker';
@@ -1723,7 +1798,7 @@ export class HostSimulation {
       const x = (tx + 0.5) * TILE;
       const y = (ty + 0.5) * TILE;
       if (inBase(x, y) || this.players.some((p) => Math.hypot(p.x - x, p.y - y) < minDist)) continue;
-      this.spawnZombie(this.typeForTier(loc.tier), x, y);
+      this.spawnZombie(this.typeAt(loc.tier, tx, ty), x, y);
       return;
     }
   }
@@ -1751,7 +1826,20 @@ export class HostSimulation {
       const y = (ty + 0.5) * TILE;
       if (this.players.some((p) => Math.hypot(p.x - x, p.y - y) < minDist)) continue;
       const deep = edgeDistance(tx, ty) < EDGE_BAND ? 1 : 0;
-      this.spawnZombie(this.typeForTier(Math.min(4, tierAtDistance(d) + deep)), x, y);
+      const type = this.typeAt(Math.min(4, tierAtDistance(d) + deep), tx, ty);
+      this.spawnZombie(type, x, y);
+      // 群れ：住宅街・荒野では数体まとまってうろつく
+      const dist = districtAt(this.world.districts, tx, ty);
+      if (dist && Math.random() < DISTRICT_ZOMBIES[dist.kind].pack) {
+        const n = 1 + Math.floor(Math.random() * 3);
+        for (let k = 0; k < n && this.zombies.length < MAX_ZOMBIES; k++) {
+          const px = x + (Math.random() - 0.5) * 120;
+          const py = y + (Math.random() - 0.5) * 120;
+          if (this.world.solid(Math.floor(px / TILE), Math.floor(py / TILE))) continue;
+          const zz = this.spawnZombie(type === 'screamer' || type === 'bloater' ? 'walker' : type, px, py);
+          zz.wanderA = this.zombies[this.zombies.length - 1 - (k + 1)]?.wanderA ?? zz.wanderA;
+        }
+      }
       return;
     }
   }
@@ -2016,13 +2104,13 @@ export class HostSimulation {
     }
 
     const near = this.nearestAlive(z.x, z.y);
-    let speed = (night ? st.nightSpeed : st.daySpeed) * z.speedMul;
+    let speed = (night ? st.nightSpeed : st.daySpeed) * z.speedMul * this.world.speedAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE));
     let dx = 0;
     let dy = 0;
     let wantAttack: SimObj | null = null;
 
     if (z.state === 'chase' && near) {
-      if (near.d < 260 && this.world.lineClear(z.x, z.y, near.p.x, near.p.y)) {
+      if (near.d < 260 && this.world.lineClear(z.x, z.y, near.p.x, near.p.y) && this.world.lineWalkable(z.x, z.y, near.p.x, near.p.y)) {
         dx = (near.p.x - z.x) / (near.d || 1);
         dy = (near.p.y - z.y) / (near.d || 1);
         z.stateT = Math.max(z.stateT, 3);
@@ -2207,7 +2295,7 @@ export class HostSimulation {
     z.hp -= dmg;
     z.flash = 0.08;
     const l = Math.hypot(dirX, dirY) || 1;
-    const resist = z.type === 'brute' ? 0.25 : z.type === 'soldier' ? 0.6 : 1;
+    const resist = z.type === 'brute' ? 0.25 : z.type === 'soldier' ? 0.6 : z.type === 'bloater' ? 0.5 : 1;
     z.kx += (dirX / l) * knock * resist;
     z.ky += (dirY / l) * knock * resist;
     const shooter = this.players.find((p) => p.id === owner);
@@ -2225,10 +2313,23 @@ export class HostSimulation {
     const killer = this.players.find((p) => p.id === owner);
     if (killer) {
       killer.kills++;
-      const xp = z.type === 'brute' ? 12 : z.type === 'soldier' ? 9 : z.type === 'runner' ? 4 : 3;
+      const xp = z.type === 'brute' ? 12 : z.type === 'soldier' ? 9 : z.type === 'bloater' ? 7 : z.type === 'runner' || z.type === 'screamer' ? 4 : 3;
       this.gainXp(killer, killer.tool === Tool.Melee ? 1 : 2, xp);
     }
     this.events.push({ k: 'kill', x: z.x, y: z.y, r: ZOMBIE[z.type].radius, o: owner, t: z.type, id: z.id, a: z.angle, dx: r2(dx), dy: r2(dy) });
+    // 膨張体：破裂して毒ガス。近くにいると汚染度が一気に上がる（離れて倒すのが鉄則）
+    if (z.type === 'bloater') {
+      this.events.push({ k: 'gas', x: z.x, y: z.y });
+      for (const p of this.players) {
+        if (p.status !== 'alive') continue;
+        const d = Math.hypot(p.x - z.x, p.y - z.y);
+        if (d > 150) continue;
+        p.tox = Math.min(100, p.tox + 32 * (1 - d / 220));
+        this.damagePlayer(p, 10 * (1 - d / 200));
+        this.pop(p, '毒ガス！ 汚染度上昇', '#b8d070');
+      }
+      for (const o of this.zombies) if (!o.dead && o !== z && Math.hypot(o.x - z.x, o.y - z.y) < 120) this.damageZombie(o, 25, -1, o.x - z.x, o.y - z.y, 120, true);
+    }
     // 感染兵士は装備を落とすことがある
     if (z.type === 'soldier' && Math.random() < 0.45) {
       const bag = this.groundBag(z.x, z.y);
@@ -2255,6 +2356,12 @@ export class HostSimulation {
         }
         if (this.world.blocksBullet(Math.floor(b.x / TILE), Math.floor(b.y / TILE))) {
           b.dead = true;
+          // ドラム缶は撃つと爆発する
+          const ob = this.world.objAt(Math.floor(b.x / TILE), Math.floor(b.y / TILE));
+          if (ob && ob.kind === 'barrel') {
+            this.destroyObj(ob);
+            break;
+          }
           this.events.push({ k: 'wall', x: b.x - b.vx * 0.005, y: b.y - b.vy * 0.005, o: b.owner });
           break;
         }
@@ -2280,11 +2387,36 @@ export class HostSimulation {
   }
 
   private destroyObj(o: SimObj): void {
+    if (!this.world.objects.has(o.id)) return;
     this.world.removeObj(o.id);
     this.changed.delete(o.id);
     this.removed.push(o.id);
     this.events.push({ k: 'break', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });
     this.flowTimer = Math.min(this.flowTimer, 0.1);
+    if (o.kind === 'barrel') this.explode((o.tx + 0.5) * TILE, (o.ty + 0.5) * TILE);
+  }
+
+  /** ドラム缶の爆発：周りのゾンビを吹き飛ばす（プレイヤーも巻き込む）。隣のドラム缶に誘爆 */
+  private explode(x: number, y: number): void {
+    const R = 130;
+    this.events.push({ k: 'boom', x, y });
+    this.makeNoise(x, y, 650, true);
+    for (const z of this.zombies) {
+      if (z.dead) continue;
+      const d = Math.hypot(z.x - x, z.y - y);
+      if (d < R) this.damageZombie(z, 130 * (1 - d / (R * 1.4)), -1, z.x - x, z.y - y, 420, true);
+    }
+    for (const p of this.players) {
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < R) this.damagePlayer(p, 38 * (1 - d / (R * 1.3)));
+    }
+    const tx = Math.floor(x / TILE);
+    const ty = Math.floor(y / TILE);
+    for (let yy = ty - 3; yy <= ty + 3; yy++)
+      for (let xx = tx - 3; xx <= tx + 3; xx++) {
+        const ob = this.world.objAt(xx, yy);
+        if (ob && ob.kind === 'barrel') this.destroyObj(ob);
+      }
   }
 }
 

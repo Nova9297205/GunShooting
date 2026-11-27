@@ -147,12 +147,14 @@ export function stepMovement(
   let vx: number;
   let vy: number;
   if (b.dashTime > 0 && status === 'alive') {
-    vx = b.dashDx * PLAYER.dashSpeed;
-    vy = b.dashDy * PLAYER.dashSpeed;
+    const wade = world.speedAt(Math.floor(b.x / TILE), Math.floor(b.y / TILE));
+    vx = b.dashDx * PLAYER.dashSpeed * wade;
+    vy = b.dashDy * PLAYER.dashSpeed * wade;
     b.dashTime = Math.max(0, b.dashTime - dt);
   } else {
     b.dashTime = 0;
-    const sp = status === 'alive' ? PLAYER.speed : PLAYER.downSpeed;
+    // 浅瀬では足が遅い（ホストとゲストの予測で同じ計算）
+    const sp = (status === 'alive' ? PLAYER.speed : PLAYER.downSpeed) * world.speedAt(Math.floor(b.x / TILE), Math.floor(b.y / TILE));
     vx = mx * sp;
     vy = my * sp;
   }

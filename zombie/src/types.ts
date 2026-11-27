@@ -13,12 +13,13 @@ export interface Vec2 {
 
 export type PlayerStatus = 'alive' | 'down' | 'dead';
 /** walker=徘徊型 / runner=俊敏型 / brute=重装型 / soldier=感染兵士 */
-export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier';
+export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier' | 'bloater' | 'screamer';
 export type TimePhase = 'day' | 'night';
 export type GameMode = 'solo' | 'host' | 'guest';
 
 /** マップ上のオブジェクト種別（設備・家具・入れ物・ドアなど） */
 export type ObjKind =
+  | 'barrel'
   | 'tree'
   | 'car'
   | 'crate'
@@ -212,7 +213,13 @@ export type GameEvent =
   /** 画面左のイベントログ（仲間のダウン・スキル上昇・補給物資など） */
   | { k: 'feed'; t: string; c: string; id?: number; snd?: SoundKey; cat?: FeedCat }
   /** 弾が装甲に弾かれた */
-  | { k: 'ricochet'; x: number; y: number };
+  | { k: 'ricochet'; x: number; y: number }
+  /** 膨張体が破裂して毒ガスを撒いた */
+  | { k: 'gas'; x: number; y: number }
+  /** 叫び屋が叫んだ（周りのゾンビが集まる） */
+  | { k: 'scream'; x: number; y: number }
+  /** ドラム缶の爆発 */
+  | { k: 'boom'; x: number; y: number };
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {

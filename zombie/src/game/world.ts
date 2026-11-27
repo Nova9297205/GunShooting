@@ -15,14 +15,18 @@ import {
   MAP_W,
   OBJ_HP,
   SAFEHOUSE,
+  SHALLOW_SPEED,
   SOLID_KINDS,
+  T_BRIDGE,
   T_DIRT,
   T_FENCE,
   T_FLOOR,
   T_GRASS,
   T_ROAD,
+  T_SHALLOW,
   T_TILE,
   T_WALL,
+  T_WATER,
   T_WINDOW,
   T_WOOD,
   TILE,
@@ -78,14 +82,14 @@ export function tierAtDistance(d: number): number {
 
 // ---------------- 地区（街区のまとまり） ----------------
 export type DistrictKind = 'residential' | 'commercial' | 'industrial' | 'civic' | 'military' | 'forest' | 'wild';
-export const DISTRICT_INFO: Record<DistrictKind, { name: string; color: string; loot: string }> = {
-  residential: { name: '住宅街', color: '#9fbf7a', loot: '食料・布・日用品' },
-  commercial: { name: '商業地区', color: '#d8b862', loot: '食料・薬・弾薬が少し' },
-  industrial: { name: '工業地区', color: '#a8a090', loot: '素材・工具・部品' },
-  civic: { name: '市街中心部', color: '#7fa6d0', loot: '病院の薬・警察の武器と弾' },
-  military: { name: '軍用地', color: '#d8644a', loot: '軍用の武器・弾薬（重装の感染兵）' },
-  forest: { name: '森林', color: '#5f8a48', loot: '見通しが悪い・山小屋が点在' },
-  wild: { name: '荒野', color: '#a08a5a', loot: '廃墟と放置車両' },
+export const DISTRICT_INFO: Record<DistrictKind, { name: string; color: string; loot: string; threat: string; advice: string }> = {
+  residential: { name: '住宅街', color: '#9fbf7a', loot: '食料・布・包帯', threat: 'ウォーカーの群れ', advice: '弾は節約し斧で各個撃破・サプレッサー推奨' },
+  commercial: { name: '商業地区', color: '#d8b862', loot: '食料・電子部品・貴重品', threat: '足の速いランナー・叫び屋', advice: '叫び屋は叫ぶ前に仕留める・SMG／ショットガン' },
+  industrial: { name: '工業地区', color: '#a8a090', loot: '鉄くず・武器パーツ・工具', threat: '巨漢・膨張体（毒ガス）', advice: '膨張体は離れて撃つ・ドラム缶の誘爆を利用' },
+  civic: { name: '市街中心部', color: '#7fa6d0', loot: '救急キット・興奮剤・解毒剤（専用）', threat: '感染した警官・膨張体', advice: '徹甲弾があると楽・病院で解毒剤を探す' },
+  military: { name: '軍用地', color: '#d8644a', loot: '7.62mm・徹甲弾・武器・機密書類（専用）', threat: '装甲の感染兵士', advice: '通常弾は弾かれる：徹甲弾／スラッグ必須・有刺鉄線に注意' },
+  forest: { name: '森林', color: '#5f8a48', loot: '薬草（専用）・散弾・狩猟ライフル', threat: '木陰から飛び出すランナー', advice: '見通しが悪い：ショットガンで近距離に備える' },
+  wild: { name: '荒野', color: '#a08a5a', loot: '鉄くず・火薬・放置車両の中身', threat: 'うろつく群れ・叫び屋', advice: '開けているので遠くから狙える・群れは迂回' },
 };
 /** 幹線道路で区切られた1区画と、その区画が属する地区 */
 export interface DistrictBlock {
@@ -120,6 +124,22 @@ export function edgeDistance(tx: number, ty: number): number {
 /** 外縁の汚染帯の幅（タイル） */
 export const EDGE_BAND = 16;
 
+/** 道路網・川の形（描画と地図用。通行の判定は地形タイルで行う） */
+export interface RoadFeatures {
+  /** 幅の広い国道（at = 最初の行／列、w = 幅のタイル数） */
+  highways: { horiz: boolean; at: number; w: number; name: string }[];
+  /** 滑らかなカーブを描く旧道（タイル座標の折れ線・幅） */
+  curves: { pts: [number, number][]; w: number; name: string }[];
+  /** 橋（broken = 崩落していて渡れない） */
+  bridges: { x: number; y: number; w: number; h: number; horiz: boolean; name: string; broken?: boolean; hwy?: boolean }[];
+  /** 川の中心線（タイル座標） */
+  river: { pts: [number, number][]; name: string } | null;
+  /** 浅瀬（歩いて渡れる場所） */
+  fords: { x: number; y: number }[];
+}
+
+export const emptyFeatures = (): RoadFeatures => ({ highways: [], curves: [], bridges: [], river: null, fords: [] });
+
 /** 屋根を持つ建物（中に入るまで屋根で覆う） */
 export interface Building {
   x: number;
@@ -136,6 +156,9 @@ export class TileWorld<T extends ObjSnap = ObjSnap> {
   buildings: Building[] = [];
   landmarks: Landmark[] = [];
   districts: DistrictBlock[] = [];
+  features: RoadFeatures = emptyFeatures();
+  /** カーブ道路のタイル（地形は道路だが、描画はベクターの道路で行う） */
+  vec: Uint8Array = new Uint8Array(MAP_W * MAP_H);
   objects = new Map<number, T>();
   private grid: Int32Array; // タイル → オブジェクトID（0 = なし）
 
@@ -177,9 +200,30 @@ export class TileWorld<T extends ObjSnap = ObjSnap> {
   solid(tx: number, ty: number): boolean {
     if (!this.inBounds(tx, ty)) return true;
     const t = this.terrain[ty * MAP_W + tx];
-    if (t === T_WALL || t === T_WINDOW || t === T_FENCE) return true;
+    if (t === T_WALL || t === T_WINDOW || t === T_FENCE || t === T_WATER) return true;
     const o = this.objAt(tx, ty);
     return !!o && objIsSolid(o);
+  }
+
+  /** そのタイルでの移動速度の倍率（浅瀬・有刺鉄線は遅い） */
+  speedAt(tx: number, ty: number): number {
+    if (!this.inBounds(tx, ty)) return 1;
+    if (this.terrain[ty * MAP_W + tx] === T_SHALLOW) return SHALLOW_SPEED;
+    const o = this.objAt(tx, ty);
+    return o && o.kind === 'barbed' ? 0.45 : 1;
+  }
+
+  /** 2点の間に水（泳げない川・池）がないか。まっすぐ歩いて行けるかの判定に使う */
+  lineWalkable(x1: number, y1: number, x2: number, y2: number): boolean {
+    const d = Math.hypot(x2 - x1, y2 - y1);
+    const steps = Math.ceil(d / (TILE / 2));
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const tx = Math.floor((x1 + (x2 - x1) * t) / TILE);
+      const ty = Math.floor((y1 + (y2 - y1) * t) / TILE);
+      if (this.inBounds(tx, ty) && this.terrain[ty * MAP_W + tx] === T_WATER) return false;
+    }
+    return true;
   }
 
   /** 弾を止めるタイルか（窓・フェンス越しには撃てる） */
@@ -240,6 +284,8 @@ export interface GeneratedWorld {
   buildings: Building[];
   landmarks: Landmark[];
   districts: DistrictBlock[];
+  features: RoadFeatures;
+  vec: Uint8Array;
 }
 
 /** ゲスト用：シードから同じ世界（地形とオブジェクト）を再生成する */
@@ -302,13 +348,22 @@ export function generateWorld(seed: number): GeneratedWorld {
   }
 
   // ---- 道路網：拠点を通る十字の幹線＋約40タイルごとの幹線の格子（地図の端まで続く） ----
+  //   ＋幅の広い国道（4車線）・川と橋・浅瀬・カーブを描く旧道
   const roadY = sh.y + Math.floor(sh.h / 2);
   const roadX = sh.x + Math.floor(sh.w / 2) - 1;
-  const road = (x0: number, y0: number, x1: number, y1: number) => {
+  const features = emptyFeatures();
+  const vec = new Uint8Array(MAP_W * MAP_H);
+  const isWater = (x: number, y: number) => inMap(x, y) && (terrain[idx(x, y)] === T_WATER || terrain[idx(x, y)] === T_SHALLOW);
+  /** 道路を敷く。bridge = 水の上に橋を架けるか（架けないなら水の手前で途切れる） */
+  const road = (x0: number, y0: number, x1: number, y1: number, bridge = false) => {
     for (let y = y0; y <= y1; y++)
       for (let x = x0; x <= x1; x++) {
-        setT(x, y, T_ROAD);
-        if (inMap(x, y)) reserved[idx(x, y)] = 1;
+        if (!inMap(x, y)) continue;
+        if (isWater(x, y)) {
+          if (!bridge) continue;
+          setT(x, y, T_BRIDGE);
+        } else if (terrain[idx(x, y)] !== T_BRIDGE) setT(x, y, T_ROAD);
+        reserved[idx(x, y)] = 1;
       }
   };
   const hLines = [roadY];
@@ -316,30 +371,197 @@ export function generateWorld(seed: number): GeneratedWorld {
   for (const d of [-1, 1])
     for (let k = 1; k < 6; k++) {
       const y = roadY + d * (k * 40 + ri(-4, 4));
-      if (y > 4 && y < MAP_H - 6) hLines.push(y);
+      if (y > 4 && y < MAP_H - 8) hLines.push(y);
       const x = roadX + d * (k * 40 + ri(-4, 4));
-      if (x > 4 && x < MAP_W - 6) vLines.push(x);
+      if (x > 4 && x < MAP_W - 8) vLines.push(x);
     }
   hLines.sort((a, b) => a - b);
   vLines.sort((a, b) => a - b);
-  for (const y of hLines) road(0, y, MAP_W - 1, y + 1);
-  for (const x of vLines) road(x, 0, x + 1, MAP_H - 1);
-  // 区画の中を通る脇道（幹線どうしをつなぐ）
+  // 幹線の幅（国道は4車線）
+  const lineW = new Map<string, number>();
+  const wH = (y: number) => lineW.get(`h${y}`) ?? 2;
+  const wV = (x: number) => lineW.get(`v${x}`) ?? 2;
+  const pickHwy = (lines: number[], center: number) => {
+    const c = lines.filter((v) => Math.abs(Math.abs(v - center) - 80) < 12);
+    return c.length ? c[Math.floor(rnd() * c.length)] : lines[0];
+  };
+  const hwyY = pickHwy(hLines, roadY);
+  lineW.set(`h${hwyY}`, 4);
+
+  // ---- 川：地図を南北に横切る（拠点から離れた幹線どうしの間を蛇行する） ----
+  const RIVER_NAMES = ['黒瀬川', '鳴瀬川', '境川', '旧緑川', '霞川'];
+  const BRIDGE_NAMES = ['旭橋', '新川橋', '境橋', '中央大橋', '緑橋', '学園橋', '北大橋', '南大橋'];
+  let riverCol = -1;
+  {
+    const pairs: number[] = [];
+    for (let b = 0; b + 1 < vLines.length; b++) {
+      const mid = (vLines[b] + vLines[b + 1] + 2) / 2;
+      if (Math.abs(mid - BASE_TX) > 55 && Math.abs(mid - BASE_TX) < 140) pairs.push(b);
+    }
+    if (pairs.length) {
+      riverCol = pairs[Math.floor(rnd() * pairs.length)];
+      const vl = vLines[riverCol] + 2;
+      const vr = vLines[riverCol + 1];
+      const mid = (vl + vr) / 2;
+      const amp = Math.max(3, Math.min(9, (vr - vl) / 2 - 7));
+      const ph1 = rnd() * 6.28;
+      const ph2 = rnd() * 6.28;
+      const ph3 = rnd() * 6.28;
+      const pts: [number, number][] = [];
+      for (let y = -8; y <= MAP_H + 8; y++) {
+        const cx = mid + amp * (0.7 * Math.sin(y / 23 + ph1) + 0.3 * Math.sin(y / 9 + ph2));
+        const w = 4 + 1.5 * (Math.sin(y / 31 + ph3) + 1);
+        if (y % 4 === 0) pts.push([cx, y]);
+        const xa = Math.round(cx - w / 2);
+        const xb = Math.round(cx + w / 2);
+        for (let x = xa - 2; x <= xb + 2; x++) {
+          if (!inMap(x, y)) continue;
+          if (x >= xa && x <= xb) setT(x, y, T_WATER);
+          else if (x === xa - 1 || x === xb + 1) setT(x, y, T_DIRT); // ぬかるんだ岸
+          reserved[idx(x, y)] = 1;
+        }
+      }
+      features.river = { pts, name: RIVER_NAMES[Math.floor(rnd() * RIVER_NAMES.length)] };
+      // 浅瀬：幹線から離れた2か所（歩いて渡れるが遅い）
+      for (let k = 0; k < 2; k++) {
+        for (let t = 0; t < 30; t++) {
+          const fy = ri(12, MAP_H - 14);
+          if (hLines.some((h) => Math.abs(h - fy) < 10) || features.fords.some((f) => Math.abs(f.y - fy) < 30)) continue;
+          for (let y = fy; y < fy + 3; y++) for (let x = vl; x < vr; x++) if (inMap(x, y) && terrain[idx(x, y)] === T_WATER) setT(x, y, T_SHALLOW);
+          features.fords.push({ x: Math.round(mid + amp * (0.7 * Math.sin((fy + 1) / 23 + ph1) + 0.3 * Math.sin((fy + 1) / 9 + ph2))), y: fy + 1 });
+          break;
+        }
+      }
+    }
+  }
+  // ---- 幹線を敷く：川を渡る橋は限られる（拠点の道・国道・一部の幹線だけ。残りは崩落） ----
+  for (const y of hLines) {
+    const w = wH(y);
+    const bridged = y === roadY || y === hwyY || rnd() < 0.35;
+    road(0, y, MAP_W - 1, y + w - 1, bridged);
+    if (riverCol < 0) continue;
+    // 川をまたぐ区間を探して、橋（または崩れた橋の残骸）として記録
+    let x0 = -1;
+    let x1 = -1;
+    for (let x = vLines[riverCol]; x <= vLines[riverCol + 1] + 1; x++) {
+      const t = terrain[idx(x, y)];
+      if (t === T_BRIDGE || isWater(x, y)) {
+        if (x0 < 0) x0 = x;
+        x1 = x;
+      }
+    }
+    if (x0 < 0) continue;
+    const name = bridged ? BRIDGE_NAMES[features.bridges.filter((b) => !b.broken).length % BRIDGE_NAMES.length] : '崩落した橋';
+    features.bridges.push({ x: x0, y, w: x1 - x0 + 1, h: w, horiz: true, name, broken: !bridged, hwy: y === hwyY });
+    if (!bridged) {
+      // 両岸の道路の端に瓦礫と放置車両（行き止まり）
+      for (const ex of [x0 - 1, x1 + 1]) {
+        if (terrain[idx(ex, y)] === T_ROAD) {
+          addObj('rubble', ex, y);
+          if (rnd() < 0.6) addObj('car', ex + (ex < x0 ? -2 : 2), y + w - 1);
+        }
+      }
+    }
+  }
+  // 縦の国道（川とは反対側）
+  const vSide = riverCol >= 0 && vLines[riverCol] > BASE_TX ? -1 : 1;
+  const hwyXc = vLines.filter((v) => Math.sign(v - roadX) === vSide && Math.abs(Math.abs(v - roadX) - 80) < 12);
+  const hwyX = hwyXc.length ? hwyXc[Math.floor(rnd() * hwyXc.length)] : vLines[vSide < 0 ? 0 : vLines.length - 1];
+  lineW.set(`v${hwyX}`, 4);
+  for (const x of vLines) road(x, 0, x + wV(x) - 1, MAP_H - 1, true);
+  features.highways.push({ horiz: true, at: hwyY, w: 4, name: '国道1号' });
+  features.highways.push({ horiz: false, at: hwyX, w: 4, name: '国道2号' });
+
+  // 区画の中を通る脇道（幹線どうしをつなぐ。川のある区画では川沿いには通さない）
   for (let a = 0; a + 1 < hLines.length; a++)
     for (let b = 0; b + 1 < vLines.length; b++) {
       if (rnd() < 0.45) continue;
-      const x0 = vLines[b] + 2;
+      const x0 = vLines[b] + wV(vLines[b]);
       const x1 = vLines[b + 1] - 1;
-      const y0 = hLines[a] + 2;
+      const y0 = hLines[a] + wH(hLines[a]);
       const y1 = hLines[a + 1] - 1;
-      if (rnd() < 0.5) {
+      if (rnd() < 0.5 || b === riverCol) {
         const y = ri(y0 + 6, y1 - 7);
-        road(x0, y, x1, y + 1);
+        if (b === riverCol) {
+          // 川のある区画の脇道は、片方の岸の手前で行き止まり（川へ突っ込まない）
+          let wa = -1;
+          let wb = -1;
+          for (let x = x0; x <= x1; x++)
+            if (isWater(x, y) || isWater(x, y + 1)) {
+              if (wa < 0) wa = x;
+              wb = x;
+            }
+          if (wa < 0) road(x0, y, x1, y + 1);
+          else if (rnd() < 0.5) road(x0, y, wa - 3, y + 1);
+          else road(wb + 3, y, x1, y + 1);
+        } else road(x0, y, x1, y + 1);
       } else {
         const x = ri(x0 + 6, x1 - 7);
         road(x, y0, x + 1, y1);
       }
     }
+
+  // ---- 旧道：交差点から交差点へ、区画を斜めに抜ける滑らかなカーブ ----
+  const ROUTE_NAMES = ['県道12号', '県道31号', '旧街道', '県道7号'];
+  for (let n = 0, tries = 0; n < 3 && tries < 40; tries++) {
+    const i = ri(0, vLines.length - 2);
+    const j = ri(0, hLines.length - 2);
+    const di = rnd() < 0.5 ? 1 : 2;
+    const i2 = Math.min(vLines.length - 1, i + di);
+    const j2 = j + 1;
+    const flip = rnd() < 0.5;
+    const ax = vLines[i] + wV(vLines[i]) / 2;
+    const ay = hLines[flip ? j2 : j] + wH(hLines[flip ? j2 : j]) / 2;
+    const bx = vLines[i2] + wV(vLines[i2]) / 2;
+    const by = hLines[flip ? j : j2] + wH(hLines[flip ? j : j2]) / 2;
+    const mx = (ax + bx) / 2;
+    const my = (ay + by) / 2;
+    const len = Math.hypot(bx - ax, by - ay);
+    const k = (rnd() < 0.5 ? -1 : 1) * (0.22 + rnd() * 0.2) * len;
+    const cx = mx + (-(by - ay) / len) * k;
+    const cy = my + ((bx - ax) / len) * k;
+    if (Math.hypot(mx - BASE_TX, my - BASE_TY) < 30) continue;
+    const pts: [number, number][] = [];
+    let ok = true;
+    for (let s2 = 0; s2 <= 1.0001; s2 += 1 / 48) {
+      const px = (1 - s2) * (1 - s2) * ax + 2 * (1 - s2) * s2 * cx + s2 * s2 * bx;
+      const py = (1 - s2) * (1 - s2) * ay + 2 * (1 - s2) * s2 * cy + s2 * s2 * by;
+      for (let yy = Math.floor(py) - 3; yy <= Math.floor(py) + 3 && ok; yy++)
+        for (let xx = Math.floor(px) - 3; xx <= Math.floor(px) + 3; xx++) if (isWater(xx, yy) || !inMap(xx, yy)) ok = false;
+      pts.push([px, py]);
+    }
+    if (!ok) continue;
+    // 曲線に沿って細かく円を押し付け、中心から1.25タイル以内を道路に（描画はベクターの道で行う）
+    const dist2 = new Map<number, number>();
+    for (let q = 0; q + 1 < pts.length; q++) {
+      const [x1, y1] = pts[q];
+      const [x2, y2] = pts[q + 1];
+      const steps = Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1) * 4));
+      for (let st = 0; st < steps; st++) {
+        const px = x1 + ((x2 - x1) * st) / steps;
+        const py = y1 + ((y2 - y1) * st) / steps;
+        for (let y = Math.floor(py - 2.4); y <= Math.floor(py + 2.4); y++)
+          for (let x = Math.floor(px - 2.4); x <= Math.floor(px + 2.4); x++) {
+            if (!inMap(x, y)) continue;
+            const d = Math.hypot(x + 0.5 - px, y + 0.5 - py);
+            const i2 = idx(x, y);
+            const prev = dist2.get(i2);
+            if (prev === undefined || d < prev) dist2.set(i2, d);
+          }
+      }
+    }
+    for (const [i2, d] of dist2) {
+      if (d <= 1.25) {
+        if (terrain[i2] !== T_ROAD) {
+          terrain[i2] = T_ROAD;
+          vec[i2] = 1;
+        }
+        reserved[i2] = 1;
+      } else if (d <= 2.3) reserved[i2] = 1;
+    }
+    features.curves.push({ pts, w: 2.4, name: ROUTE_NAMES[n % ROUTE_NAMES.length] });
+    n++;
+  }
 
   const overlaps = (x: number, y: number, w: number, h: number, m: number) => {
     for (let yy = y - m; yy < y + h + m; yy++)
@@ -564,6 +786,10 @@ export function generateWorld(seed: number): GeneratedWorld {
     makeBuilding(x + 9, y + 2, 5, 5, 'military', T_FLOOR, { minRoom: 5, doors: 1, windows: 0.1, propRate: 0.7 });
     if (big) makeBuilding(x + 15, y + 2, 5, 8, 'military', T_FLOOR, { minRoom: 3, doors: 1, windows: 0.1, propRate: 0.65 });
     for (let i = 0; i < 3; i++) addObj('sandbag', x + (big ? 20 : 14), y + 2 + i);
+    // 門の前の有刺鉄線（踏むと足が止まる）
+    for (let i = 5; i <= 10; i++) if (i !== 7 && i !== 8) addObj('barbed', x + i, y - 2);
+    for (let i = 3; i <= 7; i++) addObj('barbed', x + w + 1, y + i);
+    for (let i = h - 6; i <= h - 2; i++) addObj('barbed', x - 2, y + i);
     for (let i = 0; i < (big ? 5 : 3); i++) addObj('mcrate', x + 3 + i * 3, y + h - 2);
     landmarks.push({ x: x + w / 2, y: y + h / 2, kind: 'tower', name: big ? '軍事基地の通信塔' : '検問所の通信塔' });
     return true;
@@ -618,9 +844,9 @@ export function generateWorld(seed: number): GeneratedWorld {
   const blocks: { x0: number; y0: number; x1: number; y1: number; seed: (typeof seeds)[number]; db: DistrictBlock }[] = [];
   for (let a = 0; a + 1 < hB.length; a++)
     for (let b = 0; b + 1 < vB.length; b++) {
-      const bx0 = Math.max(0, vB[b] + 2);
+      const bx0 = Math.max(0, vB[b] + wV(vB[b]));
       const bx1 = Math.min(MAP_W - 1, vB[b + 1] - 1);
-      const by0 = Math.max(0, hB[a] + 2);
+      const by0 = Math.max(0, hB[a] + wH(hB[a]));
       const by1 = Math.min(MAP_H - 1, hB[a + 1] - 1);
       const bcx = (bx0 + bx1) / 2;
       const bcy = (by0 + by1) / 2;
@@ -691,6 +917,18 @@ export function generateWorld(seed: number): GeneratedWorld {
     setT(x + Math.floor(w / 2), y + h - 1, T_DIRT);
     setT(x + Math.floor(w / 2) + 1, y + h - 1, T_DIRT);
     for (let k = 0; k < ri(4, 7); k++) addObj(rnd() < 0.85 ? 'crate' : 'rubble', ri(x + 1, x + w - 2), ri(y + 1, y + h - 3));
+    // 燃料のドラム缶（撃つと爆発する）
+    const bx = ri(x + 1, x + w - 4);
+    const by = ri(y + 1, y + h - 3);
+    for (let k = 0; k < ri(2, 4); k++) addObj('barrel', bx + (k % 2), by + (k >> 1));
+  };
+  /** 建物の外壁沿いに置くドラム缶の山（工業地区） */
+  const barrels = (b: { x: number; y: number } | null, w: number, h: number) => {
+    if (!b) return;
+    const side = rnd() < 0.5;
+    const sx = side ? b.x - 2 : b.x + w + 1;
+    const sy = b.y + ri(1, Math.max(1, h - 3));
+    for (let k = 0; k < ri(2, 4); k++) addObj('barrel', sx + (k % 2) * (side ? -1 : 1), sy + (k >> 1));
   };
   /** 駐車場（舗装の上に放置車両） */
   const parking = (cx: number, cy: number) => {
@@ -706,7 +944,7 @@ export function generateWorld(seed: number): GeneratedWorld {
     let x = x0;
     let y = y0;
     for (let i = 0; i < 400 && (x !== x1 || y !== y1); i++) {
-      setT(x, y, T_DIRT);
+      if (!isWater(x, y) && terrain[idx(x, y)] !== T_BRIDGE) setT(x, y, T_DIRT);
       if (inMap(x, y)) reserved[idx(x, y)] = 1;
       if (x !== x1 && (y === y1 || rnd() < 0.55)) x += Math.sign(x1 - x);
       else y += Math.sign(y1 - y);
@@ -728,14 +966,41 @@ export function generateWorld(seed: number): GeneratedWorld {
     // 住宅街・商業地区には区画の中を通る生活道路（幹線につながる）
     if ((kind === 'residential' || kind === 'commercial' || kind === 'civic') && x1 - x0 > 26 && y1 - y0 > 22) {
       const sy = ri(y0 + 9, y1 - 10);
-      road(bx0, sy, bx1, sy + 1);
-      if (rnd() < 0.6) {
-        const sx = ri(x0 + 10, x1 - 11);
-        road(sx, by0, sx + 1, by1);
-      }
+      // 川をまたぐ生活道路は、片方の岸の手前で行き止まり
+      let wa = -1;
+      let wb = -1;
+      for (let x = bx0; x <= bx1; x++)
+        if (isWater(x, sy) || isWater(x, sy + 1)) {
+          if (wa < 0) wa = x;
+          wb = x;
+        }
+      if (wa < 0) road(bx0, sy, bx1, sy + 1);
+      else if (wa - 3 - bx0 >= bx1 - wb - 3 && wa - bx0 > 8) road(bx0, sy, wa - 3, sy + 1);
+      else if (bx1 - wb > 8) road(wb + 3, sy, bx1, sy + 1);
+      const sx = ri(x0 + 10, x1 - 11);
+      let wet = false;
+      for (let y = by0; y <= by1 && !wet; y++) wet = isWater(sx, y) || isWater(sx + 1, y) || isWater(sx - 3, y) || isWater(sx + 4, y);
+      if (rnd() < 0.6 && !wet) road(sx, by0, sx + 1, by1);
     }
     if (kind === 'forest' || kind === 'wild') {
       if (rnd() < 0.7) trail(bx0, ri(y0, y1), bx1, ri(y0, y1));
+      // 池（浅い縁は歩けるが、真ん中は深い）
+      if (rnd() < (kind === 'forest' ? 0.45 : 0.25)) {
+        const pw = ri(7, 12);
+        const ph = ri(5, 9);
+        const spot = findSpot(rx(), ry(), pw, ph, 8);
+        if (spot) {
+          reserve(spot.x - 1, spot.y - 1, pw + 2, ph + 2);
+          const pcx = spot.x + pw / 2;
+          const pcy = spot.y + ph / 2;
+          for (let y = spot.y; y < spot.y + ph; y++)
+            for (let x = spot.x; x < spot.x + pw; x++) {
+              const e = ((x + 0.5 - pcx) / (pw / 2)) ** 2 + ((y + 0.5 - pcy) / (ph / 2)) ** 2;
+              if (e <= 0.55) setT(x, y, T_WATER);
+              else if (e <= 1) setT(x, y, T_SHALLOW);
+            }
+        }
+      }
     }
     for (let round = 0; round < rounds; round++) {
       const r = rnd();
@@ -753,8 +1018,8 @@ export function generateWorld(seed: number): GeneratedWorld {
           if (rnd() < 0.4) parking(rx(), ry());
           break;
         case 'industrial':
-          if (r < 0.45) warehouse(tier, rx(), ry());
-          else if (r < 0.65) warehouse(tier, rx(), ry(), true);
+          if (r < 0.45) barrels(warehouse(tier, rx(), ry()), 16, 10);
+          else if (r < 0.65) barrels(warehouse(tier, rx(), ry(), true), 18, 12);
           else if (r < 0.85) yard(rx(), ry());
           else gas(tier, rx(), ry());
           if (rnd() < 0.3) parking(rx(), ry());
@@ -814,7 +1079,9 @@ export function generateWorld(seed: number): GeneratedWorld {
     for (let x = 1; x < MAP_W - 1; x++) {
       if (terrain[idx(x, y)] !== T_ROAD) continue;
       if (x >= sh.x - 2 && x <= sh.x + sh.w + 1 && y >= sh.y - 2 && y <= sh.y + sh.h + 1) continue;
-      const p = 0.012 + tierAtDistance(distOf(x, y)) * 0.006;
+      // 国道は乗り捨てられた車の列が多い
+      const onHwy = features.highways.some((h) => (h.horiz ? y >= h.at && y < h.at + h.w : x >= h.at && x < h.at + h.w));
+      const p = (0.012 + tierAtDistance(distOf(x, y)) * 0.006) * (onHwy ? 1.8 : 1);
       if (rnd() < p) addObj('car', x, y);
     }
 
@@ -886,7 +1153,7 @@ export function generateWorld(seed: number): GeneratedWorld {
   }
   void CHUNK;
 
-  return { terrain, objs, locations, buildings, landmarks, districts };
+  return { terrain, objs, locations, buildings, landmarks, districts, features, vec };
 }
 
 /** オブジェクトIDの開始値（実行中に作るオブジェクト用。生成オブジェクトと衝突しない値） */

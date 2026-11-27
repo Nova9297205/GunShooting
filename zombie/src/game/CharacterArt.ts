@@ -787,6 +787,86 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
     ctx.fill();
     ctx.fillStyle = flash ? '#fff' : 'rgba(150,170,160,0.6)';
     ctx.fillRect(r * 0.55, -r * 0.24, r * 0.1, r * 0.48);
+  } else if (z.type === 'bloater') {
+    // ---- 膨張体：ぱんぱんに膨れた緑がかった胴・破れそうな皮膚・漂うガス ----
+    arm(-1, 0.32, 0.8, 0.1);
+    arm(1, 0.32, 0.8, 0.1);
+    const pulse = 1 + Math.sin(t * 3 + id) * 0.04;
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.1, 0, r * 0.95 * pulse, r * 1.0 * pulse, 0, 0, Math.PI * 2);
+    const bg = ctx.createRadialGradient(r * 0.15, -r * 0.3, 2, 0, 0, r);
+    bg.addColorStop(0, W('#b8b878'));
+    bg.addColorStop(0.6, W('#7c8650'));
+    bg.addColorStop(1, W('#465032'));
+    blob(ctx, bg, OUT, 2);
+    if (!flash) {
+      // 浮き出た血管と膿疱
+      ctx.strokeStyle = 'rgba(70,40,60,0.55)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      for (let k = 0; k < 4; k++) {
+        const a0 = h2(id, k, 3) * Math.PI * 2;
+        ctx.moveTo(Math.cos(a0) * r * 0.2, Math.sin(a0) * r * 0.2);
+        ctx.quadraticCurveTo(Math.cos(a0 + 0.5) * r * 0.6, Math.sin(a0 + 0.5) * r * 0.6, Math.cos(a0 + 0.2) * r * 0.85, Math.sin(a0 + 0.2) * r * 0.85);
+      }
+      ctx.stroke();
+      for (let i = 0; i < 7; i++) {
+        ctx.fillStyle = 'rgba(200,200,90,0.85)';
+        ctx.beginPath();
+        ctx.arc((h2(id, i, 5) - 0.5) * r * 1.3, (h2(id, i, 6) - 0.5) * r * 1.5, 1.5 + h2(id, i, 7) * 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // 体から漏れる毒ガス
+      for (let i = 0; i < 3; i++) {
+        const ph = (t * 0.6 + i / 3 + h2(id, i)) % 1;
+        ctx.fillStyle = `rgba(160,190,80,${0.22 * (1 - ph)})`;
+        ctx.beginPath();
+        ctx.arc(-r * 0.4 - ph * r, (i - 1) * r * 0.5, r * (0.3 + ph * 0.5), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.beginPath();
+    ctx.arc(r * 0.62, 0, r * 0.3, 0, Math.PI * 2);
+    blob(ctx, skinD, OUT, 1.3);
+  } else if (z.type === 'screamer') {
+    // ---- 叫び屋：痩せこけた体・異様に大きく開いた口 ----
+    arm(-1, 0.22, 1.0, -0.2);
+    arm(1, 0.22, 1.0, -0.2);
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.1, 0, r * 0.45, r * 0.68, 0, 0, Math.PI * 2);
+    blob(ctx, W('#6e6a62'), OUT, 1.3);
+    if (!flash) {
+      ctx.strokeStyle = 'rgba(30,20,15,0.5)';
+      ctx.lineWidth = 1;
+      for (let k = -2; k <= 2; k++) {
+        ctx.beginPath();
+        ctx.moveTo(-r * 0.1, k * r * 0.18);
+        ctx.lineTo(r * 0.2, k * r * 0.2);
+        ctx.stroke();
+      }
+    }
+    ctx.beginPath();
+    ctx.arc(r * 0.38, 0, r * 0.42, 0, Math.PI * 2);
+    blob(ctx, skin, OUT, 1.3);
+    // 長い髪
+    ctx.fillStyle = W('#2a2622');
+    ctx.beginPath();
+    ctx.arc(r * 0.25, 0, r * 0.44, Math.PI * 0.55, Math.PI * 1.45);
+    ctx.fill();
+    // 叫ぶ口（追跡中は大きく開く）
+    ctx.fillStyle = W('#1a0c0c');
+    ctx.beginPath();
+    ctx.ellipse(r * 0.62, 0, r * (z.alert === 2 ? 0.2 : 0.1), r * (z.alert === 2 ? 0.26 : 0.12), 0, 0, Math.PI * 2);
+    ctx.fill();
+    if (z.alert === 2 && !flash) {
+      ctx.strokeStyle = `rgba(230,200,170,${0.3 + Math.sin(t * 20) * 0.15})`;
+      ctx.lineWidth = 1.5;
+      for (let k = 1; k <= 2; k++) {
+        ctx.beginPath();
+        ctx.arc(r * 0.7, 0, r * 0.4 * k + ((t * 30) % 6), -0.7, 0.7);
+        ctx.stroke();
+      }
+    }
   } else {
     // ---- ウォーカー：猫背・ぼろぼろの服・片腕を突き出す ----
     arm(-1, 0.3, 1.05, 0.05);
@@ -856,7 +936,7 @@ export function drawCorpse(ctx: CanvasRenderingContext2D, c: Corpse): void {
   const r = st.radius;
   const a = Math.min(1, c.life / 3);
   const skin = shade(st.skin, -0.3);
-  const cloth = c.type === 'brute' ? '#4a3a34' : c.type === 'soldier' ? '#3f4430' : shade(SHIRTS[c.id % SHIRTS.length], -0.3);
+  const cloth = c.type === 'brute' ? '#4a3a34' : c.type === 'soldier' ? '#3f4430' : c.type === 'bloater' ? '#5a6440' : c.type === 'screamer' ? '#55524c' : shade(SHIRTS[c.id % SHIRTS.length], -0.3);
   ctx.save();
   ctx.globalAlpha = a * 0.92;
   ctx.translate(c.x, c.y);

@@ -601,6 +601,30 @@ export class AudioManager {
       case 'burn':
         this.burn(ev.x, ev.y);
         break;
+      case 'boom': {
+        const s = this.spatial(ev.x, ev.y);
+        if (s) {
+          this.noise({ dur: 1.4, g: 0.8 * s.k, filter: 'lowpass', f: 1400, f2: 120, pan: s.pan });
+          this.tone({ f: 70, f2: 28, dur: 0.9, g: 0.6 * s.k, pan: s.pan });
+        }
+        break;
+      }
+      case 'gas': {
+        const s = this.spatial(ev.x, ev.y);
+        if (s) {
+          this.tone({ type: 'sawtooth', f: 120, f2: 60, dur: 0.4, g: 0.12 * s.k, lp: 500, pan: s.pan });
+          this.noise({ dur: 1.6, g: 0.25 * s.k, filter: 'bandpass', f: 900, f2: 400, a: 0.05, pan: s.pan });
+        }
+        break;
+      }
+      case 'scream': {
+        const s = this.spatial(ev.x, ev.y);
+        if (s) {
+          this.tone({ type: 'sawtooth', f: 620, f2: 980, dur: 1.1, g: 0.14 * s.k, lp: 3200, a: 0.05, rel: 0.6, pan: s.pan });
+          this.tone({ type: 'square', f: 455, f2: 700, dur: 1.0, g: 0.05 * s.k, lp: 2400, a: 0.08, pan: s.pan });
+        }
+        break;
+      }
       case 'tshot':
         this.turretShot(ev.x, ev.y);
         break;

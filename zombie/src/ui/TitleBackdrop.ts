@@ -35,6 +35,8 @@ export class TitleBackdrop {
     const world = new TileWorld(gen.terrain);
     for (const o of gen.objs) world.setObj(o);
     world.locations = gen.locations;
+    world.features = gen.features;
+    world.vec = gen.vec;
     this.terrain = bakeTerrain(world).cache;
     // カメラの巡回ルート（ロケーションを順に見て回る）
     this.path = gen.locations.map((l) => ({ x: (l.x + l.w / 2) * TILE, y: (l.y + l.h / 2) * TILE }));
