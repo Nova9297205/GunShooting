@@ -180,36 +180,43 @@ export class Renderer {
   perfN = { objects: 0, zombiesDrawn: 0, particles: 0 };
   private qTimer = 0;
 
+  /**
+   * @param root 画面分割（ローカル協力）のときの表示枠。指定すると HUD・色調の重ね合わせもこの枠の中に作り、枠の大きさで描く
+   */
   constructor(
     private canvas: HTMLCanvasElement,
     private world: TileWorld,
+    private root: HTMLElement | null = null,
   ) {
     this.ctx = canvas.getContext('2d')!;
-    this.hudCanvas = (document.getElementById('hud') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    // 枠の中では、同じ見た目（CSS）を使うため同じ id の要素を枠ごとに作る（探すのは枠の中だけ）
+    const parent: HTMLElement = root ?? document.body;
+    const find = <T extends HTMLElement>(id: string) => (root ? (root.querySelector(`#${id}`) as T | null) : (document.getElementById(id) as T | null));
+    this.hudCanvas = find<HTMLCanvasElement>('hud') ?? document.createElement('canvas');
     if (!this.hudCanvas.id) {
       this.hudCanvas.id = 'hud';
-      document.body.insertBefore(this.hudCanvas, canvas.nextSibling);
+      parent.insertBefore(this.hudCanvas, canvas.nextSibling);
     }
     this.hudCtx = this.hudCanvas.getContext('2d')!;
-    this.fastCanvas = (document.getElementById('hud-fx') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    this.fastCanvas = find<HTMLCanvasElement>('hud-fx') ?? document.createElement('canvas');
     if (!this.fastCanvas.id) {
       this.fastCanvas.id = 'hud-fx';
-      document.body.insertBefore(this.fastCanvas, this.hudCanvas.nextSibling);
+      parent.insertBefore(this.fastCanvas, this.hudCanvas.nextSibling);
     }
     this.fastCtx = this.fastCanvas.getContext('2d')!;
-    this.grainEl = (document.getElementById('fx-grain') as HTMLDivElement | null) ?? document.createElement('div');
+    this.grainEl = find<HTMLDivElement>('fx-grain') ?? document.createElement('div');
     if (!this.grainEl.id) {
       this.grainEl.id = 'fx-grain';
-      document.body.insertBefore(this.grainEl, this.hudCanvas);
+      parent.insertBefore(this.grainEl, this.hudCanvas);
     }
     this.grainEl.style.backgroundImage = `url(${makeGrainURL()})`;
     const mk = (id: string) => {
-      let el = document.getElementById(id) as HTMLDivElement | null;
+      let el = find<HTMLDivElement>(id);
       if (!el) {
         el = document.createElement('div');
         el.id = id;
         el.className = 'fx-ov';
-        document.body.insertBefore(el, this.grainEl);
+        parent.insertBefore(el, this.grainEl);
       }
       return el;
     };
@@ -515,8 +522,8 @@ export class Renderer {
     this.baseDpr = Math.min(window.devicePixelRatio || 1, 2);
     // ゲーム画面は最大1.5倍（高解像度ディスプレイで描くピクセル数を抑える）。HUD は baseDpr のままくっきり
     this.dpr = Math.min(this.baseDpr, 1.5) * this.renderScale;
-    this.w = window.innerWidth;
-    this.h = window.innerHeight;
+    this.w = this.root ? this.root.clientWidth : window.innerWidth;
+    this.h = this.root ? this.root.clientHeight : window.innerHeight;
     this.uiScale = clamp(Math.min(this.w / 1280, this.h / 760), 0.55, 1);
     this.canvas.width = Math.floor(this.w * this.dpr);
     this.canvas.height = Math.floor(this.h * this.dpr);

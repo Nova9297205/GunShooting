@@ -53,13 +53,11 @@ function dz(v: number): number {
   return (Math.sign(v) * (a - DEAD)) / (1 - DEAD);
 }
 
-export class GamepadManager {
-  /** 選択（保存される） */
-  choice: Choice = 'auto';
-  /** 「自動」で最後に操作されたコントローラー */
-  private lastActive: number | null = null;
-  private prevButtons = new Map<number, boolean[]>();
-  /** 今フレームで押された瞬間のボタン */
+/**
+ * 1台のコントローラーの読み取り：スティック・ボタン（押した瞬間）・メニュー用のカーソル・振動。
+ * 通常は「選んだコントローラー」を読む 1 つ（gamepad）だけ。ローカル協力ではプレイヤーごとに 1 つ。
+ */
+export class PadReader {
   pressed = new Set<number>();
   held = new Set<number>();
   lx = 0;
@@ -68,12 +66,165 @@ export class GamepadManager {
   ry = 0;
   lt = 0;
   rt = 0;
+  /** 最後に操作した時刻 */
+  usedT = 0;
   /** ゲームの操作中（false のときは画面上のカーソルで操作する） */
   gameplay = false;
+  /** カーソル操作中に B を押したとき（指定がなければ Esc キーと同じ） */
+  onBack: (() => void) | null = null;
+  /** カーソルを動かせる範囲（画面分割では自分の枠の中） */
+  area: (() => DOMRect) | null = null;
+  private prev: boolean[] = [];
   private cursor: HTMLDivElement | null = null;
-  private cx = 0;
-  private cy = 0;
+  cx = typeof window !== 'undefined' ? window.innerWidth / 2 : 0;
+  cy = typeof window !== 'undefined' ? window.innerHeight / 2 : 0;
   private cursorShownAt = 0;
+
+  constructor(
+    private resolve: () => Gamepad | null,
+    private color = '#e0a33a',
+    private label = '',
+  ) {}
+
+  current(): Gamepad | null {
+    return this.resolve();
+  }
+
+  /** いま押しっぱなしのボタンを「押した瞬間」に数えないようにする（画面が切り替わった直後など） */
+  prime(): void {
+    const g = this.resolve();
+    this.prev = g ? g.buttons.map((b) => b.pressed || b.value > 0.5) : [];
+    this.pressed.clear();
+  }
+  get active(): boolean {
+    return this.resolve() !== null;
+  }
+
+  poll(): void {
+    this.pressed.clear();
+    this.held.clear();
+    this.lx = this.ly = this.rx = this.ry = this.lt = this.rt = 0;
+    const g = this.resolve();
+    if (!g) {
+      this.prev = [];
+      return;
+    }
+    const now = g.buttons.map((b) => b.pressed || b.value > 0.5);
+    now.forEach((p, i) => {
+      if (p) this.held.add(i);
+      if (p && !this.prev[i]) this.pressed.add(i);
+    });
+    this.prev = now;
+    this.lx = dz(g.axes[0] ?? 0);
+    this.ly = dz(g.axes[1] ?? 0);
+    this.rx = dz(g.axes[2] ?? 0);
+    this.ry = dz(g.axes[3] ?? 0);
+    this.lt = g.buttons[PAD.LT]?.value ?? 0;
+    this.rt = g.buttons[PAD.RT]?.value ?? 0;
+    if (this.held.size || this.lx || this.ly || this.rx || this.ry) this.usedT = performance.now();
+  }
+
+  /** 押された瞬間のボタンを受け取る（同じ押下を2回使わないよう空にする） */
+  takePressed(): Set<number> {
+    const p = new Set(this.pressed);
+    this.pressed.clear();
+    return p;
+  }
+
+  /** 振動（対応していなければ何もしない） */
+  rumble(strong: number, weak: number, ms: number): void {
+    const g = this.resolve() as (Gamepad & { vibrationActuator?: { playEffect?: (t: string, p: object) => Promise<unknown> } }) | null;
+    try {
+      void g?.vibrationActuator?.playEffect?.('dual-rumble', { duration: ms, strongMagnitude: strong, weakMagnitude: weak })?.catch?.(() => {});
+    } catch {
+      /* 非対応 */
+    }
+  }
+
+  // ---------------- 画面上のカーソル（メニュー・パネル用） ----------------
+  updateCursor(dt: number): void {
+    const g = this.resolve();
+    if (!g || this.gameplay) {
+      if (this.cursor) this.cursor.style.display = 'none';
+      return;
+    }
+    if (!this.cursor) {
+      this.cursor = document.createElement('div');
+      this.cursor.className = 'pad-cursor';
+      this.cursor.style.borderColor = this.color;
+      if (this.label) this.cursor.dataset.label = this.label;
+      document.body.appendChild(this.cursor);
+    }
+    const r = this.area?.() ?? new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+    const sx = this.lx || this.rx;
+    const sy = this.ly || this.ry;
+    if (sx || sy) {
+      const sp = 900 * dt * (0.35 + 0.65 * Math.hypot(sx, sy));
+      this.cx += sx * sp;
+      this.cy += sy * sp;
+      this.cursorShownAt = performance.now();
+    }
+    // 十字キーでも動かせる（細かい位置合わせ）
+    const step = 18;
+    if (this.pressed.has(PAD.LEFT)) this.cx -= step;
+    if (this.pressed.has(PAD.RIGHT)) this.cx += step;
+    if (this.pressed.has(PAD.UP)) this.cy -= step;
+    if (this.pressed.has(PAD.DOWN)) this.cy += step;
+    this.cx = Math.max(r.left + 2, Math.min(r.right - 2, this.cx));
+    this.cy = Math.max(r.top + 2, Math.min(r.bottom - 2, this.cy));
+    if (this.pressed.size) this.cursorShownAt = performance.now();
+    this.cursor.style.display = 'block';
+    this.cursor.style.transform = `translate(${this.cx}px, ${this.cy}px)`;
+    this.cursor.style.opacity = performance.now() - this.cursorShownAt < 6000 ? '1' : '0.35';
+    const el = document.elementFromPoint(this.cx, this.cy) as HTMLElement | null;
+    this.cursor.classList.toggle('over', !!el?.closest('button, a, input, label, [data-slot], .slot, select'));
+    if (this.pressed.has(PAD.A)) this.click(el, 0);
+    if (this.pressed.has(PAD.X)) this.click(el, 2);
+    if (this.pressed.has(PAD.B)) {
+      if (this.onBack) this.onBack();
+      else {
+        // B：閉じる（Esc と同じ）
+        window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape', bubbles: true }));
+        window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Escape', key: 'Escape', bubbles: true }));
+      }
+    }
+  }
+
+  /** カーソルの位置を押す（0 = 左クリック、2 = 右クリック） */
+  private click(el: HTMLElement | null, button: 0 | 2): void {
+    if (!el) return;
+    const o = { bubbles: true, cancelable: true, clientX: this.cx, clientY: this.cy, button, buttons: button === 0 ? 1 : 2, view: window };
+    el.dispatchEvent(new MouseEvent('mousedown', o));
+    el.dispatchEvent(new MouseEvent('mouseup', o));
+    if (button === 0) {
+      el.dispatchEvent(new MouseEvent('click', o));
+      if (el instanceof HTMLInputElement) el.focus();
+    } else el.dispatchEvent(new MouseEvent('contextmenu', o));
+  }
+
+  /** カーソルを枠の中央へ */
+  centerCursor(): void {
+    const r = this.area?.() ?? new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+    this.cx = r.left + r.width / 2;
+    this.cy = r.top + r.height / 2;
+  }
+
+  hideCursor(): void {
+    this.cursor?.remove();
+    this.cursor = null;
+  }
+}
+
+export class GamepadManager extends PadReader {
+  /** 選択（保存される） */
+  choice: Choice = 'auto';
+  /** 「自動」で最後に操作されたコントローラー */
+  private lastActive: number | null = null;
+  private prevButtons = new Map<number, boolean[]>();
+  /** ローカル協力中など：選択したコントローラーを（このリーダーでは）使わない */
+  suspended = false;
+  /** プレイヤーごとのリーダー（ローカル協力） */
+  private readers = new Set<PadReader>();
   private raf = 0;
   private lastT = 0;
   private listeners = new Set<() => void>();
@@ -81,14 +232,13 @@ export class GamepadManager {
   private knownIds = new Set<string>();
 
   constructor() {
+    super(() => this.resolveChoice());
     try {
       this.choice = localStorage.getItem(STORE) || 'auto';
     } catch {
       /* 保存できない環境 */
     }
     if (typeof window === 'undefined') return;
-    this.cx = window.innerWidth / 2;
-    this.cy = window.innerHeight / 2;
     window.addEventListener('gamepadconnected', (e) => this.onConnect(e as GamepadEvent));
     window.addEventListener('gamepaddisconnected', (e) => this.onDisconnect(e as GamepadEvent));
     this.raf = requestAnimationFrame(this.loop);
@@ -121,27 +271,37 @@ export class GamepadManager {
     this.emit();
   }
 
-  /** いま使っているコントローラー（なければ null） */
-  current(): Gamepad | null {
-    if (this.choice === 'none') return null;
+  /** "<番号>|<id>" で指定したコントローラー（差し直して番号が変わっても同じ名前のものを探す） */
+  static byKey(key: string): Gamepad | null {
     const list = navigator.getGamepads ? navigator.getGamepads() : [];
-    if (this.choice === 'auto') {
-      if (this.lastActive === null) return null;
-      const g = list[this.lastActive];
-      return g && g.connected ? g : null;
-    }
-    const [idx, ...rest] = this.choice.split('|');
+    const [idx, ...rest] = key.split('|');
     const id = rest.join('|');
     const byIdx = list[Number(idx)];
     if (byIdx && byIdx.connected && byIdx.id === id) return byIdx;
-    // 差し直して番号が変わった：同じ名前のものを探す
     for (const g of list) if (g && g.connected && g.id === id) return g;
     return null;
   }
 
-  /** コントローラーで遊んでいるか（案内の表示を切り替える） */
-  get active(): boolean {
-    return this.current() !== null;
+  private resolveChoice(): Gamepad | null {
+    if (this.suspended || this.choice === 'none') return null;
+    if (this.choice === 'auto') {
+      if (this.lastActive === null) return null;
+      const g = (navigator.getGamepads ? navigator.getGamepads() : [])[this.lastActive];
+      return g && g.connected ? g : null;
+    }
+    return GamepadManager.byKey(this.choice);
+  }
+
+  /** ローカル協力：特定のコントローラーを読むリーダーを作る */
+  forPad(key: string, color: string, label: string): PadReader {
+    const r = new PadReader(() => GamepadManager.byKey(key), color, label);
+    r.prime();
+    this.readers.add(r);
+    return r;
+  }
+  drop(r: PadReader): void {
+    r.hideCursor();
+    this.readers.delete(r);
   }
 
   private onConnect(e: GamepadEvent): void {
@@ -173,32 +333,22 @@ export class GamepadManager {
     (this.toastEl as unknown as { t: number }).t = window.setTimeout(() => this.toastEl?.classList.remove('show'), 4000);
   }
 
-  /** 振動（対応していなければ何もしない） */
-  rumble(strong: number, weak: number, ms: number): void {
-    const g = this.current() as (Gamepad & { vibrationActuator?: { playEffect?: (t: string, p: object) => Promise<unknown> } }) | null;
-    try {
-      void g?.vibrationActuator?.playEffect?.('dual-rumble', { duration: ms, strongMagnitude: strong, weakMagnitude: weak })?.catch?.(() => {});
-    } catch {
-      /* 非対応 */
-    }
-  }
-
-  // ---------------- 毎フレームの読み取り ----------------
   private loop = (t: number): void => {
     this.raf = requestAnimationFrame(this.loop);
     const dt = Math.min(0.05, this.lastT ? (t - this.lastT) / 1000 : 0.016);
     this.lastT = t;
+    this.detect();
     this.poll();
     this.updateCursor(dt);
+    for (const r of this.readers) {
+      r.poll();
+      r.updateCursor(dt);
+    }
   };
 
-  /** 状態を読み直す（rAF ごと）。「自動」なら、操作されたコントローラーに切り替える */
-  poll(): void {
-    this.pressed.clear();
-    this.held.clear();
-    this.lx = this.ly = this.rx = this.ry = this.lt = this.rt = 0;
+  /** 「自動」の切り替えと、接続イベントより先に見つかったコントローラーの通知 */
+  private detect(): void {
     const list = navigator.getGamepads ? navigator.getGamepads() : [];
-    // 自動：ボタンかスティックが動いたものを使う
     for (const g of list) {
       if (!g || !g.connected) continue;
       const prev = this.prevButtons.get(g.index) ?? [];
@@ -207,98 +357,12 @@ export class GamepadManager {
       if (this.choice === 'auto' && (moved || now.some((p, i) => p && !prev[i]))) this.lastActive = g.index;
       this.prevButtons.set(g.index, now);
       if (!this.knownIds.has(`${g.index}|${g.id}`)) {
-        // 接続イベントより先に見つかったもの（ページを開く前から挿さっていた等）
         this.knownIds.add(`${g.index}|${g.id}`);
         const many = list.filter((q) => q && q.connected).length > 1;
         this.toast(`🎮 コントローラーを接続：${shortName(g.id)}${many ? '（複数あります — 🎮 ボタンで使うものを選べます）' : ''}`);
         this.emit();
       }
     }
-    const g = this.current();
-    if (!g) return;
-    const prevMine = this.prevMine;
-    const now = g.buttons.map((b) => b.pressed || b.value > 0.5);
-    now.forEach((p, i) => {
-      if (p) this.held.add(i);
-      if (p && !prevMine[i]) this.pressed.add(i);
-    });
-    this.prevMine = now;
-    this.lx = dz(g.axes[0] ?? 0);
-    this.ly = dz(g.axes[1] ?? 0);
-    this.rx = dz(g.axes[2] ?? 0);
-    this.ry = dz(g.axes[3] ?? 0);
-    if (this.held.size || this.lx || this.ly || this.rx || this.ry) this.usedT = performance.now();
-    this.lt = g.buttons[PAD.LT]?.value ?? 0;
-    this.rt = g.buttons[PAD.RT]?.value ?? 0;
-  }
-  private prevMine: boolean[] = [];
-
-  // ---------------- 画面上のカーソル（メニュー・パネル用） ----------------
-  private updateCursor(dt: number): void {
-    const g = this.current();
-    if (!g || this.gameplay) {
-      if (this.cursor) this.cursor.style.display = 'none';
-      return;
-    }
-    if (!this.cursor) {
-      this.cursor = document.createElement('div');
-      this.cursor.id = 'pad-cursor';
-      document.body.appendChild(this.cursor);
-    }
-    const sx = this.lx || this.rx;
-    const sy = this.ly || this.ry;
-    if (sx || sy) {
-      const sp = 900 * dt * (0.35 + 0.65 * Math.hypot(sx, sy));
-      this.cx = Math.max(2, Math.min(window.innerWidth - 2, this.cx + sx * sp));
-      this.cy = Math.max(2, Math.min(window.innerHeight - 2, this.cy + sy * sp));
-      this.cursorShownAt = performance.now();
-    }
-    // 十字キーでも動かせる（細かい位置合わせ）
-    const step = 18;
-    if (this.pressed.has(PAD.LEFT)) this.cx -= step;
-    if (this.pressed.has(PAD.RIGHT)) this.cx += step;
-    if (this.pressed.has(PAD.UP)) this.cy -= step;
-    if (this.pressed.has(PAD.DOWN)) this.cy += step;
-    if (this.pressed.size) this.cursorShownAt = performance.now();
-    this.cursor.style.display = 'block';
-    this.cursor.style.transform = `translate(${this.cx}px, ${this.cy}px)`;
-    this.cursor.style.opacity = performance.now() - this.cursorShownAt < 6000 ? '1' : '0.35';
-    const el = document.elementFromPoint(this.cx, this.cy) as HTMLElement | null;
-    this.cursor.classList.toggle('over', !!el?.closest('button, a, input, label, [data-slot], .slot, select'));
-    if (this.pressed.has(PAD.A)) this.click(el, 0);
-    if (this.pressed.has(PAD.X)) this.click(el, 2);
-    if (this.pressed.has(PAD.B)) {
-      // B：閉じる（Esc と同じ）
-      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape', bubbles: true }));
-      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Escape', key: 'Escape', bubbles: true }));
-    }
-  }
-
-  /** カーソルの位置を押す（0 = 左クリック、2 = 右クリック） */
-  private click(el: HTMLElement | null, button: 0 | 2): void {
-    if (!el) return;
-    const o = { bubbles: true, cancelable: true, clientX: this.cx, clientY: this.cy, button, buttons: button === 0 ? 1 : 2, view: window };
-    el.dispatchEvent(new MouseEvent('mousedown', o));
-    el.dispatchEvent(new MouseEvent('mouseup', o));
-    if (button === 0) {
-      el.dispatchEvent(new MouseEvent('click', o));
-      if (el instanceof HTMLInputElement) el.focus();
-    } else el.dispatchEvent(new MouseEvent('contextmenu', o));
-  }
-
-  /** 押された瞬間のボタンを受け取る（同じ押下を2回使わないよう空にする） */
-  takePressed(): Set<number> {
-    const p = new Set(this.pressed);
-    this.pressed.clear();
-    return p;
-  }
-  /** 最後にコントローラーを操作した時刻 */
-  usedT = 0;
-
-  /** カーソルの位置を画面の中央へ（画面が切り替わったとき） */
-  centerCursor(): void {
-    this.cx = window.innerWidth / 2;
-    this.cy = window.innerHeight / 2;
   }
 
   destroy(): void {
@@ -307,6 +371,7 @@ export class GamepadManager {
 }
 
 export const gamepad = new GamepadManager();
+
 
 // ============================================================
 // 設定画面：使うコントローラーを選ぶ・ボタンの反応を確かめる

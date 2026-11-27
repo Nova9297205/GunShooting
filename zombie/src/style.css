@@ -1799,7 +1799,7 @@ input[type='range'] {
 }
 
 /* ---------------- コントローラー ---------------- */
-#pad-cursor {
+.pad-cursor {
   position: fixed;
   left: -11px;
   top: -11px;
@@ -1813,7 +1813,7 @@ input[type='range'] {
   display: none;
   transition: opacity 0.3s;
 }
-#pad-cursor::after {
+.pad-cursor::after {
   content: '';
   position: absolute;
   left: 8px;
@@ -1823,7 +1823,7 @@ input[type='range'] {
   border-radius: 50%;
   background: #e0a33a;
 }
-#pad-cursor.over {
+.pad-cursor.over {
   border-color: #93d07c;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 0 14px rgba(147, 208, 124, 0.8);
 }
@@ -2007,4 +2007,111 @@ input[type='range'] {
 .pad-title-btn {
   margin: 8px auto 0;
   display: block;
+}
+
+/* ---------------- ローカル協力（画面分割） ---------------- */
+.vp {
+  position: fixed;
+  overflow: hidden;
+  /* 中の position: fixed の要素（HUD・色調・パネル）を、この枠を基準に置く */
+  transform: translateZ(0);
+  background: #070806;
+}
+.vp + .vp {
+  box-shadow: inset 2px 0 0 #0b0c09, inset 0 2px 0 #0b0c09;
+}
+.vp.vp-2 {
+  box-shadow: inset 2px 0 0 #0b0c09, inset 0 3px 0 #0b0c09;
+}
+.pad-cursor[data-label]::before {
+  content: attr(data-label);
+  position: absolute;
+  left: 18px;
+  top: -14px;
+  font: bold 10px sans-serif;
+  color: #fff;
+  text-shadow: 0 0 3px #000;
+}
+.local-btn {
+  width: 100%;
+  margin-top: 8px;
+}
+#local-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 6, 4, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9000;
+}
+#local-modal.hidden {
+  display: none;
+}
+.lp-card {
+  width: min(620px, 94vw);
+  background: #15170f;
+  border: 1px solid rgba(224, 163, 58, 0.6);
+  padding: 16px 18px;
+  color: #e6e1cc;
+  font-size: 13px;
+}
+.lp-card kbd {
+  border: 1px solid #8c8872;
+  padding: 0 4px;
+  font-size: 11px;
+}
+.lp-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+.lp-slot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(190, 180, 130, 0.25);
+  border-left: 4px solid var(--c);
+  background: rgba(255, 255, 255, 0.03);
+}
+.lp-slot b {
+  color: var(--c);
+  width: 26px;
+}
+.lp-slot input {
+  width: 130px;
+  background: #0c0d0a;
+  border: 1px solid #5a5648;
+  color: #e6e1cc;
+  padding: 4px 6px;
+  font: inherit;
+}
+.lp-slot .btn {
+  margin: 0;
+}
+.lp-slot.empty span {
+  color: #8c8872;
+  flex: 1;
+}
+.lp-layout {
+  color: #9c967c;
+  font-size: 12px;
+}
+.lp-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+/* 画面分割：パネルは自分の枠の中央に（縮めても位置がずれないように） */
+.vp .modal {
+  transform: none;
+  inset: 8px;
+  margin: auto;
+  width: fit-content;
+  height: fit-content;
+  max-width: none;
+  max-height: none;
 }
