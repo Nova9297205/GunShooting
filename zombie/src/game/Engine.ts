@@ -249,6 +249,9 @@ export const isHordeDay = (day: number): boolean => day % 4 === 0;
 export const RESCUE_DAY = 30;
 /** この日から冬：菜園が育たず、食料が見つかりにくく、外は冷え、雪に足跡が残る */
 export const WINTER_DAY = 21;
+/** 生存者の役割（名前・毎朝くれる物） */
+const ROLE_NAME: Record<string, string> = { cook: '料理人', gunsmith: '銃職人', nurse: '看護師', scav: '回収屋' };
+const ROLE_GIFT: Record<string, string> = { cook: '缶詰 2', gunsmith: '弾 15', nurse: '包帯 2（ときどき救急キット）', scav: '鉄くず 4・布 2' };
 /** 巨像が地形にぶつかる大きさ（見た目と当たり判定は大きいが、大男が通れる所は通れる） */
 const TITAN_BODY = 20;
 
@@ -702,7 +705,7 @@ export class HostSimulation {
 
   /** 追加の保存項目（拡張用） */
   protected saveExtra(): Record<string, unknown> {
-    return { notesRead: this.notesRead, runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
+    return { survivors: this.survivors, notesRead: this.notesRead, runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
   }
 
   /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
@@ -723,6 +726,7 @@ export class HostSimulation {
     sim.runMode = rx?.runMode ?? 'endless';
     if (rx?.rescue) sim.rescue = { ...rx.rescue };
     sim.notesRead = (data.extra as { notesRead?: number } | undefined)?.notesRead ?? 0;
+    sim.survivors = (data.extra as { survivors?: string[] } | undefined)?.survivors ?? [];
     for (const id of data.removed) {
       sim.world.removeObj(id);
       sim.everRemoved.add(id);
@@ -933,6 +937,8 @@ export class HostSimulation {
       jobs: this.jobs,
       sites: [...this.sites, ...this.rsites].map((x) => ({ id: x.id, kind: x.kind, name: x.name, tx: x.tx, ty: x.ty, crate: x.crate, ...(x.done ? { done: true } : {}) })),
       rescue: this.rescueSnap(),
+      ...(this.npcs.length ? { npcs: this.npcs.map((n) => ({ id: n.id, x: Math.round(n.x), y: Math.round(n.y), a: r2(n.a), hp: Math.round(n.hp), role: n.role, follow: n.follow })) } : {}),
+      ...(this.survivors.length ? { survivors: this.survivors } : {}),
       ...(this.winter() ? { winter: true } : {}),
       ...(this.acid.length ? { acid: this.acid.map((a) => ({ x: Math.round(a.x), y: Math.round(a.y), r: a.r, t: r1(a.t) })) } : {}),
       ...(this.spits.length ? { spits: this.spits.map((q) => ({ sx: Math.round(q.sx), sy: Math.round(q.sy), tx: Math.round(q.tx), ty: Math.round(q.ty), p: r2(1 - q.t / q.dur) })) } : {}),
@@ -1032,6 +1038,7 @@ export class HostSimulation {
     this.updateVehicles(dt);
     this.updateThrowns(dt);
     this.updateAcid(dt);
+    this.updateNpcs(dt);
     this.updateSites(dt);
     if (this.tick % 10 === 0) this.updateTracks();
     this.updateSleep();
@@ -2331,7 +2338,7 @@ export class HostSimulation {
   }
 
   // ======================== 異変（特定の場所のイベント） ========================
-  sites: (SiteSnap & { guards: boolean })[] = [];
+  sites: (SiteSnap & { guards: boolean; crates?: number[] })[] = [];
   private siteSeq = 1;
   private siteT = 0;
 
@@ -2362,6 +2369,16 @@ export class HostSimulation {
       const name = kind === 'heli' ? `${l.name}に墜落したヘリ` : kind === 'nest' ? `${l.name}の感染体の巣` : `${l.name}の封鎖された武器庫`;
       out.push({ id: this.siteSeq++, kind, name, tx: spot[0], ty: spot[1], crate: o.id, guards: false });
     }
+    // 生存者の救出・物資の車列も、ときどき混ざる
+    this.npcs = this.npcs.filter((n) => n.follow >= 0);
+    if (this.survivors.length < 4 && Math.random() < 0.45) {
+      const st = this.newSurvivorSite();
+      if (st) out.push(st);
+    }
+    if (Math.random() < 0.3) {
+      const st = this.newConvoySite();
+      if (st) out.push(st);
+    }
     this.sites = out;
     if (announce && out.length)
       this.events.push({ k: 'feed', cat: 'danger', t: `無線：異変 — ${out.map((x) => x.name).join('／')}。見張りは手強いが、良い物がある（地図に◆）`, c: '#c08af0', snd: 'alarm' });
@@ -2373,6 +2390,31 @@ export class HostSimulation {
     this.siteT = 0.5;
     for (const st of [...this.sites, ...this.rsites]) {
       if (st.done) continue;
+      if (st.kind === 'survivor') {
+        // 生存者：連れ帰るか、倒れるまで
+        const n = this.npcs.find((q) => q.siteId === st.id);
+        if (!n) st.done = true;
+        else if (!st.guards && this.players.some((p) => p.status === 'alive' && Math.hypot(p.x / TILE - st.tx, p.y / TILE - st.ty) < 40)) {
+          st.guards = true;
+          (['walker', 'runner', 'walker', 'brute', 'runner'] as ZombieType[]).forEach((t, k) => {
+            const a = (k / 5) * Math.PI * 2;
+            const z = this.spawnZombie(t, (st.tx + 0.5 + Math.cos(a) * 5) * TILE, (st.ty + 0.5 + Math.sin(a) * 5) * TILE);
+            moveCircle(z, 0, 0, ZOMBIE[z.type].radius, this.world);
+            z.keep = true;
+          });
+        }
+        continue;
+      }
+      if (st.kind === 'convoy' && this.minute() >= 18 * 60) {
+        // 車列は夕方に去る（開けなかった箱は消える）
+        st.done = true;
+        for (const id of st.crates ?? [st.crate]) {
+          const o = this.world.objects.get(id);
+          if (o && o.ready) this.destroyObj(o);
+        }
+        this.events.push({ k: 'feed', cat: 'info', t: `${st.name}は去った`, c: '#aab4c8' });
+        continue;
+      }
       const crate = this.world.objects.get(st.crate);
       if (!crate || !crate.ready) {
         st.done = true;
@@ -2387,7 +2429,7 @@ export class HostSimulation {
       if (!st.guards && this.players.some((p) => p.status === 'alive' && Math.hypot(p.x / TILE - st.tx, p.y / TILE - st.ty) < 40)) {
         st.guards = true;
         const tier = this.tierAt(st.tx, st.ty);
-        const types: ZombieType[] = st.kind === 'tower' ? (['soldier', 'runner', 'brute', 'walker', 'runner', 'soldier', 'brute', 'runner'] as ZombieType[]).slice(0, 4 + tier) : st.kind === 'nest' ? ['walker', 'runner', 'walker', 'runner', 'bloater', 'walker', 'runner', 'brute'] : st.kind === 'armory' ? ['soldier', 'soldier', 'brute', 'soldier'] : ['soldier', 'runner', 'brute', 'soldier', 'runner'];
+        const types: ZombieType[] = st.kind === 'convoy' ? ['soldier', 'soldier', 'runner', 'soldier', 'brute'] : st.kind === 'tower' ? (['soldier', 'runner', 'brute', 'walker', 'runner', 'soldier', 'brute', 'runner'] as ZombieType[]).slice(0, 4 + tier) : st.kind === 'nest' ? ['walker', 'runner', 'walker', 'runner', 'bloater', 'walker', 'runner', 'brute'] : st.kind === 'armory' ? ['soldier', 'soldier', 'brute', 'soldier'] : ['soldier', 'runner', 'brute', 'soldier', 'runner'];
         types.forEach((t, k) => {
           const a = (k / types.length) * Math.PI * 2;
           for (let r = 2; r < 7; r++) {
@@ -2411,7 +2453,7 @@ export class HostSimulation {
   /** 救助の進み具合：stage 0 部品集め・1 修理待ち・2 呼べる・3 呼んだ。day = 救助が来る日（0 = 未定） */
   rescue = { stage: 0, parts: 0, day: 0 };
   /** 救助無線の部品がある場所（通信塔など）。毎朝入れ替わる異変とは別で、ずっと残る */
-  rsites: (SiteSnap & { guards: boolean })[] = [];
+  rsites: (SiteSnap & { guards: boolean; crates?: number[] })[] = [];
   /** 救助ヘリが着くまでの演出の残り秒 */
   private winT = 0;
   /** 救助を呼ぶ前の確認（もう一度 [F]） */
@@ -2844,6 +2886,7 @@ export class HostSimulation {
 
   /** F キー：いちばん近いドア／入れ物／倉庫を操作。何もなければ回復/食事 */
   private interact(p: SimPlayer): void {
+    if (this.talkNpc(p)) return;
     if (p.viewing || p.storage) {
       p.viewing = 0;
       p.storage = 0;
@@ -3460,6 +3503,103 @@ export class HostSimulation {
     }
   }
 
+  // ======================== 生存者の救出・物資の車列 ========================
+  /** 拠点にいる生存者の役割（毎朝の物資が増える） */
+  survivors: string[] = [];
+  npcs: { id: number; x: number; y: number; a: number; hp: number; role: string; follow: number; siteId: number }[] = [];
+  private npcSeq = 1;
+
+  private newSurvivorSite(): (SiteSnap & { guards: boolean }) | null {
+    const cands = this.world.locations.map((l, i) => ({ l, i })).filter(({ l }) => l.kind !== 'base' && l.kind !== 'ruin' && l.tier >= 1 && l.tier <= 3);
+    for (let t = 0; t < 10 && cands.length; t++) {
+      const { l, i } = cands.splice(Math.floor(Math.random() * cands.length), 1)[0];
+      const spot = this.crateSpot(i);
+      if (!spot) continue;
+      const roles = ['cook', 'gunsmith', 'nurse', 'scav'];
+      const role = roles[Math.floor(Math.random() * roles.length)];
+      const st = { id: this.siteSeq++, kind: 'survivor' as const, name: `${l.name}に取り残された${ROLE_NAME[role]}`, tx: spot[0], ty: spot[1], crate: 0, guards: false };
+      this.npcs.push({ id: this.npcSeq++, x: (spot[0] + 0.5) * TILE, y: (spot[1] + 0.5) * TILE, a: 0, hp: 100, role, follow: -1, siteId: st.id });
+      return st;
+    }
+    return null;
+  }
+
+  private newConvoySite(): (SiteSnap & { guards: boolean; crates?: number[] }) | null {
+    // 道路の上に、物資を積んだ車列（箱 3 つ）。夕方には去る
+    for (let t = 0; t < 60; t++) {
+      const x = 20 + Math.floor(Math.random() * (MAP_W - 40));
+      const y = 20 + Math.floor(Math.random() * (MAP_H - 40));
+      if (this.world.terrainAt(x, y) !== T_ROAD || tierAtDistance(Math.hypot(x - BASE_TX, y - BASE_TY)) < 2) continue;
+      if (![0, 1, 2].every((k) => this.world.terrainAt(x + k, y) === T_ROAD && !this.world.objAt(x + k, y))) continue;
+      const crates: number[] = [];
+      for (let k = 0; k < 3; k++) {
+        const o: SimObj = { id: this.nextObjId++, kind: 'mcrate', tx: x + k, ty: y, hp: 1, maxHp: 1, ready: 1, regrowT: 0 };
+        this.world.setObj(o);
+        this.changed.add(o.id);
+        const c = emptyBag(8);
+        addItem(c, (['ammo762', 'ammo9', 'shells'] as ItemId[])[k], 20 + Math.floor(Math.random() * 20));
+        addItem(c, (['can', 'mre', 'medkit'] as ItemId[])[k], k === 2 ? 1 : 3);
+        addItem(c, (['parts', 'fuel', 'electronics'] as ItemId[])[k], 2);
+        if (Math.random() < 0.35) addItem(c, ATTACHMENTS[Math.floor(Math.random() * ATTACHMENTS.length)], 1);
+        this.contents.set(o.id, c);
+        crates.push(o.id);
+      }
+      return { id: this.siteSeq++, kind: 'convoy', name: `${directionName(x, y)}の道で立ち往生した物資の車列`, tx: x + 1, ty: y, crate: crates[1], crates, guards: false };
+    }
+    return null;
+  }
+
+  /** 生存者に話しかける：ついてくる／待つ */
+  private talkNpc(p: SimPlayer): boolean {
+    const n = this.npcs.find((q) => Math.hypot(q.x - p.x, q.y - p.y) < 60);
+    if (!n) return false;
+    if (n.follow === p.id) {
+      n.follow = -1;
+      this.pop(p, `${ROLE_NAME[n.role]}：「ここで待っている」`, '#9fd0f0');
+    } else {
+      n.follow = p.id;
+      this.pop(p, `${ROLE_NAME[n.role]}：「助かった…ついていく！」 拠点まで連れて帰れ`, '#9fd0f0', 'level');
+    }
+    return true;
+  }
+
+  private updateNpcs(dt: number): void {
+    if (!this.npcs.length) return;
+    for (const n of this.npcs) {
+      const lead = this.players.find((q) => q.id === n.follow && q.status === 'alive');
+      if (lead) {
+        const d = Math.hypot(lead.x - n.x, lead.y - n.y);
+        if (d > 56) {
+          const sp = Math.min(PLAYER.speed * 0.95, d * 3);
+          const ax = (lead.x - n.x) / d;
+          const ay = (lead.y - n.y) / d;
+          moveCircle(n, ax * sp * dt, ay * sp * dt, 12, this.world);
+          n.a = Math.atan2(ay, ax);
+        }
+        // 遠く離れすぎたら、その場で待つ
+        if (d > 700) n.follow = -1;
+      }
+      // 感染体に触れられると傷つく
+      for (const z of this.zombies) {
+        if (z.dead || Math.abs(z.x - n.x) > 40 || Math.abs(z.y - n.y) > 40) continue;
+        if (z.attackCd > 0 || Math.hypot(z.x - n.x, z.y - n.y) > ZOMBIE[z.type].radius + 16) continue;
+        // プレイヤーと同じように殴る（攻撃の間隔あり）
+        n.hp -= ZOMBIE[z.type].damage;
+        z.attackCd = ZOMBIE[z.type].attackInterval;
+        z.atk++;
+        z.angle = Math.atan2(n.y - z.y, n.x - z.x);
+      }
+      // 拠点に着いた：保護
+      if (inBase(n.x, n.y)) {
+        n.hp = -999;
+        this.survivors.push(n.role);
+        this.events.push({ k: 'banner', t: '生存者を保護した', s: `${ROLE_NAME[n.role]}が拠点に加わった — 毎朝、収納箱に${ROLE_GIFT[n.role]}を入れてくれる`, c: '#9fd0f0', snd: 'clear' });
+        for (const q of this.players) if (q.status === 'alive') this.gainXp(q, 3, 30);
+      } else if (n.hp <= 0) this.events.push({ k: 'feed', cat: 'danger', t: `${ROLE_NAME[n.role]}が感染体に襲われた…`, c: '#e07a60' });
+    }
+    this.npcs = this.npcs.filter((n) => n.hp > 0);
+  }
+
   // ======================== 手記と隠し物資 ========================
   /** これまでに読んだ手記の数（話の続き・戦績） */
   notesRead = 0;
@@ -4058,6 +4198,18 @@ export class HostSimulation {
       addItem(c, 'can', this.base.garden >= 2 ? 4 : 2);
       addItem(c, 'herbs', this.base.garden >= 2 ? 2 : 1);
       if (this.base.garden >= 2) addItem(c, 'mre', 1);
+    }
+    // 拠点の生存者：毎朝それぞれの役割で物を作ってくれる
+    for (const r of this.survivors) {
+      if (r === 'cook') addItem(c, 'can', 2);
+      else if (r === 'gunsmith') addItem(c, Math.random() < 0.5 ? 'ammo9' : 'ammo762', 15);
+      else if (r === 'nurse') {
+        addItem(c, 'bandage', 2);
+        if (Math.random() < 0.35) addItem(c, 'medkit', 1);
+      } else if (r === 'scav') {
+        addItem(c, 'scrap', 4);
+        addItem(c, 'cloth', 2);
+      }
     }
     // 大群の夜を越えた褒美
     if (this.hordeReward) {

@@ -322,6 +322,10 @@ export interface ViewState {
   rescue?: RescueSnap;
   /** 冬（雪・足跡） */
   winter?: boolean;
+  /** 救出を待つ生存者（ついてくる人） */
+  npcs?: { id: number; x: number; y: number; a: number; hp: number; role: string; follow: number }[];
+  /** 拠点にいる生存者の役割 */
+  survivors?: string[];
   /** 酸だまり（地面）と、飛んでいる酸 */
   acid?: { x: number; y: number; r: number; t: number }[];
   spits?: { sx: number; sy: number; tx: number; ty: number; p: number }[];
@@ -332,7 +336,7 @@ export interface ViewState {
 /** 異変：墜落したヘリ・感染体の巣・封鎖された武器庫。見張りを倒して箱を開けると制圧 */
 export interface SiteSnap {
   id: number;
-  kind: 'heli' | 'nest' | 'armory' | 'tower' | 'stash';
+  kind: 'heli' | 'nest' | 'armory' | 'tower' | 'stash' | 'survivor' | 'convoy';
   name: string;
   tx: number;
   ty: number;

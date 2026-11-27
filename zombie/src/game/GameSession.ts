@@ -590,6 +590,8 @@ export class GameSession {
       jobs: L.jobs,
       sites: L.sites,
       rescue: L.rescue,
+      npcs: L.npcs,
+      survivors: L.survivors,
       winter: L.winter,
       acid: L.acid,
       spits: L.spits,
@@ -1228,6 +1230,9 @@ export class GameSession {
   private interactHint(me: PlayerSnap): string | null {
     if (me.searchId) return null;
     // 車：乗っている間は降りる案内。近くにあれば、位置と状態で何ができるか
+    // 生存者：声をかけるとついてくる（もう一度で待たせる）
+    const npc = (this.prevView?.npcs ?? []).find((n) => Math.hypot(n.x - me.x, n.y - me.y) < 60);
+    if (npc && me.veh === undefined) return npc.follow === me.id ? '[F] ここで待たせる' : '[F] 生存者に声をかける（ついてくる。拠点まで連れて帰ると、毎朝物資を作ってくれる）';
     if (me.veh !== undefined) return me.seat === 0 ? '[F] 降りる ・ 移動キーの方向へ走る（後ろへ倒すと U ターン・ぶつかると自動で切り返し）' : '[F] 降りる ・ 窓から撃てる';
     let nv: VehicleSnap | null = null;
     let nd = 62;

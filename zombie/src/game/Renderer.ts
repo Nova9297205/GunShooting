@@ -140,6 +140,7 @@ export function formatClock(m: number): string {
 
 /** 精鋭の特性の名前 */
 const TRAIT_NAME = { dash: '突進', regen: '再生', split: '分裂', armor: '重装' } as const;
+const NPC_ROLE: Record<string, string> = { cook: '料理人', gunsmith: '銃職人', nurse: '看護師', scav: '回収屋' };
 
 export class Renderer {
   art: ArtSet = new VectorArt();
@@ -733,6 +734,24 @@ export class Renderer {
     for (const v of view.vehicles ?? []) if (v.x > vx0 - 60 && v.y > vy0 - 60 && v.x < vx1 + 60 && v.y < vy1 + 60) this.drawVehicle(v, view);
     for (const p of view.players) if (p.veh === undefined) this.drawPlayerMarker(p, p.id === o.localId);
     for (const p of view.players) if (p.veh === undefined) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
+    // 生存者（救出を待つ・ついてくる人）
+    for (const n of view.npcs ?? []) {
+      const fake = { id: 1000 + n.id, x: n.x, y: n.y, bodyAngle: n.a, aim: n.a, status: 'alive', tool: 0, hp: n.hp, maxHp: 100, bag: [], prim: null, sec: null } as unknown as PlayerSnap;
+      this.art.drawPlayer(ctx, fake, '#cfc2a0', this.getPAnim(1000 + n.id), this.time);
+      ctx.font = `bold 10px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      const t = n.follow >= 0 ? `生存者（${NPC_ROLE[n.role] ?? ''}・同行中）` : `生存者（${NPC_ROLE[n.role] ?? ''}）[F]`;
+      ctx.strokeText(t, n.x, n.y - 30);
+      ctx.fillStyle = '#9fd0f0';
+      ctx.fillText(t, n.x, n.y - 30);
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(n.x - 15, n.y + 22, 30, 4);
+      ctx.fillStyle = n.hp > 40 ? '#7fd07f' : '#e07a60';
+      ctx.fillRect(n.x - 15, n.y + 22, 30 * Math.max(0, n.hp) / 100, 4);
+    }
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
     if (o.build) this.drawBuildGhost(o.build, visible);
@@ -3963,7 +3982,7 @@ export class Renderer {
     for (const st of view.sites ?? []) {
       if (st.done) continue;
       const tw = st.kind === 'tower';
-      put({ text: `◆ ${st.kind === 'stash' ? '隠し物資' : tw ? `救助無線の部品（${st.name}）` : st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: tw ? 'rgba(240,192,64,0.94)' : st.kind === 'stash' ? 'rgba(127,216,208,0.92)' : 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
+      put({ text: `◆ ${st.kind === 'survivor' ? '生存者' : st.kind === 'convoy' ? '物資の車列（18:00 まで）' : st.kind === 'stash' ? '隠し物資' : tw ? `救助無線の部品（${st.name}）` : st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: tw ? 'rgba(240,192,64,0.94)' : st.kind === 'stash' ? 'rgba(127,216,208,0.92)' : 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
     }
     // 依頼の目的地の名前
     (view.jobs ?? []).forEach((j, i) => {
