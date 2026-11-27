@@ -71,6 +71,9 @@ const DEBRIS_COLOR: Partial<Record<ObjKind, string>> = {
   tree: '#8a5a32',
   woodWall: '#a8743f',
   spike: '#a8743f',
+  raintank: '#4f7ea0',
+  stove: '#888175',
+  torch: '#7a5a32',
   car: '#8d97a8',
   ironWall: '#9aa6b8',
   stone: '#8b8f96',
@@ -364,6 +367,22 @@ export class Effects {
         const c = DEBRIS_COLOR[ev.kind] ?? '#999';
         this.burst(ev.x, ev.y, c, 7, 220, 0.5, 4, 'chunk', false);
         if (ev.kind === 'car') this.burst(ev.x, ev.y, '#ffe9a8', 5, 260, 0.2, 2);
+        break;
+      }
+      case 'crash':
+        this.burst(ev.x, ev.y, '#ffd080', Math.round(4 + ev.hard * 14), 260, 0.35, 3, 'spark', true);
+        this.burst(ev.x, ev.y, '#8d97a8', Math.round(3 + ev.hard * 8), 180, 0.6, 4, 'chunk', false);
+        this.shakeAt(ev.x, ev.y, 0.08 + ev.hard * 0.4);
+        break;
+      case 'job':
+        this.notice = { text: ev.lvUp ? `依頼達成！ 無線の信頼度 Lv${ev.lvUp}` : '依頼達成！', sub: ev.t, color: '#8ac0e0' };
+        break;
+      case 'built': {
+        // 建てた・直した：木くず・土ぼこりと、置いた場所に光る枠
+        const c = DEBRIS_COLOR[ev.kind] ?? '#b0a080';
+        this.burst(ev.x, ev.y, c, ev.repair ? 6 : 12, 120, 0.5, 3, 'chunk', false);
+        this.burst(ev.x, ev.y + 8, '#8a7a60', 8, 60, 0.9, 8, 'smoke', false, -Math.PI / 2, 1.2);
+        this.ring(ev.x, ev.y, ev.repair ? '#93b77c' : '#e0c080', 46, 0.35);
         break;
       }
       case 'smash': {

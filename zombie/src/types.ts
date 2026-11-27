@@ -1,7 +1,7 @@
 // ============================================================
 // 共通型定義（プレイヤー・ゾンビ・弾・オブジェクト・通信パケット）
 // ============================================================
-import type { Slot } from './game/items';
+import type { ItemId, Slot } from './game/items';
 import type { Facility, Profile } from './game/progression';
 
 export type { Slot, WeaponId } from './game/items';
@@ -41,6 +41,11 @@ export type ObjKind =
   | 'stash'
   | 'bag'
   | 'drop'
+  // 拠点の無線機（依頼の報告）
+  | 'radio'
+  // 拠点に建てる物
+  | 'raintank'
+  | 'stove'
   // 以下は旧バージョンの建築物（描画コードの互換用）
   | 'stone'
   | 'woodWall'
@@ -104,6 +109,10 @@ export interface MoveBody {
   stmMax?: number;
   /** スタミナ回復倍率（持久力スキル・興奮剤） */
   stmRegen?: number;
+  /** 歩く速さの倍率（骨折・疲労） */
+  spdMul?: number;
+  /** ダッシュできない（骨折） */
+  noDash?: boolean;
 }
 
 export interface PlayerSnap extends MoveBody {
@@ -113,6 +122,14 @@ export interface PlayerSnap extends MoveBody {
   away?: boolean;
   /** 拠点のベッドで眠っている */
   sleeping?: boolean;
+  /** 体調：疲労 0..100（眠ると 0）・冷え 0..100・出血・骨折（1 = 未処置、2 = 添え木で治りかけ） */
+  fatigue?: number;
+  cold?: number;
+  bleed?: boolean;
+  frac?: number;
+  /** 乗っている車の ID と座席（0 = 運転席） */
+  veh?: number;
+  seat?: number;
   /** 休息済み（眠った・焚き火で食事した）の残り秒数 */
   rested?: number;
   aim: number;
@@ -206,6 +223,12 @@ export type GameEvent =
   | { k: 'chop'; x: number; y: number; kind: ObjKind }
   | { k: 'build'; x: number; y: number; kind: ObjKind }
   | { k: 'smash'; x: number; y: number; kind: ObjKind }
+  /** 車：ゾンビを轢いた・ぶつかった */
+  | { k: 'crash'; x: number; y: number; hard: number }
+  /** 依頼を達成した */
+  | { k: 'job'; t: string; lvUp?: number }
+  /** 拠点に建てた・修理した */
+  | { k: 'built'; x: number; y: number; kind: ObjKind; id: number; repair?: boolean }
   | { k: 'break'; x: number; y: number; kind: ObjKind }
   | { k: 'pop'; x: number; y: number; t: string; c: string; id: number; s?: SoundKey }
   | { k: 'banner'; t: string; s: string; c: string; snd?: SoundKey }
@@ -253,6 +276,60 @@ export interface ViewState {
   base: Record<Facility, number>;
   /** 補給物資の投下地点（なければ null） */
   drop: { x: number; y: number } | null;
+  /** 無線の依頼（その日の分） */
+  jobs?: Job[];
+  /** 車両 */
+  vehicles?: VehicleSnap[];
+  /** 無線の信頼度：達成した依頼の数とレベル */
+  radio?: { done: number; lv: number };
+}
+
+/** 車両 */
+export interface VehicleSnap {
+  id: number;
+  kind: 'sedan' | 'pickup';
+  x: number;
+  y: number;
+  /** 向き（rad） */
+  a: number;
+  /** 速さ（px/秒、マイナスはバック） */
+  spd: number;
+  /** 燃料 0..100 */
+  fuel: number;
+  hp: number;
+  maxHp: number;
+  /** 壊れていて動かない（素材で直す） */
+  broken: boolean;
+  /** 座席ごとのプレイヤー ID（-1 = 空席）。0 番が運転席 */
+  seats: number[];
+  /** ホストだけが使う：切り返しの残り時間・ふさがっている時間 */
+  revT?: number;
+  blockT?: number;
+}
+
+/** 無線の依頼 */
+export interface Job {
+  id: number;
+  kind: 'fetch' | 'scout' | 'cache';
+  title: string;
+  desc: string;
+  /** 目的の施設（world.locations の番号） */
+  loc: number;
+  tx: number;
+  ty: number;
+  /** 回収する品と数（fetch） */
+  item?: ItemId;
+  need?: number;
+  /** 持っている数（全員の合計・表示用） */
+  have?: number;
+  /** 危険度 1〜4 */
+  tier: number;
+  /** 拠点からの距離（m） */
+  dist: number;
+  day: number;
+  /** 目的の物資箱のオブジェクトID */
+  crate?: number;
+  done?: boolean;
 }
 
 export interface StorageState {

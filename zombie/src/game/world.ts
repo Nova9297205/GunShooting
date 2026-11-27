@@ -1156,6 +1156,8 @@ export function generateWorld(seed: number): GeneratedWorld {
     landmarks.push({ x: hot.x + hot.w / 2, y: hot.y + hot.h / 2, kind: 'smoke', name: '汚染地帯の煙' });
   }
   void CHUNK;
+  // 拠点の無線機（依頼の報告）。既存のセーブと番号がずれないよう、最後に置く
+  addObj('radio', SAFEHOUSE.x + 2 + 4, SAFEHOUSE.y + 2 + 1, 1);
 
   return { terrain, objs, locations, buildings, landmarks, districts, features, vec };
 }

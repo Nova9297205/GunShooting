@@ -7,8 +7,12 @@
 // ============================================================
 import { isTouchDevice, TouchControls } from '../ui/TouchControls';
 import { clearSave, writeSave } from './save';
+import { buildDef, buildSpotError, canAfford } from './build';
+import { seatPos, trunkPos, VEHICLE } from './vehicles';
+import { gamepad, PAD, type PadReader, padPrefs, padSettings, padText } from '../ui/Gamepad';
 import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
+  VehicleSnap,
   BulletSnap,
   GameEvent,
   GameMode,
@@ -26,9 +30,9 @@ import { Tool } from '../types';
 import { audio } from './Audio';
 import { CraftMenu } from '../ui/CraftMenu';
 import { InventoryPanel } from '../ui/InventoryPanel';
-import { AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
+import { BUILD_KINDS, BUILDS, type BuildKind, PLAYER_COLORS, AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
 import { CONTAINER_KINDS, GIVE_RANGE, inBase, STORAGE_KINDS } from './Engine';
-import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon } from './items';
+import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS } from './items';
 import { loadProfile, saveProfile } from './progression';
 import { Effects } from './Effects';
 import type { HostSimulation } from './Engine';
@@ -48,6 +52,12 @@ export interface SessionOptions {
   net?: NetworkManager;
   roomCode?: string;
   onGameOver: (r: GameResult) => void;
+  /** ローカル協力（画面分割）：このプレイヤーの表示枠 */
+  root?: HTMLElement;
+  /** ローカル協力：使う機器（'kbm' = キーボード＋マウス、それ以外はコントローラーの "<番号>|<id>"） */
+  device?: string;
+  /** ローカル協力の 2 人目以降（シミュレーションは 1 人目が進める） */
+  secondary?: boolean;
 }
 
 interface BufferedSnap {
@@ -82,6 +92,8 @@ export class GameSession {
   // guest
   private snaps: BufferedSnap[] = [];
   private latest: Snapshot | null = null;
+  /** 直前のフレームの表示状態（ホストでもゲストでも使える） */
+  private prevView: ViewState | null = null;
   private timeOffset: number | null = null;
   private pred: MoveBody | null = null;
   private pendingInputs: InputFrame[] = [];
@@ -96,6 +108,22 @@ export class GameSession {
   private pendingCraft = '';
   private invPanel: InventoryPanel;
   private ops: string[] = [];
+  /** 建設モード：選んでいる建築物（null = 建設モードでない） */
+  private buildKind: BuildKind | null = null;
+  private lastBuild: BuildKind = 'woodWall';
+  private buildGhost: { tx: number; ty: number; err: string | null } | null = null;
+  private touchFirePrev = false;
+  // ---- コントローラー ----
+  private padSettings = padSettings();
+  /** このプレイヤーが使うコントローラー（null = 使わない） */
+  private pad: PadReader | null;
+  /** ローカル協力：同じ画面の 2 人目以降のセッション（1 人目が持つ） */
+  locals: GameSession[] = [];
+  private padBtn = document.getElementById('btn-pad');
+  private padAim = { x: 180, y: 0 };
+  private padMove = false;
+  private padFire = false;
+  private padRevive = false;
   /** 入れ物・倉庫を開いたことで自動的にパネルを開いたか */
   private autoOpened = false;
   private lastViewing = 0;
@@ -131,17 +159,45 @@ export class GameSession {
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
       for (const id of o.info.removed ?? []) this.world.removeObj(id);
     }
-    this.renderer = new Renderer(o.canvas, this.world);
+    this.renderer = new Renderer(o.canvas, this.world, o.root ?? null);
     this.input = new InputController(o.canvas);
-    if (isTouchDevice()) this.touch = new TouchControls(this.input);
+    if (isTouchDevice() && !o.root) this.touch = new TouchControls(this.input);
+    // コントローラー：ふだんは設定で選んだ 1 台。ローカル協力では割り当てた 1 台（キーボードの人は無し）
+    if (o.device === undefined) this.pad = gamepad;
+    else if (o.device === 'kbm') this.pad = null;
+    else this.pad = gamepad.forPad(o.device, PLAYER_COLORS[o.localId] ?? '#e0a33a', `P${o.localId + 1}`);
+    if (this.pad && o.root) {
+      const root = o.root;
+      this.pad.area = () => root.getBoundingClientRect();
+      this.pad.onBack = () => {
+        this.craftMenu.toggle(false);
+        this.invPanel.toggle(false);
+        this.mapOpen = false;
+      };
+      this.pad.centerCursor();
+      this.pad.scope = () => root.querySelector<HTMLElement>('.modal:not(.hidden)');
+    }
+    if (o.secondary) {
+      this.perf.destroy();
+      this.renderer.hooks = { shot: () => {}, swing: () => {}, reload: () => {} };
+    }
+    // 画面分割では、持ち物・作業台のパネルも自分の枠の中に
+    const panelOf = (id: string): HTMLElement => {
+      const tpl = document.getElementById(id)!;
+      if (!o.root) return tpl;
+      const el = tpl.cloneNode(true) as HTMLElement;
+      el.classList.add('hidden');
+      o.root.appendChild(el);
+      return el;
+    };
     // 効果音：射撃・斧・リロードは描画側のカウンタ検出から鳴らす
-    this.renderer.hooks = {
+    if (!o.secondary) this.renderer.hooks = {
       shot: (p, w) => audio.shot(p.x, p.y, p.id === o.localId, w),
       swing: (p) => audio.swing(p.x, p.y, p.id === o.localId),
       reload: (p) => audio.reload(p.x, p.y, p.id === o.localId),
     };
     this.craftMenu = new CraftMenu(
-      document.getElementById('craft-panel')!,
+      panelOf('craft-panel'),
       (id) => {
         this.pendingCraft = id;
         audio.click();
@@ -155,9 +211,15 @@ export class GameSession {
         this.ops.push(`upg:${fac}`);
         audio.click();
       },
+      (kind) => {
+        this.craftMenu.toggle(false);
+        this.buildKind = kind;
+        this.lastBuild = kind;
+        audio.click();
+      },
     );
     this.invPanel = new InventoryPanel(
-      document.getElementById('inv-panel')!,
+      panelOf('inv-panel'),
       (op) => {
         this.ops.push(op);
         audio.click();
@@ -178,13 +240,18 @@ export class GameSession {
 
   start(): void {
     this.running = true;
-    this.input.attach();
+    // キーボード・マウスは、ローカル協力ではキーボード担当の人だけ
+    if (this.o.device === undefined || this.o.device === 'kbm') this.input.attach();
     this.touch?.show(true);
     window.addEventListener('resize', this.onResize);
     this.lastFrame = performance.now();
     this.lastPump = performance.now();
-    if (this.sim) this.pumpTimer = window.setInterval(this.pump, 8);
+    if (this.sim && !this.o.secondary) this.pumpTimer = window.setInterval(this.pump, 8);
     this.rafId = requestAnimationFrame(this.frame);
+    if (this.o.root) gamepad.suspended = true;
+    if (this.o.secondary) return;
+    // 画面分割では、右下のボタンを 1P の枠の中へ
+    if (this.o.root) this.o.root.appendChild(this.hudButtons);
     this.hudButtons.classList.remove('hidden');
     document.getElementById('btn-craft')!.onclick = () => this.craftMenu.toggle();
     document.getElementById('btn-inv')!.onclick = () => this.invPanel.toggle();
@@ -192,6 +259,7 @@ export class GameSession {
       this.mapOpen = !this.mapOpen;
       audio.click();
     };
+    if (this.padBtn) this.padBtn.onclick = () => this.padSettings.toggle();
     this.muteBtn.onclick = () => {
       audio.toggleMute();
       audio.click();
@@ -199,6 +267,27 @@ export class GameSession {
   }
 
   stop(): void {
+    for (const l of this.locals) l.stop();
+    this.locals = [];
+    if (this.pad && this.pad !== gamepad) gamepad.drop(this.pad);
+    if (this.o.secondary) {
+      this.running = false;
+      cancelAnimationFrame(this.rafId);
+      this.renderer.destroy();
+      this.craftMenu.destroy();
+      this.invPanel.destroy();
+      this.input.detach();
+      window.removeEventListener('resize', this.onResize);
+      this.o.root?.remove();
+      return;
+    }
+    if (this.o.root) {
+      gamepad.suspended = false;
+      document.body.appendChild(this.hudButtons);
+      this.o.root.remove();
+    }
+    gamepad.gameplay = false;
+    this.padSettings.toggle(false);
     // 抜けるときに保存（全滅で終わったときは保存しない）
     if (this.sim && !this.sim.gameOver) writeSave(this.sim.toSave());
     this.renderer.destroy();
@@ -219,6 +308,14 @@ export class GameSession {
   private onEvent(ev: GameEvent): void {
     this.effects.handleEvent(ev, this.o.localId);
     audio.handleEvent(ev, this.o.localId);
+    // ローカル協力：同じ画面のほかの人の演出にも渡す（音は 1 回だけ）
+    for (const l of this.locals) l.localEvent(ev);
+  }
+
+  /** ローカル協力の 2 人目以降：演出と、自分のコントローラーの振動 */
+  localEvent(ev: GameEvent): void {
+    this.effects.handleEvent(ev, this.o.localId);
+    if (ev.k === 'phit' && ev.id === this.o.localId) this.pad?.rumble(0.6, 0.4, 160);
   }
 
   // ---------------- ネットワークからの呼び出し ----------------
@@ -338,9 +435,13 @@ export class GameSession {
       staminaDelay: me.staminaDelay,
       stmMax: me.stmMax,
       stmRegen: me.stmRegen,
+      spdMul: me.spdMul,
+      noDash: me.noDash,
     };
-    for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
-    if (before) {
+    // 車に乗っている間は歩きの予測をしない（位置はホストの車に従う）
+    if (!me.veh) for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
+    else this.predErr = { x: 0, y: 0 };
+    if (before && !me.veh) {
       this.predErr.x += before.x - pred.x;
       this.predErr.y += before.y - pred.y;
       if (Math.hypot(this.predErr.x, this.predErr.y) > 120) this.predErr = { x: 0, y: 0 };
@@ -391,6 +492,12 @@ export class GameSession {
       };
     });
 
+    const aV = new Map((a.vehicles ?? []).map((v) => [v.id, v]));
+    const vehicles = (b.vehicles ?? []).map((vb) => {
+      const va = aV.get(vb.id);
+      if (!va) return vb;
+      return { ...vb, x: lerp(va.x, vb.x, t), y: lerp(va.y, vb.y, t), a: angleLerp(va.a, vb.a, t) };
+    });
     const aZ = new Map(a.zombies.map((z) => [z.id, z]));
     const zombies = b.zombies.map((zb) => {
       const za = aZ.get(zb.id);
@@ -411,10 +518,13 @@ export class GameSession {
     const meLatest = this.latest.players.find((p) => p.id === this.o.localId);
     const idx = players.findIndex((p) => p.id === this.o.localId);
     if (meLatest && this.pred) {
+      // 車の中：補間した車の座席の位置（ほかの人の見え方とそろえる）
+      const myVeh = meLatest.veh !== undefined ? vehicles.find((v) => v.id === meLatest.veh) : undefined;
+      const seat = myVeh ? seatPos(myVeh, meLatest.seat ?? 0) : null;
       const me: PlayerSnap = {
         ...meLatest,
-        x: this.pred.x + this.predErr.x,
-        y: this.pred.y + this.predErr.y,
+        x: seat ? seat.x : this.pred.x + this.predErr.x,
+        y: seat ? seat.y : this.pred.y + this.predErr.y,
         bodyAngle: this.pred.bodyAngle,
         dashTime: this.pred.dashTime,
         dashCd: this.pred.dashCd,
@@ -444,6 +554,9 @@ export class GameSession {
       wx: L.wx,
       base: L.base,
       drop: L.drop,
+      jobs: L.jobs,
+      vehicles,
+      radio: L.radio,
       cont: L.cont,
       storage: this.storage ?? undefined,
       players,
@@ -517,13 +630,43 @@ export class GameSession {
     }
 
     // ---- 入力 ----
+    this.applyGamepad(myPos, myStatus);
     const prevTool = this.localTool;
-    this.handleToolKeys();
+    // V：建設モード（建てる物は 1〜6・ホイールで選ぶ）
+    if (this.input.consume('KeyV')) {
+      this.buildKind = this.buildKind ? null : this.lastBuild;
+      if (this.buildKind) {
+        this.craftMenu.toggle(false);
+        this.invPanel.toggle(false);
+      }
+      audio.click();
+    }
+    if (this.buildKind) {
+      for (let i = 0; i < BUILDS.length; i++)
+        if (this.input.consume(`Digit${i + 1}`)) {
+          this.buildKind = BUILDS[i].kind;
+          audio.click();
+        }
+      const wheel = this.input.consumeWheel();
+      if (wheel) {
+        const i = BUILDS.findIndex((b) => b.kind === this.buildKind);
+        this.buildKind = BUILDS[(i + (wheel > 0 ? 1 : -1) + BUILDS.length) % BUILDS.length].kind;
+        audio.click();
+      }
+      this.lastBuild = this.buildKind;
+      if (myStatus !== 'alive') this.buildKind = null;
+    } else this.handleToolKeys();
     if (this.localTool !== prevTool) audio.click();
     if (this.input.consume('KeyM')) audio.toggleMute();
+    // F2：写真モード（HUD を消す。ストア用・スクリーンショット用）
+    if (this.input.consume('F2')) {
+      this.renderer.photo = !this.renderer.photo;
+      this.hudButtons.style.visibility = this.renderer.photo ? 'hidden' : '';
+    }
     this.muteBtn.textContent = audio.settings.muted ? '🔇' : '🔊';
     // Esc を先に処理する（重くて Esc と Tab/C が同じフレームに入っても、後から押したほうが効く）
     if (this.input.consume('Escape')) {
+      this.buildKind = null;
       this.craftMenu.toggle(false);
       this.invPanel.toggle(false);
       this.mapOpen = false;
@@ -550,6 +693,9 @@ export class GameSession {
     } else if (interact && myPos && this.nearestUsable(myPos) === 'bench') {
       this.craftMenu.toggle(true);
       interact = false;
+    } else if (interact && myPos && this.nearestUsable(myPos) === 'stove') {
+      this.craftMenu.openTab('craft');
+      interact = false;
     }
     // T：弾種（通常弾 ⇄ 徹甲弾/スラッグ）の切り替え
     if (this.input.consume('KeyT') && (this.localTool === Tool.Primary || this.localTool === Tool.Secondary)) {
@@ -560,13 +706,44 @@ export class GameSession {
     const mw = this.renderer.screenToWorld(this.input.mouseX, this.input.mouseY);
     const aim = myPos ? Math.atan2(mw.y - myPos.y, mw.x - myPos.x) : this.localAim;
     this.localAim = aim;
+    // 建設モード：置く場所（マウスのマス。タッチは向いている方向の2マス先）と、置けるかどうか
+    let fireNow = this.input.consumeFire();
+    const clickNow = this.input.consumeClick();
+    const altNow = this.input.consumeAltClick() || this.input.consume('KeyX');
+    const touchEdge = this.input.touchFire && !this.touchFirePrev;
+    this.touchFirePrev = this.input.touchFire;
+    const pv = this.prevView;
+    if (this.buildKind && myPos && pv) {
+      const gx = this.touch ? myPos.x + Math.cos(aim) * TILE * 2.2 : mw.x;
+      const gy = this.touch ? myPos.y + Math.sin(aim) * TILE * 2.2 : mw.y;
+      const tx = Math.floor(gx / TILE);
+      const ty = Math.floor(gy / TILE);
+      const occ = [...pv.players.filter((p) => p.status !== 'dead' && !p.away), ...pv.zombies];
+      let err = buildSpotError(this.world, this.buildKind, tx, ty, myPos.x, myPos.y, occ);
+      const me = pv.players.find((p) => p.id === localId);
+      const def = buildDef(this.buildKind)!;
+      if (!err && (def.lv ?? 1) > (pv.base.bench ?? 1)) err = `作業台 Lv${def.lv} が必要`;
+      if (!err && me) {
+        const short = canAfford(def, me.bag, (pv.storage ?? this.storage)?.shared ?? null);
+        if (short) err = `素材が足りない（${ITEMS[short].name}）`;
+      }
+      this.buildGhost = { tx, ty, err };
+      if (clickNow || touchEdge) {
+        this.ops.push(`build:${this.buildKind}:${tx}:${ty}`);
+      }
+      if (altNow) {
+        const ob = this.world.objAt(tx, ty);
+        if (ob && BUILD_KINDS.has(ob.kind)) this.ops.push(`unbuild:${ob.id}`);
+      }
+      fireNow = false;
+    } else this.buildGhost = null;
     const frame: InputFrame = {
       seq: ++this.seq,
       dt,
       mx: mv.x,
       my: mv.y,
       aim,
-      fire: this.input.consumeFire(),
+      fire: fireNow,
       revive: this.input.isDown('KeyE'),
       dash: this.input.consumeDash(),
       interact,
@@ -586,10 +763,11 @@ export class GameSession {
     const tSim = performance.now();
     if (this.sim) {
       this.sim.queueInput(localId, frame);
-      this.pump();
+      if (!this.o.secondary) this.pump();
       view = this.sim.view();
     } else {
-      if (this.pred && this.latest && myStatus !== 'dead') {
+      const inVeh = this.latest?.players.find((p) => p.id === localId)?.veh !== undefined;
+      if (this.pred && this.latest && myStatus !== 'dead' && !inVeh) {
         stepMovement(this.pred, frame, dt, myStatus, this.world);
         this.pendingInputs.push(frame);
         if (this.pendingInputs.length > 240) this.pendingInputs.shift();
@@ -612,7 +790,7 @@ export class GameSession {
     const me = view.players.find((p) => p.id === localId);
     if (me) {
       this.syncPanels(me, view);
-      this.craftMenu.update(me.bag, me.prim, me.sec, this.nearBench(me), view.base, view.storage ?? this.storage);
+      this.craftMenu.update(me.bag, me.prim, me.sec, this.nearBench(me), view.base, view.storage ?? this.storage, this.nearKind(me, 'stove'));
       this.saveProgress(me, view.day);
     }
     // 弾切れのカチッという音
@@ -624,9 +802,11 @@ export class GameSession {
       view.players.some((p) => p.id !== localId && p.status === 'down' && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange);
 
     // 地図を開いている間は右下のボタンを隠す（地図の枠に重ならないように）
-    this.hudButtons.style.visibility = this.mapOpen ? 'hidden' : '';
+    this.hudButtons.style.visibility = this.mapOpen || this.renderer.photo ? 'hidden' : '';
     // パネル・地図を開いている間は、タッチのスティックを止めてパネルを触れるようにする
     this.touch?.show(!this.mapOpen && !this.craftMenu.open && !this.invPanel.open);
+    if (this.o.root) this.fitPanels();
+    this.padifyPanels();
     this.renderer.render(view, {
       localId,
       mode: this.o.mode,
@@ -640,10 +820,15 @@ export class GameSession {
       mapOpen: this.mapOpen,
       panelOpen: this.craftMenu.open || this.invPanel.open,
       reviveHint,
-      interactHint: me && me.status === 'alive' ? (this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
+      interactHint: me && me.status === 'alive' && !this.buildKind ? this.touchWords(this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
+      build: this.buildKind && this.buildGhost ? { kind: this.buildKind, ...this.buildGhost } : null,
+      touch: !!this.touch,
+      pad: !!this.pad?.active && this.pad.usedT > this.input.mouseT,
+      glyphs: this.pad?.active ? this.pad.glyphs() : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
       muted: audio.settings.muted,
     });
+    this.prevView = view;
     const pt = this.renderer.perfT;
     this.perf.add('world', pt.world);
     this.perf.add('light', pt.light);
@@ -653,7 +838,7 @@ export class GameSession {
     // 聞き手の位置＝カメラ中心。BGMの曲調と環境音を更新
     audio.listener.x = this.renderer.cam.x;
     audio.listener.y = this.renderer.cam.y;
-    audio.update(dt, view, this.campfires);
+    if (!this.o.secondary) audio.update(dt, view, this.campfires);
   }
 
   /** パフォーマンス表示に出す数値 */
@@ -759,7 +944,7 @@ export class GameSession {
     const ob = me.viewing ? this.world.objects.get(me.viewing) : undefined;
     this.invPanel.update({
       me,
-      cont: me.viewing && view.cont[me.viewing] ? { id: me.viewing, name: CONTAINER_NAMES[ob?.kind ?? 'bag'] ?? '入れ物', slots: view.cont[me.viewing] } : null,
+      cont: me.viewing && view.cont[me.viewing] ? { id: me.viewing, name: me.viewing >= VEHICLE.trunkBase ? '車のトランク' : (CONTAINER_NAMES[ob?.kind ?? 'bag'] ?? '入れ物'), slots: view.cont[me.viewing] } : null,
       storage: view.storage ?? this.storage,
       coop: view.players.length > 1,
       allies: view.players.filter((p) => p.id !== me.id && p.status === 'alive' && Math.hypot(p.x - me.x, p.y - me.y) < GIVE_RANGE).map((p) => ({ id: p.id, name: p.name })),
@@ -787,7 +972,13 @@ export class GameSession {
       for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
         const ob = this.world.objAt(tx, ty);
         if (!ob) continue;
-        const usable = ob.kind === 'door' || STORAGE_KINDS.has(ob.kind) || (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0));
+        const usable =
+          ob.kind === 'door' ||
+          ob.kind === 'stove' ||
+          ob.kind === 'radio' ||
+          STORAGE_KINDS.has(ob.kind) ||
+          (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) ||
+          (BUILD_KINDS.has(ob.kind) && (ob.hp < ob.maxHp || (ob.kind === 'raintank' && ob.ready > 0)));
         if (!usable) continue;
         const d = Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) - (ob.kind === 'door' ? 0 : 6);
         if (d < bd) {
@@ -797,6 +988,18 @@ export class GameSession {
       }
     if (best) return best;
     return this.nearBench(pos) ? 'bench' : null;
+  }
+
+  private nearKind(pos: { x: number; y: number }, kind: string): boolean {
+    const r = Math.ceil(BENCH_RANGE / TILE) + 1;
+    const ptx = Math.floor(pos.x / TILE);
+    const pty = Math.floor(pos.y / TILE);
+    for (let ty = pty - r; ty <= pty + r; ty++)
+      for (let tx = ptx - r; tx <= ptx + r; tx++) {
+        const ob = this.world.objAt(tx, ty);
+        if (ob && ob.kind === kind && Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) < BENCH_RANGE) return true;
+      }
+    return false;
   }
 
   private nearBench(pos: { x: number; y: number }): boolean {
@@ -812,8 +1015,184 @@ export class GameSession {
     return false;
   }
 
+  /** コントローラーの入力を、キー・マウスの入力に置き換えて渡す（ゲーム中だけ。パネルでは画面のカーソル） */
+  private applyGamepad(myPos: { x: number; y: number } | null, status: PlayerSnap['status']): void {
+    const menu = this.craftMenu.open || this.invPanel.open || this.mapOpen || this.padSettings.open;
+    const pad = this.pad;
+    if (pad) pad.gameplay = !menu;
+    const g = pad?.current() ?? null;
+    const release = () => {
+      if (this.padMove) this.input.touchMove = null;
+      if (this.padFire) this.input.touchFire = false;
+      if (this.padRevive) this.input.setKey('KeyE', false);
+      this.padMove = this.padFire = this.padRevive = false;
+    };
+    if (!g || !pad || menu) {
+      release();
+      return;
+    }
+    const pr = pad.takePressed();
+    // 移動
+    if (pad.lx || pad.ly) {
+      this.input.touchMove = { x: pad.lx, y: pad.ly };
+      this.padMove = true;
+    } else if (this.padMove) {
+      this.input.touchMove = null;
+      this.padMove = false;
+    }
+    // 射撃（RT）
+    const fire = pad.rt > 0.5;
+    if (fire || this.padFire) {
+      this.input.touchFire = fire;
+      this.padFire = fire;
+    }
+    // 蘇生（LT 長押し）
+    const rev = pad.lt > 0.5;
+    if (rev !== this.padRevive) {
+      this.input.setKey('KeyE', rev);
+      this.padRevive = rev;
+    }
+    // 照準（右スティック）：自分から見た向きと距離。マウスを最後に使っていたらマウスを優先
+    const m = Math.hypot(pad.rx, pad.ry);
+    if (m > 0.15) this.padAim = { x: (pad.rx / m) * (90 + m * 230), y: (pad.ry / m) * (90 + m * 230) };
+    // エイム補助：狙っている向きの細い範囲に見えているゾンビがいれば、照準をそちらへ寄せる
+    if (myPos && padPrefs.assist > 0 && (m > 0.15 || fire) && !this.buildKind) this.padAim = this.aimAssist(myPos, this.padAim);
+    if (myPos && pad.usedT > this.input.mouseT) {
+      const s = this.renderer.worldToScreen(myPos.x, myPos.y);
+      this.input.mouseX = s.x + this.padAim.x;
+      this.input.mouseY = s.y + this.padAim.y;
+    }
+    if (status === 'dead') return;
+    const key = (b: number, code: string) => {
+      if (pr.has(b)) this.input.press(code);
+    };
+    key(PAD.A, 'KeyF');
+    if (pr.has(PAD.B)) this.input.pressDash();
+    key(PAD.X, this.buildKind ? 'KeyX' : 'KeyR');
+    if (pr.has(PAD.Y) || pr.has(PAD.RB)) this.input.wheel += 1;
+    if (pr.has(PAD.LB)) this.input.wheel -= 1;
+    key(PAD.START, 'Tab');
+    key(PAD.BACK, 'KeyB');
+    key(PAD.L3, 'KeyQ');
+    key(PAD.R3, 'KeyH');
+    key(PAD.UP, 'KeyG');
+    key(PAD.DOWN, 'KeyV');
+    key(PAD.LEFT, 'KeyC');
+    key(PAD.RIGHT, 'KeyT');
+  }
+
+  /** コントローラーで遊んでいる間は、パネルの説明文もボタン名に（戻せるよう元の文を覚えておく） */
+  private padified = false;
+  private padifyPanels(): void {
+    const on = !!this.pad?.active && this.pad.usedT > this.input.mouseT;
+    const panels = [this.o.root ? this.o.root.querySelector<HTMLElement>('#inv-panel') : document.getElementById('inv-panel'), this.o.root ? this.o.root.querySelector<HTMLElement>('#craft-panel') : document.getElementById('craft-panel')];
+    if (!on && !this.padified) return;
+    const g = on ? this.pad!.glyphs() : null;
+    for (const panel of panels) {
+      if (!panel || panel.classList.contains('hidden')) continue;
+      // 閉じ方・操作の一行は丸ごと差し替え
+      for (const el of panel.querySelectorAll<HTMLElement>('.modal-hint, .ph-sub')) {
+        if (el.dataset.orig === undefined) el.dataset.orig = el.innerHTML;
+        const want = g
+          ? el.classList.contains('ph-sub')
+            ? padText('{A} 移す／使う ・ {X} 使う・装備 ・ {Y} 捨てる ・ {LB}/{RB} タブ', g)
+            : padText('{B} で閉じる ・ 十字キーで選ぶ ・ 右スティックでカーソル ・ ゲームは止まりません', g)
+          : el.dataset.orig;
+        if (el.innerHTML !== want) el.innerHTML = want;
+      }
+      if (!g) continue;
+      // それ以外の説明文（作業台の注意書き・アイテムの説明）は語句を置き換え
+      const walker = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const v = n.nodeValue ?? '';
+        if (!/\[|クリック|移動キー/.test(v)) continue;
+        const t = padText(v, g);
+        if (t !== v) n.nodeValue = t;
+      }
+    }
+    this.padified = on;
+  }
+
+  /** 画面分割：開いているパネルが枠に収まるよう縮める */
+  private fitted = new WeakMap<HTMLElement, string>();
+  private fitPanels(): void {
+    const root = this.o.root!;
+    for (const el of root.querySelectorAll<HTMLElement>('#inv-panel, #craft-panel')) {
+      if (el.classList.contains('hidden')) {
+        this.fitted.delete(el);
+        continue;
+      }
+      const key = `${root.clientWidth}x${root.clientHeight}|${el.innerHTML.length}`;
+      if (this.fitted.get(el) === key) continue;
+      el.style.zoom = '1';
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const k = Math.min(1, (root.clientWidth - 16) / Math.max(1, w), (root.clientHeight - 16) / Math.max(1, h));
+      el.style.zoom = String(Math.max(0.45, k));
+      this.fitted.set(el, key);
+    }
+  }
+
+  /** エイム補助（強さ：弱・中・強で、寄せる範囲と量が増える）。照準の距離は変えず向きだけ寄せる */
+  private aimAssist(me: { x: number; y: number }, aim: { x: number; y: number }): { x: number; y: number } {
+    const cone = [0, 0.12, 0.2, 0.28][padPrefs.assist];
+    const pull = [0, 0.45, 0.7, 0.9][padPrefs.assist];
+    const a = Math.atan2(aim.y, aim.x);
+    let best = 0;
+    let bs = Infinity;
+    for (const z of this.prevView?.zombies ?? []) {
+      const dx = z.x - me.x;
+      const dy = z.y - me.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 720 || d < 8) continue;
+      const diff = Math.atan2(Math.sin(Math.atan2(dy, dx) - a), Math.cos(Math.atan2(dy, dx) - a));
+      // 遠いほど小さく見えるので、範囲は「角度」と「横のずれ（最大 60px）」の広いほう
+      const lim = Math.max(cone, Math.atan2(cone * 260, d));
+      if (Math.abs(diff) > lim) continue;
+      if (!this.renderer.canSee(z.x, z.y)) continue;
+      const score = Math.abs(diff) / lim + d / 2000;
+      if (score < bs) {
+        bs = score;
+        best = diff;
+      }
+    }
+    if (bs === Infinity) return aim;
+    const na = a + best * pull;
+    const len = Math.hypot(aim.x, aim.y);
+    return { x: Math.cos(na) * len, y: Math.sin(na) * len };
+  }
+
+  /** タッチ端末では、キーの名前をボタンの名前に置き換える */
+  private touchWords(h: string | null): string | null {
+    if (h && this.pad?.active && this.pad.usedT > this.input.mouseT) return padText(h, this.pad.glyphs());
+    if (!h || !this.touch) return h;
+    return h.replace(/\[F\]/g, '[調べる]').replace(/\[E\] 長押し/g, '[蘇生] 長押し').replace(/\[Q\]/g, '[食事]').replace(/\[C\]/g, '[作業台]').replace(/移動キー/g, '左スティック');
+  }
+
   private interactHint(me: PlayerSnap): string | null {
     if (me.searchId) return null;
+    // 車：乗っている間は降りる案内。近くにあれば、位置と状態で何ができるか
+    if (me.veh !== undefined) return me.seat === 0 ? '[F] 降りる ・ 移動キーの方向へ走る（後ろへ倒すと U ターン・ぶつかると自動で切り返し）' : '[F] 降りる ・ 窓から撃てる';
+    let nv: VehicleSnap | null = null;
+    let nd = 62;
+    for (const v of this.prevView?.vehicles ?? []) {
+      const tp = trunkPos(v);
+      const d = Math.min(Math.hypot(v.x - me.x, v.y - me.y), Math.hypot(tp.x - me.x, tp.y - me.y) + 6);
+      if (d < nd) {
+        nd = d;
+        nv = v;
+      }
+    }
+    if (nv) {
+      const tp = trunkPos(nv);
+      const name = nv.kind === 'pickup' ? 'ピックアップ' : 'セダン';
+      if (Math.hypot(tp.x - me.x, tp.y - me.y) < 30 && Math.abs(nv.spd) < 20) return `[F] ${name}のトランクを開ける`;
+      if (nv.broken) return `[F] ${name}を修理（鉄くず${VEHICLE.repairCost.scrap}・武器パーツ${VEHICLE.repairCost.parts}）`;
+      if (nv.fuel < 65 && countItem(me.bag, 'fuel') > 0 && !nv.seats.some((s) => s >= 0)) return `[F] 給油（ガソリン缶 → 燃料 ${Math.round(nv.fuel)}% +${VEHICLE.fuelPerCan}）`;
+      const free = nv.seats.filter((s) => s < 0).length;
+      if (!free) return `${name}：満席`;
+      return nv.seats[0] < 0 ? `[F] ${name}を運転する（燃料 ${Math.round(nv.fuel)}%・後ろに回るとトランク）` : `[F] 同乗する（あと ${free} 人）`;
+    }
     const ptx = Math.floor(me.x / TILE);
     const pty = Math.floor(me.y / TILE);
     let best: string | null = null;
@@ -827,8 +1206,14 @@ export class GameSession {
         let h: string | null = null;
         if (ob.kind === 'door') h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
         else if (STORAGE_KINDS.has(ob.kind)) h = '[F] 倉庫を開く（個人・共有）';
+        else if (ob.kind === 'radio') {
+          const ready = (this.prevView?.jobs ?? []).some((j) => !j.done && j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1));
+          h = ready ? '[F] 無線で依頼の品を報告する' : '[F] 無線：今日の依頼を確認';
+        } else if (ob.kind === 'stove') h = ob.hp < ob.maxHp * 0.6 ? '[F] 料理（かまどが傷んでいる：撤去して建て直せる）' : '[F] 調理かまど：温かい料理を作る';
+        else if (ob.kind === 'raintank') h = ob.ready > 0 ? `[F] 水を回収（${ob.ready}/6）` : ob.hp < ob.maxHp ? '[F] 修理（鉄くず1）' : '雨水タンク：雨の日と毎朝に水が貯まる（0/6）';
+        else if (BUILD_KINDS.has(ob.kind) && ob.hp < ob.maxHp) h = `[F] 修理（鉄くず1） ${Math.round((ob.hp / ob.maxHp) * 100)}%`;
         else if (ob.kind === 'bed' && inBase((tx + 0.5) * TILE, (ty + 0.5) * TILE)) {
-          const m = this.latest?.minute ?? 0;
+          const m = this.prevView?.minute ?? 0;
           h = m >= 20 * 60 || m < 5 * 60 ? (me.sleeping ? null : '[F] ベッドで眠る（全員が眠ると朝 6:00 まで進む）') : '眠れるのは夜 20:00〜05:00';
         }
         else if (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) {

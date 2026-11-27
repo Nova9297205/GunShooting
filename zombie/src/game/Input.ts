@@ -3,7 +3,7 @@
 // ============================================================
 
 /** 押した瞬間だけ拾いたいキー */
-const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'KeyG', 'Escape', 'Tab', 'KeyT', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
+const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'KeyG', 'Escape', 'Tab', 'KeyT', 'KeyV', 'KeyX', 'F2', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
 
 export class InputController {
   private keys = new Set<string>();
@@ -91,6 +91,21 @@ export class InputController {
     return true;
   }
 
+  private clickEdge = false;
+  private altEdge = false;
+  /** 左クリックの押した瞬間だけ（建設などで連打にならないように） */
+  consumeClick(): boolean {
+    const c = this.clickEdge;
+    this.clickEdge = false;
+    return c;
+  }
+  /** 右クリックの押した瞬間だけ */
+  consumeAltClick(): boolean {
+    const c = this.altEdge;
+    this.altEdge = false;
+    return c;
+  }
+
   /** 左ボタンが押されている、またはこのフレームまでにクリックがあった */
   consumeFire(): boolean {
     const f = this.mouseDown || this.clickQueued || this.touchFire;
@@ -117,7 +132,7 @@ export class InputController {
       if (EDGE_CODES.includes(e.code)) this.edges.add(e.code);
     }
     this.keys.add(e.code);
-    if (e.code === 'Space' || e.code.startsWith('Arrow') || e.code === 'Tab') e.preventDefault();
+    if (e.code === 'Space' || e.code.startsWith('Arrow') || e.code === 'Tab' || e.code === 'F2') e.preventDefault();
   };
 
   private onKeyUp = (e: KeyboardEvent) => {
@@ -130,7 +145,10 @@ export class InputController {
     this.altDown = false;
   };
 
+  /** 最後にマウスを動かした時刻（コントローラーの照準と切り替えるため） */
+  mouseT = 0;
   private onMouseMove = (e: MouseEvent) => {
+    if (e.isTrusted) this.mouseT = performance.now();
     const r = this.target.getBoundingClientRect();
     this.mouseX = e.clientX - r.left;
     this.mouseY = e.clientY - r.top;
@@ -140,8 +158,12 @@ export class InputController {
     if (e.button === 0) {
       this.mouseDown = true;
       this.clickQueued = true;
+      this.clickEdge = true;
     }
-    if (e.button === 2) this.altDown = true;
+    if (e.button === 2) {
+      this.altDown = true;
+      this.altEdge = true;
+    }
     if (e.button === 1) {
       e.preventDefault();
       this.edges.add('KeyG'); // 中クリックでもピン

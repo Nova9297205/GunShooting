@@ -50,6 +50,10 @@
               <small>ホストとして仲間を待つ</small>
             </button>
           </div>
+          <button id="btn-local" class="btn mode local-btn">
+            <b>👥 ローカル協力（画面分割）</b>
+            <small>1 台の PC で 2〜3 人。コントローラーの A で参加</small>
+          </button>
           <div class="join-row">
             <input id="input-code" class="code-input" maxlength="6" placeholder="ROOM ID" autocomplete="off" spellcheck="false" />
             <button id="btn-join" class="btn">部屋に参加</button>
@@ -58,6 +62,7 @@
 
           <div id="profile-box" class="profile-box"></div>
 
+          <button id="btn-title-pad" class="btn ghost small pad-title-btn">🎮 コントローラー設定</button>
           <div class="audio-row">
             <label><span>BGM</span><input id="vol-music" type="range" min="0" max="100" /></label>
             <label><span>効果音</span><input id="vol-sfx" type="range" min="0" max="100" /></label>
@@ -118,6 +123,7 @@
       <button id="btn-craft" class="hud-btn" title="作業台 [C]"><span>作業台</span><kbd>C</kbd></button>
       <button id="btn-inv" class="hud-btn" title="バックパック [Tab]"><span>持ち物</span><kbd>Tab</kbd></button>
       <button id="btn-map" class="hud-btn" title="地図 [B]"><span>地図</span><kbd>B</kbd></button>
+      <button id="btn-pad" class="hud-btn icon" title="コントローラー設定">🎮</button>
       <button id="btn-mute" class="hud-btn icon" title="ミュート [M]">🔊</button>
       <button id="btn-quit" class="hud-btn icon" title="保存してタイトルへ">⏏</button>
     </div>

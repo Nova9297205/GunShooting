@@ -9,6 +9,8 @@ import { GameSession } from './game/GameSession';
 import { loadRejoin, NetworkManager, sanitizeName } from './network/NetworkManager';
 import { addRecord, levelOf, loadProfile, loadRecords, type Profile, saveProfile, SKILLS } from './game/progression';
 import { TitleBackdrop } from './ui/TitleBackdrop';
+import { padSettings } from './ui/Gamepad';
+import { type LocalPlayerCfg, LocalSetup } from './ui/LocalSetup';
 import { clearSave, describeSave, loadSave } from './game/save';
 import type { SaveData } from './game/Engine';
 import type { GameMode, ObjKind, GameResult, LobbyPlayer, StartInfo } from './types';
@@ -180,7 +182,73 @@ function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[], save: SaveData 
 function endSession(): void {
   session?.stop();
   session = null;
+  canvas.style.display = '';
 }
+
+// ---------------- ローカル協力（画面分割） ----------------
+
+/** 人数ごとの枠：2 人＝左右、3 人＝左／右上／右下 */
+function splitRects(n: number): Partial<CSSStyleDeclaration>[] {
+  if (n <= 2) return [{ left: '0', top: '0', width: '50%', height: '100%' }, { left: '50%', top: '0', width: '50%', height: '100%' }];
+  return [
+    { left: '0', top: '0', width: '50%', height: '100%' },
+    { left: '50%', top: '0', width: '50%', height: '50%' },
+    { left: '50%', top: '50%', width: '50%', height: '50%' },
+  ];
+}
+
+function startLocal(cfg: LocalPlayerCfg[], save: SaveData | null): void {
+  endSession();
+  net?.destroy();
+  net = null;
+  mode = 'solo';
+  show(null);
+  const players: LobbyPlayer[] = cfg.map((c, i) => ({ id: i, name: sanitizeName(c.name, i), prof: i === 0 ? loadProfile() : undefined }));
+  const sim = save ? HostSimulation.fromSave(players, save) : new HostSimulation(players, (Math.random() * 0x7fffffff) | 0);
+  const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, objs: sim.initialObjs() };
+  if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio });
+  canvas.style.display = 'none';
+  const rects = splitRects(cfg.length);
+  const views = cfg.map((_, i) => {
+    const root = document.createElement('div');
+    root.className = `vp vp-${i}`;
+    Object.assign(root.style, rects[i]);
+    const c = document.createElement('canvas');
+    c.id = 'game';
+    root.appendChild(c);
+    document.body.appendChild(root);
+    return { root, c };
+  });
+  const primary = new GameSession({
+    mode: 'solo',
+    canvas: views[0].c,
+    localId: 0,
+    info,
+    sim,
+    root: views[0].root,
+    device: cfg[0].device,
+    onGameOver: (r) => {
+      endSession();
+      showResult(r);
+    },
+  });
+  primary.locals = cfg.slice(1).map(
+    (c, k) =>
+      new GameSession({ mode: 'solo', canvas: views[k + 1].c, localId: k + 1, info, sim, root: views[k + 1].root, device: c.device, secondary: true, onGameOver: () => {} }),
+  );
+  session = primary;
+  primary.start();
+  for (const l of primary.locals) l.start();
+  if (import.meta.env.DEV) Object.assign(window, { __session: primary, __locals: primary.locals });
+}
+
+const localSetup = new LocalSetup();
+$('btn-local').addEventListener('click', () => {
+  localSetup.show(sanitizeName(playerName(), 0), !!loadSave(), (cfg, cont) => {
+    if (!cont && !confirmOverwrite()) return;
+    startLocal(cfg, cont ? loadSave() : null);
+  });
+});
 
 function showResult(r: GameResult): void {
   audio.gameOver();
@@ -460,3 +528,6 @@ const roomParam = new URLSearchParams(location.search).get('room');
 if (roomParam) $<HTMLInputElement>('input-code').value = roomParam.toUpperCase();
 
 show('title');
+
+// コントローラー設定（タイトル画面）
+$('btn-title-pad').addEventListener('click', () => padSettings().toggle(true));

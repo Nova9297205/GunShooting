@@ -4,12 +4,12 @@
 //   ・作業台のそばでは弾薬・医療品・アタッチメントの作成、装備中の武器の改造ができる
 //   ・拠点強化は バックパック → 共有倉庫 の順に素材を使う（作業台のそばで）
 // ============================================================
-import { RECIPES } from '../game/constants';
+import { BUILDS, RECIPES, type BuildKind } from '../game/constants';
 import { ATTACHMENTS, countItem, effectiveStats, ITEMS, type ItemId, isWeapon } from '../game/items';
 import { type Facility, FACILITIES } from '../game/progression';
 import type { Slot, StorageState } from '../types';
 
-type Tab = 'mod' | 'craft' | 'base';
+type Tab = 'mod' | 'craft' | 'build' | 'base';
 
 export class CraftMenu {
   open = false;
@@ -25,6 +25,7 @@ export class CraftMenu {
     private onToggle: (open: boolean) => void,
     private onMod: (slot: 'prim' | 'sec', att: string) => void = () => {},
     private onUpgrade: (fac: Facility) => void = () => {},
+    private onBuild: (kind: BuildKind) => void = () => {},
   ) {
     this.list = panel.querySelector('#craft-list') as HTMLElement;
     this.benchLabel = panel.querySelector('#craft-bench') as HTMLElement;
@@ -38,11 +39,21 @@ export class CraftMenu {
         if (this.last) this.update(...this.last);
       } else if (btn.dataset.id) this.onCraft(btn.dataset.id);
       else if (btn.dataset.upg) this.onUpgrade(btn.dataset.upg as Facility);
+      else if (btn.dataset.build) this.onBuild(btn.dataset.build as BuildKind);
       else if (btn.dataset.mod) {
         const [slot, att] = btn.dataset.mod.split(':');
         this.onMod(slot as 'prim' | 'sec', att);
       }
     });
+  }
+
+  /** 指定したタブで開く */
+  openTab(tab: Tab): void {
+    this.tab = tab;
+    this.lastKey = '';
+    if (this.open) {
+      if (this.last) this.update(...this.last);
+    } else this.toggle(true);
   }
 
   toggle(force?: boolean): void {
@@ -60,18 +71,19 @@ export class CraftMenu {
   }
 
   /** 持ち物が変わったときだけ描き直す */
-  update(bag: (Slot | null)[], prim: Slot | null, sec: Slot | null, nearBench: boolean, base: Record<Facility, number>, storage: StorageState | null): void {
-    this.last = [bag, prim, sec, nearBench, base, storage];
+  update(bag: (Slot | null)[], prim: Slot | null, sec: Slot | null, nearBench: boolean, base: Record<Facility, number>, storage: StorageState | null, nearStove = false): void {
+    this.last = [bag, prim, sec, nearBench, base, storage, nearStove];
     if (!this.open) return;
-    const key = JSON.stringify([bag, prim, sec, nearBench, base, storage?.ver, this.tab]);
+    const key = JSON.stringify([bag, prim, sec, nearBench, nearStove, base, storage?.ver, this.tab]);
     if (key === this.lastKey) return;
     this.lastKey = key;
     this.benchLabel.textContent = nearBench ? `BENCH Lv${base.bench} ● ONLINE` : 'BENCH OUT OF RANGE ― 包帯のみ作成可';
     this.benchLabel.className = nearBench ? 'ok' : 'ng';
     const have = (m: ItemId) => countItem(bag, m);
-    const tabName = { mod: '武器改造', craft: 'クラフト', base: '拠点強化' };
-    const readyCount = RECIPES.filter((r) => !((r.lv ?? 1) > base.bench) && (!r.bench || nearBench) && (Object.entries(r.cost) as [ItemId, number][]).every(([m, n]) => have(m) >= n)).length;
-    const tabs = (['mod', 'craft', 'base'] as Tab[])
+    const tabName = { mod: '武器改造', craft: 'クラフト・料理', build: '建設', base: '拠点強化' };
+    const stationOk = (r: (typeof RECIPES)[number]) => (r.station === 'stove' ? nearStove : !r.bench || nearBench);
+    const readyCount = RECIPES.filter((r) => !((r.lv ?? 1) > base.bench) && stationOk(r) && (Object.entries(r.cost) as [ItemId, number][]).every(([m, n]) => have(m) >= n)).length;
+    const tabs = (['mod', 'craft', 'build', 'base'] as Tab[])
       .map((t) => `<button data-tab="${t}" class="${this.tab === t ? 'on' : ''}">${tabName[t]}${t === 'craft' ? `<small>${readyCount} 作成可</small>` : ''}</button>`)
       .join('');
     const costChips = (entries: [ItemId, number][], owned: (m: ItemId) => number) =>
@@ -100,17 +112,33 @@ export class CraftMenu {
         const cost = Object.entries(r.cost) as [ItemId, number][];
         const enough = cost.every(([m, n]) => have(m) >= n);
         const lvLock = (r.lv ?? 1) > base.bench;
-        const benchLock = r.bench && !nearBench;
+        const benchLock = !stationOk(r);
         const state = lvLock ? 'locked' : enough && !benchLock ? 'ready' : enough ? '' : 'short';
-        const chip = lvLock ? `<span class="chip">🔒 作業台Lv${r.lv}</span>` : benchLock ? '<span class="chip warn">作業台へ</span>' : enough ? '<span class="chip ok">作成可能</span>' : '<span class="chip ng">素材不足</span>';
+        const chip = lvLock ? `<span class="chip">🔒 作業台Lv${r.lv}</span>` : benchLock ? `<span class="chip warn">${r.station === 'stove' ? 'かまどへ' : '作業台へ'}</span>` : enough ? '<span class="chip ok">作成可能</span>' : '<span class="chip ng">素材不足</span>';
         return `<div class="ccard ${state}">
           <div class="c-top"><span class="c-name">${r.name}</span>${chip}</div>
           <p>${r.desc}</p>
           <div class="c-act"><div class="costs">${costChips(cost, have)}</div><button class="btn small ${state === 'ready' ? 'go' : ''}" data-id="${r.id}" ${state === 'ready' ? '' : 'disabled'}>作成</button></div>
         </div>`;
       });
-      const mats = (['scrap', 'cloth', 'gunpowder', 'parts', 'chem', 'electronics', 'tools'] as ItemId[]).map((m) => `<span class="mat">${ITEMS[m].name}<b>${have(m)}</b></span>`).join('');
+      const mats = (['scrap', 'cloth', 'gunpowder', 'parts', 'chem', 'electronics', 'tools', 'water', 'herbs', 'can'] as ItemId[]).map((m) => `<span class="mat">${ITEMS[m].name}<b>${have(m)}</b></span>`).join('');
       body = `<div class="mats">${mats}</div><div class="cards">${cards.join('')}</div>`;
+    } else if (this.tab === 'build') {
+      const shared = storage?.shared ?? [];
+      const owned = (m: ItemId) => have(m) + countItem(shared, m);
+      const cards = BUILDS.map((b, i) => {
+        const entries = Object.entries(b.cost) as [ItemId, number][];
+        const enough = entries.every(([m, n]) => owned(m) >= n);
+        const lvLock = (b.lv ?? 1) > base.bench;
+        const state = lvLock ? 'locked' : enough ? 'ready' : 'short';
+        const chip = lvLock ? `<span class="chip">🔒 作業台Lv${b.lv}</span>` : `<span class="chip ${enough ? 'ok' : 'ng'}">${b.role}</span>`;
+        return `<div class="ccard ${state}">
+          <div class="c-top"><span class="c-name">${i + 1}. ${b.name}</span>${chip}</div>
+          <p>${b.desc}（耐久 ${b.hp}）</p>
+          <div class="c-act"><div class="costs">${costChips(entries, owned)}</div><button class="btn small ${state === 'ready' ? 'go' : ''}" data-build="${b.kind}" ${lvLock ? 'disabled' : ''}>建てる</button></div>
+        </div>`;
+      });
+      body = `<p class="note">[V] でいつでも建設モード。拠点の敷地の中（門の上も可）に置ける。左クリックで建てる・右クリックで撤去（素材が半分戻る）・[F] で修理（鉄くず1）。素材はバックパック → 共有倉庫の順に使う。</p><div class="cards">${cards.join('')}</div>`;
     } else {
       const shared = storage?.shared ?? [];
       const owned = (m: ItemId) => have(m) + countItem(shared, m);

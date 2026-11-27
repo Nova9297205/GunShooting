@@ -2,7 +2,7 @@
 // Renderer: カメラ・マップ・夜の暗闇＆懐中電灯ライティング・建築グリッド・HUD・ミニマップ
 //   見た目（キャラ・オブジェクト）の描画は Art.ts の ArtSet に委譲している
 // ============================================================
-import type { GameMode, ObjSnap, PlayerSnap, ViewState, WeaponId, ZombieSnap } from '../types';
+import type { GameMode, ObjSnap, PlayerSnap, VehicleSnap, ViewState, WeaponId, ZombieSnap } from '../types';
 import { Tool } from '../types';
 import { type ArtSet, type PlayerAnim, type TallQuery, VectorArt, type ZombieAnim } from './Art';
 import {
@@ -31,6 +31,9 @@ import {
   WORLD_H,
   WORLD_W,
   ZOMBIE,
+  BUILD_KINDS,
+  BUILDS,
+  type BuildKind,
 } from './constants';
 import type { Decal, Effects } from './Effects';
 import { clamp } from './physics';
@@ -40,7 +43,8 @@ import { roofCanvas } from './RoofArt';
 import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
-import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
+import { type Glyphs, padText } from '../ui/Gamepad';
+import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
 /** 落ち影と側面を持つ「高い」建築物 */
@@ -65,6 +69,14 @@ export interface RenderOptions {
   interactHint: string | null;
   syncMs?: number;
   muted?: boolean;
+  /** 建設モード：置く場所と、置けない理由 */
+  build?: { kind: BuildKind; tx: number; ty: number; err: string | null } | null;
+  /** タッチ操作の端末 */
+  touch?: boolean;
+  /** コントローラーで遊んでいる */
+  pad?: boolean;
+  /** そのコントローラーのボタン表記（Xbox / PlayStation） */
+  glyphs?: Glyphs | null;
 }
 
 /** 射撃・近接・リロードを検出したときに呼ばれるフック（効果音用） */
@@ -134,6 +146,10 @@ export class Renderer {
   private terrain: TerrainCache | null = null;
   private miniCanvas: HTMLCanvasElement | null = null;
   private vision = new Vision();
+  /** その位置が自分（と仲間）の視界に入っているか（エイム補助用） */
+  canSee(x: number, y: number): boolean {
+    return this.vision.isVisible(x, y);
+  }
   private lightCanvas = document.createElement('canvas');
   private lightCtx = this.lightCanvas.getContext('2d')!;
   private pAnim = new Map<number, PlayerAnim>();
@@ -171,36 +187,43 @@ export class Renderer {
   perfN = { objects: 0, zombiesDrawn: 0, particles: 0 };
   private qTimer = 0;
 
+  /**
+   * @param root 画面分割（ローカル協力）のときの表示枠。指定すると HUD・色調の重ね合わせもこの枠の中に作り、枠の大きさで描く
+   */
   constructor(
     private canvas: HTMLCanvasElement,
     private world: TileWorld,
+    private root: HTMLElement | null = null,
   ) {
     this.ctx = canvas.getContext('2d')!;
-    this.hudCanvas = (document.getElementById('hud') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    // 枠の中では、同じ見た目（CSS）を使うため同じ id の要素を枠ごとに作る（探すのは枠の中だけ）
+    const parent: HTMLElement = root ?? document.body;
+    const find = <T extends HTMLElement>(id: string) => (root ? (root.querySelector(`#${id}`) as T | null) : (document.getElementById(id) as T | null));
+    this.hudCanvas = find<HTMLCanvasElement>('hud') ?? document.createElement('canvas');
     if (!this.hudCanvas.id) {
       this.hudCanvas.id = 'hud';
-      document.body.insertBefore(this.hudCanvas, canvas.nextSibling);
+      parent.insertBefore(this.hudCanvas, canvas.nextSibling);
     }
     this.hudCtx = this.hudCanvas.getContext('2d')!;
-    this.fastCanvas = (document.getElementById('hud-fx') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    this.fastCanvas = find<HTMLCanvasElement>('hud-fx') ?? document.createElement('canvas');
     if (!this.fastCanvas.id) {
       this.fastCanvas.id = 'hud-fx';
-      document.body.insertBefore(this.fastCanvas, this.hudCanvas.nextSibling);
+      parent.insertBefore(this.fastCanvas, this.hudCanvas.nextSibling);
     }
     this.fastCtx = this.fastCanvas.getContext('2d')!;
-    this.grainEl = (document.getElementById('fx-grain') as HTMLDivElement | null) ?? document.createElement('div');
+    this.grainEl = find<HTMLDivElement>('fx-grain') ?? document.createElement('div');
     if (!this.grainEl.id) {
       this.grainEl.id = 'fx-grain';
-      document.body.insertBefore(this.grainEl, this.hudCanvas);
+      parent.insertBefore(this.grainEl, this.hudCanvas);
     }
     this.grainEl.style.backgroundImage = `url(${makeGrainURL()})`;
     const mk = (id: string) => {
-      let el = document.getElementById(id) as HTMLDivElement | null;
+      let el = find<HTMLDivElement>(id);
       if (!el) {
         el = document.createElement('div');
         el.id = id;
         el.className = 'fx-ov';
-        document.body.insertBefore(el, this.grainEl);
+        parent.insertBefore(el, this.grainEl);
       }
       return el;
     };
@@ -262,6 +285,227 @@ export class Renderer {
   uiScale = 1;
 
   /** HUD の要素を縮小して描く（仮想的な画面の大きさで配置される） */
+  /** 車：車体・窓・タイヤ・乗っている人の頭・壊れているときの煙 */
+  private drawVehicle(v: VehicleSnap, view: ViewState): void {
+    const { ctx } = this;
+    const pickup = v.kind === 'pickup';
+    const L = pickup ? 64 : 58;
+    const W = pickup ? 32 : 30;
+    ctx.save();
+    ctx.translate(v.x, v.y);
+    ctx.rotate(v.a);
+    // 影
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-L / 2 + 5, -W / 2 + 6, L, W);
+    // タイヤ
+    ctx.fillStyle = '#151513';
+    for (const [tx, ty] of [[L / 2 - 14, -W / 2 - 2], [L / 2 - 14, W / 2 - 4], [-L / 2 + 8, -W / 2 - 2], [-L / 2 + 8, W / 2 - 4]]) ctx.fillRect(tx, ty, 11, 6);
+    // 車体
+    const body = v.broken ? (pickup ? '#5b4a3a' : '#4a4e56') : pickup ? '#a0522d' : '#3d6e9e';
+    const hi = v.broken ? (pickup ? '#6e5c4a' : '#5a5f68') : pickup ? '#c06a3c' : '#5a8cbc';
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.roundRect(-L / 2, -W / 2, L, W, 6);
+    ctx.fill();
+    ctx.fillStyle = hi;
+    ctx.fillRect(-L / 2 + 3, -W / 2 + 2, L - 6, 3);
+    if (pickup) {
+      // 荷台
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillRect(-L / 2 + 3, -W / 2 + 4, L * 0.38, W - 8);
+    }
+    // 窓
+    ctx.fillStyle = v.broken ? '#2a2e30' : '#9cc4d8';
+    const wx = pickup ? 2 : -6;
+    ctx.fillRect(wx + 8, -W / 2 + 4, 8, W - 8);
+    ctx.fillStyle = v.broken ? '#24282a' : '#6c94a8';
+    ctx.fillRect(wx - 14, -W / 2 + 4, 6, W - 8);
+    if (v.broken) {
+      // ひび
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(wx + 9, -6);
+      ctx.lineTo(wx + 14, 2);
+      ctx.lineTo(wx + 10, 8);
+      ctx.stroke();
+    }
+    // ライト
+    const night = darknessAt(view.minute) > 0.3;
+    const driven = v.seats[0] >= 0 && !v.broken;
+    ctx.fillStyle = driven ? '#fff6c0' : '#c8c0a0';
+    ctx.fillRect(L / 2 - 3, -W / 2 + 3, 3, 6);
+    ctx.fillRect(L / 2 - 3, W / 2 - 9, 3, 6);
+    ctx.fillStyle = v.spd < -5 ? '#ff4030' : '#7a2018';
+    ctx.fillRect(-L / 2, -W / 2 + 3, 2, 5);
+    ctx.fillRect(-L / 2, W / 2 - 8, 2, 5);
+    if (driven && night) {
+      const g = ctx.createRadialGradient(L / 2 + 40, 0, 4, L / 2 + 70, 0, 120);
+      g.addColorStop(0, 'rgba(255,245,200,0.28)');
+      g.addColorStop(1, 'rgba(255,245,200,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(L / 2, -8);
+      ctx.lineTo(L / 2 + 170, -70);
+      ctx.lineTo(L / 2 + 170, 70);
+      ctx.lineTo(L / 2, 8);
+      ctx.fill();
+    }
+    // 乗っている人の頭
+    v.seats.forEach((id, i) => {
+      if (id < 0) return;
+      const sp = [[4, -8], [4, 8], [-14, 0]][i];
+      ctx.fillStyle = '#15170f';
+      ctx.beginPath();
+      ctx.arc(sp[0], sp[1], 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = PLAYER_COLORS[id] ?? '#fff';
+      ctx.beginPath();
+      ctx.arc(sp[0], sp[1], 5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.restore();
+    // 傷んでいると煙
+    if (this.fx && (v.broken || v.hp < v.maxHp * 0.4) && Math.random() < 0.25) this.fx.burst(v.x + Math.cos(v.a) * 22, v.y + Math.sin(v.a) * 22, v.broken ? '#3a3a3a' : '#777', 1, 30, 1.6, 7, 'smoke', false, -Math.PI / 2, 1);
+    // 壊れている：直せることを示す
+    if (v.broken && Math.sin(this.time * 3 + v.id) > 0) {
+      ctx.font = `bold 11px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(20,16,10,0.8)';
+      ctx.fillRect(v.x - 30, v.y - 40, 60, 16);
+      ctx.fillStyle = '#e0a33a';
+      ctx.fillText('🔧 修理可', v.x, v.y - 32);
+    }
+  }
+
+  /** 運転中のメーター（速さ・燃料・車体） */
+  private drawVehiclePanel(v: VehicleSnap, driver: boolean): void {
+    const { ctx } = this;
+    const pw = 300;
+    const ph = 44;
+    const x = this.w / 2 - pw / 2;
+    const y = this.h - 150;
+    panel(ctx, x, y, pw, ph);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#8ac0e0';
+    ctx.fillText(`// ${v.kind === 'pickup' ? 'PICKUP' : 'SEDAN'} ${driver ? 'DRIVER' : 'PASSENGER'}`, x + 10, y + 11);
+    ctx.textAlign = 'right';
+    ctx.font = `bold 16px ${MONO}`;
+    ctx.fillStyle = '#e6e1cc';
+    ctx.fillText(`${Math.round(Math.abs(v.spd) * 0.15)}`, x + pw - 40, y + 26);
+    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = '#9c967c';
+    ctx.fillText('km/h', x + pw - 10, y + 27);
+    const bar = (label: string, by: number, r: number, c: string) => {
+      ctx.textAlign = 'left';
+      ctx.font = `bold 10px ${UI}`;
+      ctx.fillStyle = '#bdb79e';
+      ctx.fillText(label, x + 10, by);
+      segBar(ctx, x + 44, by - 4, 150, 7, clamp(r, 0, 1), c, 15);
+    };
+    bar('燃料', y + 24, v.fuel / 100, v.fuel < 20 ? '#d0583e' : '#e0b862');
+    bar('車体', y + 36, v.hp / v.maxHp, v.hp / v.maxHp < 0.3 ? '#d0583e' : '#93b77c');
+  }
+
+  /** 建設モード：拠点の敷地の枠・置く場所の緑/赤の影・建てた物の耐久 */
+  private drawBuildGhost(b: NonNullable<RenderOptions['build']>, visible: ObjSnap[]): void {
+    const { ctx } = this;
+    const sh = SAFEHOUSE;
+    ctx.save();
+    ctx.setLineDash([8, 6]);
+    ctx.lineDashOffset = -this.time * 20;
+    ctx.strokeStyle = 'rgba(224,163,58,0.55)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sh.x * TILE + 1, sh.y * TILE + 1, sh.w * TILE - 2, sh.h * TILE - 2);
+    ctx.setLineDash([]);
+    // 建てた物の耐久バー
+    for (const ob of visible) {
+      if (!BUILD_KINDS.has(ob.kind)) continue;
+      const r = ob.hp / ob.maxHp;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(ob.tx * TILE + 4, ob.ty * TILE - 6, TILE - 8, 4);
+      ctx.fillStyle = r > 0.6 ? '#93b77c' : r > 0.3 ? '#e0a33a' : '#d0583e';
+      ctx.fillRect(ob.tx * TILE + 4, ob.ty * TILE - 6, (TILE - 8) * r, 4);
+    }
+    const x = b.tx * TILE;
+    const y = b.ty * TILE;
+    const ok = !b.err;
+    ctx.globalAlpha = 0.55 + Math.sin(this.time * 6) * 0.1;
+    const ghost: ObjSnap = { id: 0, kind: b.kind, tx: b.tx, ty: b.ty, hp: 1, maxHp: 1, ready: 0 };
+    if (!this.art.drawLowObject(ctx, ghost, this.time, () => false)) this.art.drawTallObject(ctx, ghost, this.time);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = ok ? 'rgba(120,220,120,0.22)' : 'rgba(230,80,60,0.25)';
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.strokeStyle = ok ? '#8fe08a' : '#e0583e';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x + 1, y + 1, TILE - 2, TILE - 2);
+    if (b.err) {
+      ctx.font = `bold 12px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      const tw = ctx.measureText(b.err).width + 12;
+      ctx.fillStyle = 'rgba(20,10,8,0.85)';
+      ctx.fillRect(x + TILE / 2 - tw / 2, y - 24, tw, 18);
+      ctx.fillStyle = '#ef8a70';
+      ctx.fillText(b.err, x + TILE / 2, y - 9);
+    }
+    ctx.restore();
+  }
+
+  /** 建設モードの選択バー（画面下） */
+  private drawBuildBar(view: ViewState, b: NonNullable<RenderOptions['build']>, me: PlayerSnap, touch: boolean): void {
+    const { ctx } = this;
+    const n = BUILDS.length;
+    const cw = 108;
+    const gap = 6;
+    const W = n * cw + (n - 1) * gap;
+    const x0 = this.w / 2 - W / 2;
+    const y0 = this.h - 214;
+    const shared = view.storage?.shared ?? [];
+    ctx.save();
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.font = `bold 12px ${UI}`;
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText(
+      this.glyphs ? padText('建設モード — {LB}/{RB} 選ぶ・右スティックで場所・{RT} 建てる・{X} 撤去・{A} 修理・{DOWN} 終了', this.glyphs) : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜6]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
+      this.w / 2,
+      y0 - 12,
+    );
+    BUILDS.forEach((d, i) => {
+      const x = x0 + i * (cw + gap);
+      const sel = d.kind === b.kind;
+      const lock = (d.lv ?? 1) > (view.base.bench ?? 1);
+      panel(ctx, x, y0, cw, 66, sel ? 'rgba(60,48,22,0.92)' : undefined, sel ? '#e0a33a' : undefined);
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = lock ? '#77735f' : sel ? '#ffe0a0' : '#d8d2b8';
+      ctx.fillText(`${i + 1} ${d.name}`, x + 8, y0 + 12);
+      ctx.font = `9px ${UI}`;
+      ctx.fillStyle = '#9c967c';
+      ctx.fillText(lock ? `🔒 作業台Lv${d.lv}` : d.role, x + 8, y0 + 26);
+      // 素材（1行に収まらなければ2行目へ）
+      let cx = x + 8;
+      let cy = y0 + 40;
+      ctx.font = `9px ${UI}`;
+      for (const [m, need] of Object.entries(d.cost) as [ItemId, number][]) {
+        const have = countItem(me.bag, m) + countItem(shared, m);
+        const t = `${ITEMS[m].name} ${have}/${need}`;
+        const tw = ctx.measureText(t).width;
+        if (cx + tw > x + cw - 6 && cx > x + 8) {
+          cx = x + 8;
+          cy += 13;
+        }
+        ctx.fillStyle = have >= need ? '#93b77c' : '#d0583e';
+        ctx.fillText(t, cx, cy);
+        cx += tw + 7;
+      }
+    });
+    ctx.restore();
+  }
+
   private withUiScale(fn: () => void): void {
     const s = this.uiScale;
     if (s >= 0.999) return fn();
@@ -285,8 +529,8 @@ export class Renderer {
     this.baseDpr = Math.min(window.devicePixelRatio || 1, 2);
     // ゲーム画面は最大1.5倍（高解像度ディスプレイで描くピクセル数を抑える）。HUD は baseDpr のままくっきり
     this.dpr = Math.min(this.baseDpr, 1.5) * this.renderScale;
-    this.w = window.innerWidth;
-    this.h = window.innerHeight;
+    this.w = this.root ? this.root.clientWidth : window.innerWidth;
+    this.h = this.root ? this.root.clientHeight : window.innerHeight;
     this.uiScale = clamp(Math.min(this.w / 1280, this.h / 760), 0.55, 1);
     this.canvas.width = Math.floor(this.w * this.dpr);
     this.canvas.height = Math.floor(this.h * this.dpr);
@@ -308,6 +552,10 @@ export class Renderer {
     const baked = this.art.bakeTerrain(this.world);
     this.terrain = baked.cache;
     this.miniCanvas = baked.mini;
+  }
+
+  worldToScreen(wx: number, wy: number): { x: number; y: number } {
+    return { x: wx - this.cam.x + this.w / 2, y: wy - this.cam.y + this.h / 2 };
   }
 
   screenToWorld(sx: number, sy: number): { x: number; y: number } {
@@ -464,10 +712,16 @@ export class Renderer {
     this.drawSearch(view, me);
     this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
-    for (const p of view.players) this.drawPlayerMarker(p, p.id === o.localId);
-    for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
+    this.touchUI = !!o.touch;
+    this.padUI = !!o.pad;
+    this.glyphs = o.pad ? (o.glyphs ?? null) : null;
+    this.vehLights = (view.vehicles ?? []).filter((v) => v.seats[0] >= 0 && !v.broken).map((v) => ({ x: v.x + Math.cos(v.a) * 90, y: v.y + Math.sin(v.a) * 90 }));
+    for (const v of view.vehicles ?? []) if (v.x > vx0 - 60 && v.y > vy0 - 60 && v.x < vx1 + 60 && v.y < vy1 + 60) this.drawVehicle(v, view);
+    for (const p of view.players) if (p.veh === undefined) this.drawPlayerMarker(p, p.id === o.localId);
+    for (const p of view.players) if (p.veh === undefined) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
+    if (o.build) this.drawBuildGhost(o.build, visible);
     this.drawCloudShadows(view.minute, vx0, vy0, vx1, vy1);
     this.drawEdgeHaze(vx0, vy0, vx1, vy1);
     this.drawStructureBars(visible);
@@ -505,7 +759,22 @@ export class Renderer {
     {
       ctx.font = 'bold 12px "Noto Sans JP", "Segoe UI", sans-serif';
       const placed: { x: number; y: number; w: number }[] = [];
+      // 車に乗っている人は、車の上にまとめて1行で
+      for (const v of view.vehicles ?? []) {
+        const names = v.seats.filter((id) => id >= 0).map((id) => view.players.find((q) => q.id === id)).filter((q): q is PlayerSnap => !!q);
+        if (!names.length || this.photo) continue;
+        const label = names.map((q) => (q.id === o.localId ? `${q.name}(YOU)` : q.name)).join('・');
+        ctx.font = `bold 12px ${UI}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(8,9,7,0.85)';
+        ctx.strokeText(label, v.x, v.y - 40);
+        ctx.fillStyle = '#cfe8f6';
+        ctx.fillText(label, v.x, v.y - 40);
+      }
       for (const p of [...view.players].sort((a, b) => b.y - a.y)) {
+        if (p.veh !== undefined || this.photo) continue;
         const label = p.id === o.localId ? `${p.name} (YOU)` : p.name;
         const lw = ctx.measureText(label).width;
         let off = p.status === 'down' ? 16 : 0;
@@ -518,7 +787,7 @@ export class Renderer {
     this.drawPingMarkers(fx, me);
     this.drawDropBeacon(view);
     this.drawLandmarks(vx0, vy0, vx1, vy1);
-    this.drawPopups(fx);
+    if (!this.photo) this.drawPopups(fx);
     ctx.restore();
 
     const t3 = performance.now();
@@ -532,7 +801,13 @@ export class Renderer {
       f.setTransform(this.baseDpr, 0, 0, this.baseDpr, 0, 0);
       this.ctx = f;
       try {
-        this.drawHUD(view, o, me, dark);
+        // 写真モード（F2）：HUD を消して景色だけ
+        if (!this.photo) this.drawHUD(view, o, me, dark);
+        else {
+          this.hudCtx.setTransform(1, 0, 0, 1, 0, 0);
+          this.hudCtx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+          this.hudKey = '';
+        }
       } finally {
         this.ctx = main;
       }
@@ -1070,9 +1345,10 @@ export class Renderer {
       ctx.font = `800 ${p.size}px "Noto Sans JP", "Segoe UI", sans-serif`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.85)';
-      ctx.strokeText(p.text, p.x, p.y);
+      const pt = this.kw(p.text);
+      ctx.strokeText(pt, p.x, p.y);
       ctx.fillStyle = p.color;
-      ctx.fillText(p.text, p.x, p.y);
+      ctx.fillText(pt, p.x, p.y);
     }
     ctx.globalAlpha = 1;
   }
@@ -1097,8 +1373,20 @@ export class Renderer {
     return out;
   }
 
+  private vehLights: { x: number; y: number }[] = [];
+  /** 写真モード（HUD・名前・数字を消す） */
+  photo = false;
+  /** タッチ操作の端末（ボタン名で案内する） */
+  private touchUI = false;
+  private padUI = false;
+  private glyphs: Glyphs | null = null;
+  /** 案内文のキー名を、使っている機器のボタン名に */
+  private kw(t: string): string {
+    return this.glyphs ? padText(t, this.glyphs) : t;
+  }
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
     const out: { x: number; y: number; r: number; warm: number }[] = [];
+    for (const l of this.vehLights) out.push({ x: l.x, y: l.y, r: 230, warm: 0.15 });
     // 画面の外でも光が届く範囲（約10タイル）までの焚き火・松明
     const [vx0, vy0, vx1, vy1] = this.vrect;
     for (const ob of this.objsIn(Math.floor(vx0 / TILE) - 10, Math.floor(vy0 / TILE) - 10, Math.ceil(vx1 / TILE) + 10, Math.ceil(vy1 / TILE) + 10)) {
@@ -1405,7 +1693,8 @@ export class Renderer {
       const a = Math.min(1, f.life / 1.2, (9 - f.life) * 5);
       ctx.globalAlpha = a;
       ctx.font = `bold 11px ${UI}`;
-      const tw = Math.min(430, ctx.measureText(f.t).width) + 56;
+      const ft = this.kw(f.t);
+      const tw = Math.min(430, ctx.measureText(ft).width) + 56;
       ctx.fillStyle = f.cat === 'danger' ? 'rgba(48,16,10,0.82)' : 'rgba(14,15,11,0.8)';
       ctx.fillRect(x, y, tw, 20);
       ctx.fillStyle = col;
@@ -1418,7 +1707,7 @@ export class Renderer {
       ctx.textAlign = 'left';
       ctx.font = `bold 11px ${UI}`;
       ctx.fillStyle = f.cat === 'danger' ? '#f4b4a2' : '#e6e1cc';
-      ctx.fillText(f.t, x + 48, y + 10.5, 430);
+      ctx.fillText(ft, x + 48, y + 10.5, 430);
       y += 23;
     }
     ctx.globalAlpha = 1;
@@ -1655,6 +1944,14 @@ export class Renderer {
       else if (o.interactHint) hint = o.interactHint;
       if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
     }
+    if (me && me.veh !== undefined && !o.mapOpen) {
+      const mv = (view.vehicles ?? []).find((v) => v.id === me.veh);
+      if (mv) this.withUiScale(() => this.drawVehiclePanel(mv, me.seat === 0));
+    }
+    if (o.build && me && me.status === 'alive' && !o.mapOpen) {
+      const b = o.build;
+      this.withUiScale(() => this.drawBuildBar(view, b, me, !!o.touch));
+    }
 
     // 朝まで眠った：暗転してから明ける
     if (fx.sleepFade > 0) {
@@ -1867,6 +2164,7 @@ export class Renderer {
       if (me) this.drawSelfPanel(view, me);
       this.drawHotbar(o, view);
       this.drawMinimap(view, o.localId);
+      if (me && !o.mapOpen) this.drawJobs(view, me, !!o.touch);
       // モード表示
       ctx.font = `10px ${MONO}`;
       ctx.textAlign = 'left';
@@ -1945,7 +2243,7 @@ export class Renderer {
     ctx.fillText(t.text, w / 2, y + 4);
     ctx.font = `bold 11px ${UI}`;
     ctx.fillStyle = '#d8d2b8';
-    ctx.fillText(t.sub, w / 2, y + 19);
+    ctx.fillText(this.kw(t.sub), w / 2, y + 19);
     if (t.sub2) {
       ctx.fillStyle = '#e0b862';
       ctx.fillText(t.sub2, w / 2, y + 33);
@@ -2293,12 +2591,54 @@ export class Renderer {
     });
   }
 
+  /** 体調の札：何が悪いのかと、何を使えば治るのか（体の状態パネルの上に積む） */
+  private drawConditions(me: PlayerSnap, x: number, bottom: number): void {
+    const { ctx } = this;
+    const items: { t: string; fix: string; c: string; bad: boolean }[] = [];
+    const has = (id: ItemId) => countItem(me.bag, id) > 0;
+    const H = this.touchUI && !this.padUI ? '[回復]' : '[H]';
+    if (me.bleed) items.push({ t: '出血', fix: has('bandage') || has('medkit') ? `${H} 包帯で止血` : '包帯がない！ 布2で作れる', c: '#e0583e', bad: true });
+    if (me.frac === 1) items.push({ t: '骨折', fix: has('splint') ? `${H} 添え木を当てる` : '添え木（布2・鉄くず1）を作る', c: '#e0583e', bad: true });
+    else if (me.frac === 2) items.push({ t: '骨折（手当て済み）', fix: '少し足が遅い・じきに治る', c: '#c9a050', bad: false });
+    const f = me.fatigue ?? 0;
+    if (f >= 40) items.push({ t: `疲労 ${f}%`, fix: f >= 60 ? '狙いがぶれる・足が遅い → 夜に拠点のベッドで眠る' : '夜は拠点のベッドで眠ろう', c: f >= 60 ? '#e0a33a' : '#9c967c', bad: f >= 60 });
+    const c = me.cold ?? 0;
+    if (c >= 25) items.push({ t: `冷え ${c}%`, fix: c >= 50 ? 'スタミナ回復↓ → 焚き火・屋内・車・コート' : '雨と夜は冷える：焚き火・屋内', c: c >= 85 ? '#e0583e' : c >= 50 ? '#8ac0e0' : '#7f9aaa', bad: c >= 50 });
+    if (!items.length) return;
+    ctx.save();
+    ctx.textBaseline = 'middle';
+    let y = bottom;
+    for (const it of items) {
+      y -= 22;
+      it.fix = this.kw(it.fix);
+      ctx.font = `bold 11px ${UI}`;
+      const tw = ctx.measureText(it.t).width;
+      ctx.font = `10px ${UI}`;
+      const fw = ctx.measureText(it.fix).width;
+      const w = tw + fw + 26;
+      ctx.fillStyle = 'rgba(14,15,11,0.82)';
+      ctx.fillRect(x, y, w, 19);
+      ctx.fillStyle = it.c;
+      ctx.fillRect(x, y, 3, 19);
+      const blink = it.bad && Math.sin(this.time * 6) > 0.3;
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = blink ? '#ffffff' : it.c;
+      ctx.textAlign = 'left';
+      ctx.fillText(it.t, x + 9, y + 10);
+      ctx.font = `10px ${UI}`;
+      ctx.fillStyle = '#d8d2b8';
+      ctx.fillText(it.fix, x + 17 + tw, y + 10);
+    }
+    ctx.restore();
+  }
+
   private drawSelfPanel(view: ViewState, me: PlayerSnap): void {
     const { ctx, h } = this;
     const x = 12;
     const pw = 262;
     const ph = 166;
     const y = h - ph - 30;
+    this.drawConditions(me, x, y - 4);
     const low = me.hp / me.maxHp < 0.3;
     const hungry = me.hunger < 25;
     const tired = me.stamina < PLAYER.dashStamina;
@@ -2426,7 +2766,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = `9px ${UI}`;
     ctx.fillStyle = '#6f6c5a';
-    ctx.fillText('F 探索/ドア ・ Tab 持ち物 ・ R リロード ・ T 弾種 ・ C 作業台', x + 10, y + ph - 9, pw - 20);
+    ctx.fillText(this.glyphs ? padText('{A} 調べる ・ {START} 持ち物 ・ {X} 装填 ・ {LEFT} 作業台 ・ {DOWN} 建設 ・ {BACK} 地図', this.glyphs) : 'F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
     void view;
   }
 
@@ -2570,6 +2910,110 @@ export class Renderer {
     return this.vision.explored[cy * MAP_W + cx] === 1 || this.vision.explored[l.y * MAP_W + l.x] === 1;
   }
 
+  private miniBottom = 250;
+  private locConts: number[][] | null = null;
+  private searchCache: { t: number; ratio: (number | undefined)[]; done: number; total: number } | null = null;
+
+  /** 施設ごとの「漁った割合」（入れ物のうち探索済みの割合）。1秒ごとに数え直す */
+  private searchStats(): { ratio: (number | undefined)[]; done: number; total: number } {
+    if (this.searchCache && this.time - this.searchCache.t < 1) return this.searchCache;
+    const locs = this.world.locations;
+    if (!this.locConts) {
+      this.locConts = locs.map(() => []);
+      for (const ob of this.world.objects.values()) {
+        if (!CONTAINER_KINDS.has(ob.kind) || ob.kind === 'car' || ob.kind === 'bag' || ob.kind === 'box') continue;
+        const i = locs.findIndex((l) => ob.tx >= l.x && ob.ty >= l.y && ob.tx < l.x + l.w && ob.ty < l.y + l.h);
+        if (i >= 0 && locs[i].kind !== 'base') this.locConts[i].push(ob.id);
+      }
+    }
+    let done = 0;
+    let total = 0;
+    const ratio = this.locConts.map((ids, i) => {
+      if (!ids.length || locs[i].kind === 'base') return undefined;
+      total++;
+      let n = 0;
+      for (const id of ids) {
+        const ob = this.world.objects.get(id);
+        if (!ob || !ob.ready) n++;
+      }
+      const r = n / ids.length;
+      if (r >= 0.8) done++;
+      return r;
+    });
+    this.searchCache = { t: this.time, ratio, done, total };
+    return this.searchCache;
+  }
+
+  /** 無線の依頼の一覧（画面右・ミニマップの下）。タッチ端末では一番近い依頼だけを上部に */
+  private drawJobs(view: ViewState, me: PlayerSnap, touch: boolean): void {
+    const jobs = view.jobs ?? [];
+    if (!jobs.length) return;
+    const { ctx } = this;
+    const lv = view.radio?.lv ?? 1;
+    const what = (j: (typeof jobs)[number]) =>
+      j.kind === 'fetch' && j.item ? `${ITEMS[j.item].name} ${Math.min(j.have ?? 0, j.need ?? 1)}/${j.need}` : j.kind === 'cache' ? '物資箱を開ける' : '施設に入る';
+    const distTo = (j: (typeof jobs)[number]) => {
+      const ready = j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1);
+      const tx = ready ? BASE_TX : j.tx;
+      const ty = ready ? BASE_TY : j.ty;
+      return Math.round(Math.hypot(tx - me.x / TILE, ty - me.y / TILE));
+    };
+    if (touch) {
+      const open = jobs.map((j, i) => ({ j, i })).filter(({ j }) => !j.done);
+      if (!open.length) return;
+      open.sort((a, b) => distTo(a.j) - distTo(b.j));
+      const { j, i } = open[0];
+      const ready = j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1);
+      const t = `依頼${i + 1} ${'★'.repeat(j.tier)} ${ready ? '無線で報告' : what(j)} ・ ${distTo(j)}m　（残り${open.length}件）`;
+      ctx.font = `bold 11px ${UI}`;
+      const tw = ctx.measureText(t).width + 16;
+      const x = this.w / 2 - tw / 2;
+      const y = 58;
+      panel(ctx, x, y, tw, 20);
+      ctx.fillStyle = '#cfe8f6';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(t, this.w / 2, y + 10.5);
+      return;
+    }
+    const pw = 236;
+    const x = this.w - pw - 12;
+    const y = this.miniBottom + 10;
+    const rowH = 30;
+    const ph = 22 + jobs.length * rowH + 4;
+    panel(ctx, x, y, pw, ph);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#8ac0e0';
+    ctx.fillText('// RADIO 依頼', x + 10, y + 11);
+    ctx.textAlign = 'right';
+    ctx.font = `bold 10px ${UI}`;
+    ctx.fillStyle = '#bdb79e';
+    ctx.fillText(`信頼 Lv${lv}${lv < 5 ? `（次まで ${3 - ((view.radio?.done ?? 0) % 3)}件）` : ''}`, x + pw - 10, y + 11);
+    jobs.forEach((j, i) => {
+      const ry = y + 22 + i * rowH;
+      const ready = !j.done && j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1);
+      ctx.globalAlpha = j.done ? 0.45 : 1;
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = j.done ? '#93b77c' : '#e6e1cc';
+      const kindTag = j.kind === 'fetch' ? '回収' : j.kind === 'cache' ? '救援' : '偵察';
+      let title = `${j.done ? '✓' : `${i + 1}.`} [${kindTag}] ${j.title.replace(/(から回収|の救援物資|の偵察)$/, '')}`;
+      while (ctx.measureText(title).width > pw - 70 && title.length > 4) title = title.slice(0, -2) + '…';
+      ctx.fillText(title, x + 10, ry + 8);
+      ctx.textAlign = 'right';
+      ctx.font = `10px ${MONO}`;
+      ctx.fillStyle = '#e0a33a';
+      ctx.fillText('★'.repeat(j.tier), x + pw - 10, ry + 8);
+      ctx.textAlign = 'left';
+      ctx.font = `10px ${UI}`;
+      ctx.fillStyle = ready ? '#8fe08a' : '#9c967c';
+      ctx.fillText(j.done ? '達成' : ready ? `そろった！ 拠点の無線で報告 ・ ${distTo(j)}m` : `${what(j)} ・ ${distTo(j)}m`, x + 22, ry + 21);
+      ctx.globalAlpha = 1;
+    });
+  }
+
   /** ミニマップ：自分の周り（約 96×72 マス）だけを追従表示。地図の外は霞 */
   private drawMinimap(view: ViewState, localId: number): void {
     const { ctx } = this;
@@ -2586,6 +3030,7 @@ export class Renderer {
     const ctx0 = ctr.x / TILE - RW;
     const cty0 = ctr.y / TILE - RH;
     panel(ctx, mx - 4, my - 18, mw + 8, mh + 22);
+    this.miniBottom = my + mh + 4;
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -2642,6 +3087,26 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(X(0) + view.drop.x * k, Y(0) + view.drop.y * k, 3.5, 0, Math.PI * 2);
       ctx.fill();
+    }
+    for (const v of view.vehicles ?? []) {
+      if (!this.vision.explored[Math.floor(v.y / TILE) * MAP_W + Math.floor(v.x / TILE)]) continue;
+      ctx.fillStyle = v.broken ? '#8a7a60' : '#8ac0e0';
+      ctx.save();
+      ctx.translate(X(v.x / TILE), Y(v.y / TILE));
+      ctx.rotate(v.a);
+      ctx.fillRect(-4, -2.5, 8, 5);
+      ctx.restore();
+    }
+    for (const j of view.jobs ?? []) {
+      if (j.done) continue;
+      const jx = X(j.tx + 0.5);
+      const jy = Y(j.ty + 0.5);
+      ctx.strokeStyle = '#8ac0e0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(jx, jy, 4 + Math.sin(this.time * 4) * 1, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 1;
     }
     for (const z of view.zombies) {
       if (!this.vision.isVisible(z.x, z.y)) continue;
@@ -2850,6 +3315,30 @@ export class Renderer {
       if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
     }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
+    if (me.veh === undefined) {
+      let best: VehicleSnap | null = null;
+      let bd = 70 * TILE;
+      for (const v of view.vehicles ?? []) {
+        if (!this.vision.explored[Math.floor(v.y / TILE) * MAP_W + Math.floor(v.x / TILE)]) continue;
+        const d = Math.hypot(v.x - me.x, v.y - me.y);
+        if (d < bd && d > 3 * TILE) {
+          bd = d;
+          best = v;
+        }
+      }
+      if (best) marker(best.x, best.y, best.broken ? '#c0a070' : '#8ac0e0', best.broken ? '車(故障) ' : '車 ', 'dot');
+    }
+    (view.jobs ?? []).forEach((j, i) => {
+      if (j.done) return;
+      // 回収の品がそろったら、行き先は拠点の無線
+      if (j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1)) marker((BASE_TX + 0.5) * TILE, (BASE_TY - 5) * TILE, '#8ac0e0', `報告${i + 1} `, 'dot');
+      else {
+        // 近くまで来たら、施設の中の物資箱を指す
+        const cr = j.crate ? this.world.objects.get(j.crate) : undefined;
+        if (cr && cr.ready && Math.hypot((cr.tx + 0.5) * TILE - me.x, (cr.ty + 0.5) * TILE - me.y) < 30 * TILE) marker((cr.tx + 0.5) * TILE, (cr.ty + 0.5) * TILE, '#8ac0e0', `箱${i + 1} `, 'dot');
+        else marker((j.tx + 0.5) * TILE, (j.ty + 0.5) * TILE, '#8ac0e0', `依${i + 1} `, 'dot');
+      }
+    });
     if (this.fx) for (const p of this.fx.pings) marker(p.x, p.y, p.t === 'enemy' ? '#d0583e' : p.t === 'loot' ? '#e0a33a' : (PLAYER_COLORS[p.id] ?? '#fff'), '', 'dot');
     for (const p of view.players) if (p.id !== localId && p.status !== 'dead') marker(p.x, p.y, p.status === 'down' ? '#ff6a50' : (PLAYER_COLORS[p.id] ?? '#fff'), p.status === 'down' ? 'SOS ' : '', 'dot');
     ctx.restore();
@@ -2889,6 +3378,13 @@ export class Renderer {
     ctx.textAlign = 'right';
     ctx.fillStyle = '#8c8872';
     ctx.fillText('[B] / [Esc] で閉じる ・ 拠点から離れるほど危険（★）・ 外縁は汚染帯', mx + mw, my - 18);
+    {
+      const st = this.searchStats();
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = '#cfe8f6';
+      ctx.fillText(`漁った施設 ${st.done}/${st.total}（${st.total ? Math.round((st.done / st.total) * 100) : 0}%）`, mx + 140, my - 18);
+    }
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
     ctx.drawImage(this.exploredCanvas, mx, my, mw, mh);
@@ -2924,12 +3420,60 @@ export class Renderer {
     ctx.fillRect(mx + mw - B, my + B, B, mh - 2 * B);
     ctx.restore();
     this.drawMapRoutes(ctx, X, Y, s);
-    for (const loc of this.world.locations) {
-      if (loc.kind === 'base' || !this.locExplored(loc)) continue;
-      ctx.strokeStyle = this.locColor(loc);
-      ctx.lineWidth = 1;
+    const searched = this.searchStats();
+    this.world.locations.forEach((loc, i) => {
+      if (loc.kind === 'base' || !this.locExplored(loc)) return;
+      // 漁った割合で塗り分け：未探索＝明るい枠、途中＝橙、ほぼ漁った＝灰色で✓
+      const r = searched.ratio[i];
+      if (r !== undefined) {
+        ctx.fillStyle = r >= 0.8 ? 'rgba(120,120,110,0.45)' : r > 0 ? 'rgba(224,163,58,0.25)' : 'rgba(255,240,200,0.12)';
+        ctx.fillRect(X(loc.x), Y(loc.y), loc.w * s, loc.h * s);
+      }
+      ctx.strokeStyle = r !== undefined && r >= 0.8 ? '#7a776a' : this.locColor(loc);
+      ctx.lineWidth = r === 0 ? 1.5 : 1;
       ctx.strokeRect(X(loc.x), Y(loc.y), loc.w * s, loc.h * s);
+      if (r !== undefined && r >= 0.8 && s >= 1.6) {
+        ctx.fillStyle = '#c8c4b0';
+        ctx.font = `bold 10px ${UI}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('✓', X(loc.x + loc.w / 2), Y(loc.y + loc.h / 2));
+      }
+    });
+    // 見つけた車
+    for (const v of view.vehicles ?? []) {
+      if (!this.vision.explored[Math.floor(v.y / TILE) * MAP_W + Math.floor(v.x / TILE)]) continue;
+      ctx.save();
+      ctx.translate(X(v.x / TILE), Y(v.y / TILE));
+      ctx.rotate(v.a);
+      ctx.fillStyle = v.broken ? '#a08a60' : '#8ac0e0';
+      ctx.strokeStyle = '#0c0d0a';
+      ctx.fillRect(-6, -3.5, 12, 7);
+      ctx.strokeRect(-6, -3.5, 12, 7);
+      ctx.restore();
     }
+    // 無線の依頼の目的地
+    (view.jobs ?? []).forEach((j, i) => {
+      const jx = X(j.tx + 0.5);
+      const jy = Y(j.ty + 0.5);
+      ctx.globalAlpha = j.done ? 0.35 : 1;
+      ctx.strokeStyle = '#8ac0e0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(jx, jy, 9 + (j.done ? 0 : Math.sin(this.time * 4) * 2), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(20,40,60,0.9)';
+      ctx.beginPath();
+      ctx.arc(jx, jy, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#cfe8f6';
+      ctx.font = `bold 10px ${MONO}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(j.done ? '✓' : `${i + 1}`, jx, jy + 0.5);
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
+    });
     for (const lm of this.world.landmarks) this.landmarkIcon(ctx, X(lm.x), Y(lm.y), lm.kind, 1.6);
     this.baseIcon(ctx, X(BASE_TX), Y(BASE_TY), 1.6);
     if (view.drop) {
@@ -2963,6 +3507,7 @@ export class Renderer {
     // アイコン（目印・橋・補給物資・仲間・ピン）の上にもラベルを重ねない
     const icon = (x: number, y: number, r: number) => placed.push({ x: x - r, y: y - r, w: r * 2, h: r * 2 });
     for (const lm of this.world.landmarks) icon(X(lm.x), Y(lm.y), 7);
+    for (const j of view.jobs ?? []) icon(X(j.tx + 0.5), Y(j.ty + 0.5), 10);
     for (const b of this.world.features.bridges) icon(X(b.x + b.w / 2), Y(b.y + b.h / 2), 6);
     if (view.drop) icon(mx + view.drop.x * k, my + view.drop.y * k, 6);
     for (const p of view.players) if (p.status !== 'dead') icon(mx + p.x * k, my + p.y * k, 6);
@@ -3002,6 +3547,12 @@ export class Renderer {
       put({ text: p.name + (p.status === 'down' ? ' SOS' : ''), x: mx + p.x * k + 8, y: my + p.y * k, fg: p.status === 'down' ? '#ff7a60' : '#ffffff', font: `bold 11px ${UI}`, align: 'left' }, [[0, 0], [0, -12], [0, 12], [-60, 0]]);
     }
     placed.push({ x: X(BASE_TX) - 10, y: Y(BASE_TY) - 10, w: 20, h: 20 });
+    // 依頼の目的地の名前
+    (view.jobs ?? []).forEach((j, i) => {
+      if (j.done) return;
+      const what = j.kind === 'fetch' && j.item ? `回収：${ITEMS[j.item].name}` : j.kind === 'cache' ? '救援物資' : '偵察';
+      put({ text: `依頼${i + 1} ${'★'.repeat(j.tier)} ${what}`, x: X(j.tx + 0.5), y: Y(j.ty + 0.5) - 25, fg: '#0e1a22', bg: 'rgba(138,192,224,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 50], [0, -14], [70, 25], [-70, 25]]);
+    });
     // 2) 川の名前・国道の標識（1本につき見える所に2枚まで）
     const F = this.world.features;
     if (F.river) {

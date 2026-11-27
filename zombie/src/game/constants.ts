@@ -142,6 +142,9 @@ export const OBJ_HP: Record<ObjKind, number> = {
   bag: 1,
   drop: 1,
   barrel: 30,
+  raintank: 200,
+  stove: 220,
+  radio: 1,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -168,6 +171,9 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
   'bed',
   'sandbag',
   'stash',
+  'raintank',
+  'stove',
+  'radio',
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */
@@ -208,6 +214,8 @@ export interface Recipe {
   out: { id: ItemId; n: number };
   /** 必要な作業台レベル（1〜3） */
   lv?: number;
+  /** 作業台ではなく、拠点のかまどの近くで作る（料理） */
+  station?: 'stove';
 }
 
 /** クラフトレシピ（素材はバックパックから消費し、完成品はバックパックへ） */
@@ -226,8 +234,41 @@ export const RECIPES: Recipe[] = [
   { id: 'stim', name: '興奮剤', desc: 'HP +15・スタミナ全快', bench: true, lv: 2, cost: { chem: 2, medkit: 1 }, out: { id: 'stim', n: 1 } },
   { id: 'suppressor', name: 'サプレッサー', desc: '銃声を約1/3に抑える', bench: true, lv: 3, cost: { parts: 2, scrap: 4, tools: 1 }, out: { id: 'suppressor', n: 1 } },
   { id: 'scope', name: '4倍スコープ', desc: '集弾率が大きく上がり視界が伸びる', bench: true, lv: 3, cost: { parts: 2, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
+  { id: 'splint', name: '添え木', desc: '骨折の手当て（足が遅い・ダッシュできない状態を治す）', bench: false, cost: { cloth: 2, scrap: 1 }, out: { id: 'splint', n: 1 } },
+  { id: 'coat', name: '防寒コート', desc: '持っているだけで雨・夜の冷えが半分に', bench: true, cost: { cloth: 6, scrap: 1 }, out: { id: 'coat', n: 1 } },
+  { id: 'stew', name: '温かいシチュー', desc: '空腹 +60・HP +20・6分間 休息済み', bench: false, station: 'stove', cost: { water: 1, can: 1, herbs: 1 }, out: { id: 'stew', n: 1 } },
+  { id: 'tea', name: 'ハーブティー', desc: '汚染度 -30・HP +8・2分間 休息済み', bench: false, station: 'stove', cost: { water: 1, herbs: 1 }, out: { id: 'tea', n: 1 } },
   { id: 'tools', name: '工具セット', desc: '拠点強化の素材', bench: true, lv: 3, cost: { scrap: 10, parts: 2 }, out: { id: 'tools', n: 1 } },
 ];
+
+// ---------------- 拠点に建てる物 ----------------
+export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'raintank' | 'stove';
+export interface BuildDef {
+  kind: BuildKind;
+  name: string;
+  /** 役割（防御・罠・明かり・生産・調理） */
+  role: string;
+  desc: string;
+  cost: Partial<Record<ItemId, number>>;
+  hp: number;
+  /** 必要な作業台レベル */
+  lv?: number;
+}
+export const BUILDS: BuildDef[] = [
+  { kind: 'woodWall', name: '木のバリケード', role: '防御', desc: '門や隙間を塞ぐ。大群はこれを壊して入ろうとする', cost: { scrap: 4, cloth: 1 }, hp: 750 },
+  { kind: 'ironWall', name: '鉄板バリケード', role: '防御', desc: '木の約2.5倍の耐久。作業台Lv2', cost: { scrap: 7, parts: 1 }, hp: 1800, lv: 2 },
+  { kind: 'spike', name: '釘の罠', role: '罠', desc: '踏んだゾンビに大ダメージ・足止め。使うほど傷む', cost: { scrap: 4 }, hp: 300 },
+  { kind: 'torch', name: 'たいまつ', role: '明かり', desc: '夜の拠点を照らす。光の中は敵が見える', cost: { cloth: 2, scrap: 1 }, hp: 80 },
+  { kind: 'raintank', name: '雨水タンク', role: '生産', desc: '雨・嵐で水が貯まる（毎朝も少し）。[F] で回収', cost: { scrap: 6, cloth: 2 }, hp: 200 },
+  { kind: 'stove', name: '調理かまど', role: '調理', desc: '水・缶詰・薬草で温かい料理。[F] で料理メニュー', cost: { scrap: 5, parts: 1 }, hp: 220 },
+];
+export const BUILD_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(BUILDS.map((b) => b.kind));
+/** 建てた物は補強されていて、ゾンビの攻撃で受けるダメージがこの倍率になる */
+export const BUILD_DAMAGE_MUL = 0.25;
+/** 建てられる距離（タイル） */
+export const BUILD_RANGE = 6;
+/** 雨水タンクに貯まる水の上限 */
+export const RAINTANK_MAX = 6;
 
 /** 作業台を使える距離(px) */
 export const BENCH_RANGE = 110;

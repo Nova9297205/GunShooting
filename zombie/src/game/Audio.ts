@@ -6,6 +6,7 @@
 // ============================================================
 import type { GameEvent, SoundKey, ViewState, WeaponId } from '../types';
 import { TILE, ZOMBIE } from './constants';
+import { gamepad } from '../ui/Gamepad';
 
 export type MusicMood = 'day' | 'night' | 'horde';
 
@@ -579,7 +580,10 @@ export class AudioManager {
         if (ev.o === localId && this.gate('killconf', 0.05)) this.tone({ type: 'triangle', f: 220, f2: 110, dur: 0.12, g: 0.14 });
         break;
       case 'phit':
-        if (ev.id === localId) this.hurt();
+        if (ev.id === localId) {
+          this.hurt();
+          gamepad.rumble(0.6, 0.4, 160);
+        }
         break;
       case 'down':
         this.down(ev.x, ev.y, ev.id === localId);
@@ -593,8 +597,12 @@ export class AudioManager {
       case 'chop':
         this.chop(ev.x, ev.y, ev.kind);
         break;
-      case 'build':
+      case 'built':
         this.hammer(ev.x, ev.y);
+        break;
+      case 'crash':
+        this.crash(ev.x, ev.y, 'car');
+        if (Math.hypot(ev.x - this.listener.x, ev.y - this.listener.y) < 200) gamepad.rumble(0.3 + ev.hard * 0.7, 0.3, 120 + ev.hard * 200);
         break;
       case 'smash':
         this.smash(ev.x, ev.y, ev.kind);
@@ -698,8 +706,22 @@ export class AudioManager {
   }
 
   /** 毎フレーム：リスナー位置の更新と環境音（ゾンビのうめき声・焚き火） */
+  private engineT = 0;
   update(dt: number, view: ViewState, campfires: { x: number; y: number }[]): void {
     if (!this.ready) return;
+    // 車のエンジン音（近くの走っている車ごとに、速さで音程が上がる低いうなり）
+    this.engineT -= dt;
+    if (this.engineT <= 0) {
+      this.engineT = 0.12;
+      for (const v of view.vehicles ?? []) {
+        const occupied = v.seats.some((id) => id >= 0);
+        if (!occupied || v.broken) continue;
+        const s = this.spatial(v.x, v.y);
+        if (!s) continue;
+        const sp = Math.min(1, Math.abs(v.spd) / 560);
+        this.tone({ type: 'sawtooth', f: 46 + sp * 70, f2: 48 + sp * 74, dur: 0.16, g: (0.02 + sp * 0.035) * s.k, lp: 380 + sp * 500, pan: s.pan, a: 0.02 });
+      }
+    }
     // 追われているときは緊迫した曲調に
     const chased = view.zombies.some((z) => z.alert === 2 && Math.hypot(z.x - this.listener.x, z.y - this.listener.y) < 650);
     this.music?.setMood(chased ? 'horde' : view.phase);
