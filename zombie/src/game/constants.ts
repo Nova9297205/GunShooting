@@ -148,6 +148,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
   cabinet: 1,
   locker: 1,
   wcase: 1,
+  safe: 1,
   fridge: 1,
   desk: 1,
   bed: 1,
@@ -168,6 +169,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
 
 /** 衝突する（通れない）オブジェクト */
 export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
+  'safe',
   'barrel',
   'tree',
   'car',

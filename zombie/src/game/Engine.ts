@@ -119,7 +119,7 @@ interface SimPlayer extends PlayerSnap {
   useCd: number;
   idle: number;
   reloadSlot: 'prim' | 'sec' | '';
-  search: { cid: number; t: number; dur: number; x: number; y: number } | null;
+  search: { cid: number; t: number; dur: number; x: number; y: number; loud?: boolean; noiseT?: number } | null;
   /** 足音の発生タイマー */
   stepNoiseT: number;
   /** 興奮剤の残り時間 */
@@ -213,7 +213,7 @@ const BENCH_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['bench', 'wbench']);
 const FIRE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['campfire', 'fire']);
 
 /** 漁れる入れ物 */
-export const CONTAINER_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['shelf', 'cabinet', 'locker', 'wcase', 'fridge', 'desk', 'crate', 'mcrate', 'car', 'box', 'bag', 'drop']);
+export const CONTAINER_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['safe', 'shelf', 'cabinet', 'locker', 'wcase', 'fridge', 'desk', 'crate', 'mcrate', 'car', 'box', 'bag', 'drop']);
 /** 拠点の倉庫 */
 export const STORAGE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['chest', 'stash']);
 
@@ -268,6 +268,7 @@ const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
   desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
   crate: [['crowbar', 0.35, 1, 1], ['fireaxe', 0.12, 1, 1], ['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
   car: [['crowbar', 0.3, 1, 1], ['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
+  safe: [['valuables', 4, 1, 3], ['weapon', 2.2, 1, 1], ['attach', 2, 1, 1], ['ammo762ap', 1.5, 6, 14], ['ammo9ap', 1.5, 8, 16], ['upkit', 1.2, 1, 1], ['medkit', 1.5, 1, 1], ['stim', 1, 1, 1], ['pack2', 0.6, 1, 1], ['tools', 0.8, 1, 1]],
   wcase: [['ammo762', 4, 8, 20], ['ammo9', 3, 10, 20], ['shells', 3, 4, 8], ['weapon', 2, 1, 1], ['attach', 1.5, 1, 1], ['parts', 2, 1, 2], ['ammo762ap', 1, 5, 12], ['slug', 0.8, 3, 6]],
   mcrate: [['pack3', 0.35, 1, 1], ['pack2', 0.3, 1, 1], ['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
   box: [['can', 3, 1, 2], ['bandage', 2, 1, 1], ['ammo9', 2, 6, 10], ['cloth', 1, 1, 2]],
@@ -1316,6 +1317,15 @@ export class HostSimulation {
         p.search = null;
       } else {
         s.t += dt;
+        // こじ開けの音：周りの感染体を呼び寄せる
+        if (s.loud) {
+          s.noiseT = (s.noiseT ?? 0) - dt;
+          if (s.noiseT <= 0) {
+            s.noiseT = 0.8;
+            this.makeNoise(p.x, p.y, 440, true);
+            this.events.push({ k: 'smash', x: p.x, y: p.y, kind: 'safe' });
+          }
+        }
         if (s.t >= s.dur) {
           p.search = null;
           this.openContainer(p, o);
@@ -2902,8 +2912,21 @@ export class HostSimulation {
     const tier = this.tierAt(best.tx, best.ty);
     const fresh = best.ready === 1 && best.kind !== 'bag';
     const base = fresh ? 1.5 + tier * 0.15 + (best.kind === 'wcase' || best.kind === 'mcrate' || best.kind === 'drop' ? 0.5 : 0) : 0.3;
-    const dur = base * skillMods(p.xp).searchMul;
-    p.search = { cid: best.id, t: 0, dur, x: p.x, y: p.y };
+    let dur = base * skillMods(p.xp).searchMul;
+    let loud = false;
+    // 金庫：バールを構えていれば速いがうるさい。工具セットなら遅いが静か。どちらもなければ開かない
+    if (best.kind === 'safe' && fresh) {
+      const bar = p.mel?.id === 'crowbar' && p.tool === Tool.Melee;
+      if (!bar && countItem(p.bag, 'tools') < 1) {
+        if (p.mel?.id === 'crowbar') return this.pop(p, '金庫：バールを構えて（近接に持ち替えて）[F]', '#e0c060', 'error');
+        return this.pop(p, '金庫：バールでこじ開けるか、工具セットで開ける', '#e0c060', 'error');
+      }
+      loud = bar;
+      dur = bar ? 3 : 8;
+      if (bar && p.mel?.w) p.mel.w.mag = Math.max(1, p.mel.w.mag - 12);
+      this.pop(p, bar ? 'バールで金庫をこじ開けている — 大きな音が響く！' : '工具セットで金庫を静かに開けている（8 秒）', '#e0c060');
+    }
+    p.search = { cid: best.id, t: 0, dur, x: p.x, y: p.y, loud };
     if (fresh) this.events.push({ k: 'search', id: p.id, x: (best.tx + 0.5) * TILE, y: (best.ty + 0.5) * TILE, done: false });
   }
 
@@ -2919,7 +2942,7 @@ export class HostSimulation {
     if (o.ready && o.kind !== 'bag') {
       o.ready = 0;
       // 探索済みの入れ物は 2〜3日ほどで中身が戻る（長い1日でも同じ所を回るだけにならない）
-      o.regrowT = CYCLE_SECONDS * (2 + Math.random());
+      o.regrowT = o.kind === 'safe' ? 1e12 : CYCLE_SECONDS * (2 + Math.random());
       this.changed.add(o.id);
       this.events.push({ k: 'search', id: p.id, x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, done: true });
       this.tutMark(p, TUT_SEARCH);

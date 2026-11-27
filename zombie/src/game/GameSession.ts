@@ -1245,7 +1245,7 @@ export class GameSession {
         }
         else if (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) {
           const name = CONTAINER_NAMES[ob.kind] ?? '入れ物';
-          h = ob.kind === 'bag' ? `[F] ${name}を調べる` : ob.ready ? `[F] ${name}を探索する` : `[F] ${name}（探索済み）`;
+          h = ob.kind === 'safe' && ob.ready ? '[F] 金庫を開ける — バールを構えて：速いが音が出る／工具セット：遅いが静か' : ob.kind === 'bag' ? `[F] ${name}を調べる` : ob.ready ? `[F] ${name}を探索する` : `[F] ${name}（探索済み）`;
         }
         if (h) {
           bd = d;

@@ -426,6 +426,7 @@ export const CONTAINER_NAMES: Record<string, string> = {
   cabinet: '薬品棚',
   locker: 'ロッカー',
   wcase: '武器ケース',
+  safe: '金庫',
   fridge: '冷蔵庫',
   desk: '机',
   crate: '物資クレート',
