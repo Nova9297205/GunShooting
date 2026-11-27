@@ -522,6 +522,7 @@ export class HostSimulation {
     this.dropAt = DAY_SECONDS * (0.08 + Math.random() * 0.2);
     this.newJobs(true);
     this.spawnVehicles();
+    this.dayTip();
     // 初日の天候はランダム（霧で始まることもある）
     if (Math.random() < 0.3) this.setWeather(Math.random() < 0.5 ? 'fog' : 'rain', true);
     this.events.push({ k: 'banner', t: 'DAY 1', s: '建物を漁って物資を集め、生きて拠点に持ち帰れ', c: '#e0cfa8', snd: 'day' });
@@ -783,6 +784,23 @@ export class HostSimulation {
 
   private duskWarnedDay = 0;
   /** 夕方（18:30）に、拠点の外にいる人へ帰還の判断材料を知らせる */
+  /** 毎朝のひとこと：その日に試すと良いこと（最初の 1 週間で、すべての遊びに触れられるように） */
+  private dayTip(): void {
+    const car = this.vehicles[0];
+    const carDir = car ? `${directionName(car.x / TILE, car.y / TILE)} ${Math.round(Math.hypot(car.x / TILE - BASE_TX, car.y / TILE - BASE_TY))}m の所` : '近く';
+    const tips: Record<number, string> = {
+      1: '今日の目標：無線の依頼を1つ達成して、日が暮れる前に拠点へ。夜は拠点で [V] 建設・かまどで料理・ベッドで眠る',
+      2: `拠点の${carDir}に壊れたピックアップがある。鉄くず6・武器パーツ2で直すと、遠くの依頼も楽になる`,
+      3: '作業台を Lv2 にすると鉄板バリケードが建てられる。明日の夜は大群が来る — 門を塞いで備えよう',
+      4: '今夜は大群の夜。門（4か所）をバリケードで塞ぎ、釘の罠を内側に。攻撃された所は [F] で修理',
+      5: '無線の信頼度が Lv3 になると、遠くの依頼がもう1件届く。車のトランクで大量に持ち帰ろう',
+      6: '雨の日はコート（布6）があると冷えにくい。雨水タンクで水を貯めて、シチューで休息済みに',
+      7: '1週間生き延びた。遠くの★4の地区（軍用地・病院）で、良い武器と装備を探そう',
+    };
+    const t = tips[this.day];
+    if (t) this.events.push({ k: 'feed', cat: 'info', t: `DAY ${this.day}：${t}`, c: '#cfe8f6' });
+  }
+
   private updateReturnAdvice(): void {
     const m = this.minute();
     if (m < 18 * 60 || m > 20 * 60 || this.duskWarnedDay === this.day) return;
@@ -1045,6 +1063,7 @@ export class HostSimulation {
       }
       this.hordeReward = false;
       this.newJobs(true);
+      this.dayTip();
       // 次の補給物資の投下時刻
       this.dropAt = DAY_SECONDS * (0.12 + Math.random() * 0.45);
       this.noonRolled = false;

@@ -3,7 +3,7 @@
 // ============================================================
 
 /** 押した瞬間だけ拾いたいキー */
-const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'KeyG', 'Escape', 'Tab', 'KeyT', 'KeyV', 'KeyX', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
+const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'KeyG', 'Escape', 'Tab', 'KeyT', 'KeyV', 'KeyX', 'F2', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'];
 
 export class InputController {
   private keys = new Set<string>();
@@ -132,7 +132,7 @@ export class InputController {
       if (EDGE_CODES.includes(e.code)) this.edges.add(e.code);
     }
     this.keys.add(e.code);
-    if (e.code === 'Space' || e.code.startsWith('Arrow') || e.code === 'Tab') e.preventDefault();
+    if (e.code === 'Space' || e.code.startsWith('Arrow') || e.code === 'Tab' || e.code === 'F2') e.preventDefault();
   };
 
   private onKeyUp = (e: KeyboardEvent) => {

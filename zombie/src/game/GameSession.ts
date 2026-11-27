@@ -576,6 +576,11 @@ export class GameSession {
     } else this.handleToolKeys();
     if (this.localTool !== prevTool) audio.click();
     if (this.input.consume('KeyM')) audio.toggleMute();
+    // F2：写真モード（HUD を消す。ストア用・スクリーンショット用）
+    if (this.input.consume('F2')) {
+      this.renderer.photo = !this.renderer.photo;
+      this.hudButtons.style.visibility = this.renderer.photo ? 'hidden' : '';
+    }
     this.muteBtn.textContent = audio.settings.muted ? '🔇' : '🔊';
     // Esc を先に処理する（重くて Esc と Tab/C が同じフレームに入っても、後から押したほうが効く）
     if (this.input.consume('Escape')) {
@@ -715,7 +720,7 @@ export class GameSession {
       view.players.some((p) => p.id !== localId && p.status === 'down' && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange);
 
     // 地図を開いている間は右下のボタンを隠す（地図の枠に重ならないように）
-    this.hudButtons.style.visibility = this.mapOpen ? 'hidden' : '';
+    this.hudButtons.style.visibility = this.mapOpen || this.renderer.photo ? 'hidden' : '';
     // パネル・地図を開いている間は、タッチのスティックを止めてパネルを触れるようにする
     this.touch?.show(!this.mapOpen && !this.craftMenu.open && !this.invPanel.open);
     this.renderer.render(view, {

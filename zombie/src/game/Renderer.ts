@@ -737,7 +737,22 @@ export class Renderer {
     {
       ctx.font = 'bold 12px "Noto Sans JP", "Segoe UI", sans-serif';
       const placed: { x: number; y: number; w: number }[] = [];
+      // 車に乗っている人は、車の上にまとめて1行で
+      for (const v of view.vehicles ?? []) {
+        const names = v.seats.filter((id) => id >= 0).map((id) => view.players.find((q) => q.id === id)).filter((q): q is PlayerSnap => !!q);
+        if (!names.length || this.photo) continue;
+        const label = names.map((q) => (q.id === o.localId ? `${q.name}(YOU)` : q.name)).join('・');
+        ctx.font = `bold 12px ${UI}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(8,9,7,0.85)';
+        ctx.strokeText(label, v.x, v.y - 40);
+        ctx.fillStyle = '#cfe8f6';
+        ctx.fillText(label, v.x, v.y - 40);
+      }
       for (const p of [...view.players].sort((a, b) => b.y - a.y)) {
+        if (p.veh !== undefined || this.photo) continue;
         const label = p.id === o.localId ? `${p.name} (YOU)` : p.name;
         const lw = ctx.measureText(label).width;
         let off = p.status === 'down' ? 16 : 0;
@@ -750,7 +765,7 @@ export class Renderer {
     this.drawPingMarkers(fx, me);
     this.drawDropBeacon(view);
     this.drawLandmarks(vx0, vy0, vx1, vy1);
-    this.drawPopups(fx);
+    if (!this.photo) this.drawPopups(fx);
     ctx.restore();
 
     const t3 = performance.now();
@@ -764,7 +779,13 @@ export class Renderer {
       f.setTransform(this.baseDpr, 0, 0, this.baseDpr, 0, 0);
       this.ctx = f;
       try {
-        this.drawHUD(view, o, me, dark);
+        // 写真モード（F2）：HUD を消して景色だけ
+        if (!this.photo) this.drawHUD(view, o, me, dark);
+        else {
+          this.hudCtx.setTransform(1, 0, 0, 1, 0, 0);
+          this.hudCtx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+          this.hudKey = '';
+        }
       } finally {
         this.ctx = main;
       }
@@ -1330,6 +1351,8 @@ export class Renderer {
   }
 
   private vehLights: { x: number; y: number }[] = [];
+  /** 写真モード（HUD・名前・数字を消す） */
+  photo = false;
   /** タッチ操作の端末（ボタン名で案内する） */
   private touchUI = false;
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
@@ -2712,7 +2735,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = `9px ${UI}`;
     ctx.fillStyle = '#6f6c5a';
-    ctx.fillText('F 探索/ドア ・ Tab 持ち物 ・ R リロード ・ T 弾種 ・ C 作業台', x + 10, y + ph - 9, pw - 20);
+    ctx.fillText('F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
     void view;
   }
 
