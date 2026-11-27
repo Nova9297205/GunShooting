@@ -136,6 +136,37 @@ export class VectorArt implements ArtSet {
       return true;
     }
     switch (o.kind) {
+      case 'radio': {
+        // 無線機：机の上の無線セットとアンテナ。依頼があるときはランプが点滅
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(x + 5, y + 10, 34, 28);
+        ctx.fillStyle = '#5a4630';
+        ctx.fillRect(x + 2, y + 6, 36, 28);
+        ctx.fillStyle = '#6e5a3e';
+        ctx.fillRect(x + 2, y + 6, 36, 3);
+        ctx.fillStyle = '#2f3430';
+        ctx.fillRect(x + 7, y + 13, 26, 15);
+        ctx.fillStyle = '#4a524a';
+        ctx.fillRect(x + 8, y + 14, 24, 4);
+        ctx.fillStyle = '#9fd0a0';
+        ctx.fillRect(x + 10, y + 21, 10, 4);
+        ctx.fillStyle = '#c8c0a0';
+        ctx.beginPath();
+        ctx.arc(x + 26, y + 23, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#a0a6aa';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x + 30, y + 13);
+        ctx.lineTo(x + 34, y - 4);
+        ctx.stroke();
+        const blink = Math.sin(t * 5) > 0;
+        ctx.fillStyle = blink ? '#ff6040' : '#602018';
+        ctx.beginPath();
+        ctx.arc(x + 34, y - 4, 2, 0, Math.PI * 2);
+        ctx.fill();
+        return true;
+      }
       case 'raintank': {
         // 雨水タンク：青いドラム＋じょうご。水位を窓で見せる
         ctx.fillStyle = 'rgba(0,0,0,0.3)';

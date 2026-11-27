@@ -8,6 +8,7 @@
 //   ソロ・ホスト時のみ実行され、ゲストはスナップショットを受け取るだけ
 // ============================================================
 import type {
+  Job,
   GameEvent,
   GameResult,
   InputFrame,
@@ -61,6 +62,7 @@ import {
   WORLD_W,
   ZOMBIE,
 } from './constants';
+import { jobReward, makeJobs, radioLevel, rewardMul } from './jobs';
 import { buildDef, buildSpotError, canAfford } from './build';
 import {
   addItem,
@@ -368,6 +370,11 @@ export class HostSimulation {
   /** 昼の 13:00 に天候が変わることがある（長い昼が単調にならないように） */
   private noonRolled = false;
   private barricadeWarnT = -99;
+  // ---- 無線の依頼 ----
+  jobs: Job[] = [];
+  private jobSeq = 1;
+  radioDone = 0;
+  private jobCheckT = 0;
   weather: Weather = 'clear';
   /** 天候の強さ（0..1 でなめらかに切り替わる） */
   wx = 0;
@@ -488,6 +495,7 @@ export class HostSimulation {
     this.updateChunks(true);
     this.spawnPatrols(3);
     this.dropAt = DAY_SECONDS * (0.08 + Math.random() * 0.2);
+    this.newJobs(true);
     // 初日の天候はランダム（霧で始まることもある）
     if (Math.random() < 0.3) this.setWeather(Math.random() < 0.5 ? 'fog' : 'rain', true);
     this.events.push({ k: 'banner', t: 'DAY 1', s: '建物を漁って物資を集め、生きて拠点に持ち帰れ', c: '#e0cfa8', snd: 'day' });
@@ -618,7 +626,7 @@ export class HostSimulation {
 
   /** 追加の保存項目（拡張用） */
   protected saveExtra(): Record<string, unknown> {
-    return {};
+    return { jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone };
   }
 
   /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
@@ -641,6 +649,12 @@ export class HostSimulation {
     sim.storage = data.storage;
     sim.storage.ver = (sim.storage.ver ?? 1) + 1;
     sim.dropAt = data.dropAt;
+    const ex = data.extra as { jobs?: Job[]; jobSeq?: number; radioDone?: number } | undefined;
+    if (ex?.jobs) {
+      sim.jobs = ex.jobs;
+      sim.jobSeq = ex.jobSeq ?? sim.jobSeq;
+      sim.radioDone = ex.radioDone ?? 0;
+    }
     sim.nextObjId = Math.max(sim.nextObjId, data.nextObjId);
     sim.setWeather(data.weather, true);
     for (const p of sim.players) {
@@ -789,6 +803,8 @@ export class HostSimulation {
       ...(this.hordeNight ? { horde: true } : {}),
       base: this.base,
       drop: this.dropPos(),
+      jobs: this.jobs,
+      radio: { done: this.radioDone, lv: radioLevel(this.radioDone) },
       players: this.players.map((p) => ({
         id: p.id,
         name: p.name,
@@ -862,6 +878,7 @@ export class HostSimulation {
     this.tick++;
     this.updateClock(dt);
     this.updateBuilds(dt);
+    this.updateJobs(dt);
     this.updateSleep();
     this.updateReturnAdvice();
     if (this.hordeNight && this.hordeWaves > 0) {
@@ -979,6 +996,7 @@ export class HostSimulation {
         }
       }
       this.hordeReward = false;
+      this.newJobs(true);
       // 次の補給物資の投下時刻
       this.dropAt = DAY_SECONDS * (0.12 + Math.random() * 0.45);
       this.noonRolled = false;
@@ -1602,6 +1620,116 @@ export class HostSimulation {
     return null;
   }
 
+  // ======================== 無線の依頼 ========================
+
+  /** その日の依頼を作り直す（物資箱を施設に置く） */
+  private newJobs(announce: boolean): void {
+    const lv = radioLevel(this.radioDone);
+    const jobs = makeJobs(this.world.locations, this.day, lv, Math.random, this.jobSeq);
+    this.jobSeq += jobs.length;
+    for (const j of jobs) {
+      if (j.kind === 'scout') continue;
+      const spot = this.crateSpot(j.loc);
+      if (!spot) {
+        j.kind = 'scout';
+        j.title = j.title.replace(/から回収|の救援物資/, 'の偵察');
+        j.desc = `${this.world.locations[j.loc].name}の様子を見てきてほしい（施設に入れば達成）`;
+        delete j.item;
+        delete j.need;
+        continue;
+      }
+      const o: SimObj = { id: this.nextObjId++, kind: 'mcrate', tx: spot[0], ty: spot[1], hp: 1, maxHp: 1, ready: 1, regrowT: 0 };
+      this.world.setObj(o);
+      this.changed.add(o.id);
+      const c = emptyBag(8);
+      if (j.kind === 'fetch' && j.item && j.need) addItem(c, j.item, j.need);
+      else for (const r of jobReward(j.tier, rewardMul(lv) * 1.3)) addItem(c, r.id, r.n);
+      if (Math.random() < 0.5) addItem(c, 'can', 1);
+      this.contents.set(o.id, c);
+      j.crate = o.id;
+    }
+    this.jobs = jobs;
+    if (announce) this.events.push({ k: 'feed', cat: 'info', t: `無線：今日の依頼が ${jobs.length} 件届いた — 画面右の一覧と、コンパス・地図 [B] の印を見よう`, c: '#8ac0e0', snd: 'alarm' });
+  }
+
+  /** 施設の中の、物資箱を置ける床 */
+  private crateSpot(locIdx: number): [number, number] | null {
+    const l = this.world.locations[locIdx];
+    if (!l) return null;
+    const cand: [number, number][] = [];
+    for (let y = l.y + 1; y < l.y + l.h - 1; y++)
+      for (let x = l.x + 1; x < l.x + l.w - 1; x++) {
+        if (this.world.solid(x, y) || this.world.objAt(x, y)) continue;
+        // 通路を塞がないよう、壁ぎわ（隣に固いマスがある所）を優先
+        const wall = this.world.solid(x + 1, y) || this.world.solid(x - 1, y) || this.world.solid(x, y + 1) || this.world.solid(x, y - 1);
+        if (wall) cand.push([x, y]);
+      }
+    return cand.length ? cand[Math.floor(Math.random() * cand.length)] : null;
+  }
+
+  private updateJobs(dt: number): void {
+    this.jobCheckT -= dt;
+    if (this.jobCheckT > 0) return;
+    this.jobCheckT = 0.5;
+    for (const j of this.jobs) {
+      if (j.done) continue;
+      if (j.kind === 'scout') {
+        const l = this.world.locations[j.loc];
+        const p = this.players.find((q) => q.status === 'alive' && !q.away && q.x / TILE >= l.x && q.y / TILE >= l.y && q.x / TILE < l.x + l.w && q.y / TILE < l.y + l.h);
+        if (p) this.completeJob(j, p);
+      } else if (j.kind === 'fetch' && j.item) {
+        let have = countItem(this.storage.shared, j.item);
+        for (const p of this.players) if (p.status !== 'dead') have += countItem(p.bag, j.item);
+        j.have = Math.min(j.need ?? 1, have);
+      }
+    }
+  }
+
+  /** 無線で報告：回収の依頼の品を（バックパック → 共有倉庫の順に）渡す */
+  private useRadio(p: SimPlayer): void {
+    let reported = 0;
+    for (const j of this.jobs) {
+      if (j.done || j.kind !== 'fetch' || !j.item || !j.need) continue;
+      if (countItem(p.bag, j.item) + countItem(this.storage.shared, j.item) < j.need) continue;
+      this.payCost(p, { [j.item]: j.need });
+      this.completeJob(j, p);
+      reported++;
+    }
+    if (reported) return;
+    const open = this.jobs.filter((j) => !j.done);
+    if (!open.length) return this.pop(p, '無線：今日の依頼はすべて達成した。明日の朝に新しい依頼が届く', '#8ac0e0');
+    const f = open.find((j) => j.kind === 'fetch');
+    this.pop(p, f && f.item ? `無線：「${ITEMS[f.item].name} ×${f.need} を待っている」` : '無線：報告する品はまだない', '#8ac0e0', 'error');
+  }
+
+  private completeJob(j: Job, by: SimPlayer): void {
+    j.done = true;
+    const lvBefore = radioLevel(this.radioDone);
+    this.radioDone++;
+    const lv = radioLevel(this.radioDone);
+    // 報酬：救援物資は箱の中身。それ以外は共有倉庫（入りきらなければ収納箱）へ
+    let where = '物資箱の中身が報酬';
+    if (j.kind !== 'cache') {
+      const box = [...this.world.objects.values()].find((o) => o.kind === 'box');
+      for (const r of jobReward(j.tier, rewardMul(lvBefore))) {
+        let left = addItem(this.storage.shared, r.id, r.n);
+        if (left > 0 && box) {
+          if (!this.contents.has(box.id)) this.contents.set(box.id, emptyBag(12));
+          left = addItem(this.contents.get(box.id)!, r.id, left);
+          box.ready = 1;
+          this.changed.add(box.id);
+        }
+      }
+      this.storage.ver++;
+      where = '報酬は拠点の共有倉庫へ';
+    }
+    // 協力：生きている全員に経験値
+    for (const p of this.players) if (p.status === 'alive') this.gainXp(p, 0, 8 + j.tier * 8);
+    this.events.push({ k: 'job', t: `依頼達成：${j.title}（${by.name}） — ${where}`, lvUp: lv > lvBefore ? lv : undefined });
+    this.events.push({ k: 'feed', cat: 'up', t: `★${j.tier} 依頼達成：${j.title} — ${where}`, c: '#e0cfa8', snd: 'clear' });
+    if (lv > lvBefore) this.events.push({ k: 'feed', cat: 'up', t: `無線の信頼度が Lv${lv} に上がった！ 依頼の報酬 +${Math.round((rewardMul(lv) - 1) * 100)}%${lv === 3 ? '・遠い依頼がもう1件届くように' : ''}`, c: '#e0b25a', snd: 'level' });
+  }
+
   // ======================== 拠点づくり ========================
 
   /** 素材をバックパック → 共有倉庫の順に払う */
@@ -1800,6 +1928,7 @@ export class HostSimulation {
           STORAGE_KINDS.has(o.kind) ||
           (CONTAINER_KINDS.has(o.kind) && (o.kind !== 'car' || o.hp > 0)) ||
           (o.kind === 'bed' && inBase((o.tx + 0.5) * TILE, (o.ty + 0.5) * TILE)) ||
+          o.kind === 'radio' ||
           (BUILD_KINDS.has(o.kind) && (o.hp < o.maxHp || (o.kind === 'raintank' && o.ready > 0)));
         if (!usable) continue;
         const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) - (o.kind === 'door' ? 0 : 6);
@@ -1810,6 +1939,10 @@ export class HostSimulation {
       }
     if (best && best.kind === 'bed') {
       this.trySleep(p);
+      return;
+    }
+    if (best && best.kind === 'radio') {
+      this.useRadio(p);
       return;
     }
     if (best && BUILD_KINDS.has(best.kind)) {
@@ -1837,6 +1970,8 @@ export class HostSimulation {
 
   private openContainer(p: SimPlayer, o: SimObj): void {
     if (!this.contents.has(o.id)) this.contents.set(o.id, this.rollLoot(o));
+    const cj = this.jobs.find((j) => j.crate === o.id && j.kind === 'cache' && !j.done);
+    if (cj) this.completeJob(cj, p);
     if (o.ready && o.kind !== 'bag') this.gainXp(p, 0, 4 + this.tierAt(o.tx, o.ty) * 3 + (o.kind === 'drop' ? 15 : 0));
     if (o.id === this.dropObj && o.ready) {
       this.dropObj = null;

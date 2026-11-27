@@ -369,6 +369,9 @@ export class Effects {
         if (ev.kind === 'car') this.burst(ev.x, ev.y, '#ffe9a8', 5, 260, 0.2, 2);
         break;
       }
+      case 'job':
+        this.notice = { text: ev.lvUp ? `依頼達成！ 無線の信頼度 Lv${ev.lvUp}` : '依頼達成！', sub: ev.t, color: '#8ac0e0' };
+        break;
       case 'built': {
         // 建てた・直した：木くず・土ぼこりと、置いた場所に光る枠
         const c = DEBRIS_COLOR[ev.kind] ?? '#b0a080';

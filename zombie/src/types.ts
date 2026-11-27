@@ -1,7 +1,7 @@
 // ============================================================
 // 共通型定義（プレイヤー・ゾンビ・弾・オブジェクト・通信パケット）
 // ============================================================
-import type { Slot } from './game/items';
+import type { ItemId, Slot } from './game/items';
 import type { Facility, Profile } from './game/progression';
 
 export type { Slot, WeaponId } from './game/items';
@@ -41,6 +41,8 @@ export type ObjKind =
   | 'stash'
   | 'bag'
   | 'drop'
+  // 拠点の無線機（依頼の報告）
+  | 'radio'
   // 拠点に建てる物
   | 'raintank'
   | 'stove'
@@ -209,6 +211,8 @@ export type GameEvent =
   | { k: 'chop'; x: number; y: number; kind: ObjKind }
   | { k: 'build'; x: number; y: number; kind: ObjKind }
   | { k: 'smash'; x: number; y: number; kind: ObjKind }
+  /** 依頼を達成した */
+  | { k: 'job'; t: string; lvUp?: number }
   /** 拠点に建てた・修理した */
   | { k: 'built'; x: number; y: number; kind: ObjKind; id: number; repair?: boolean }
   | { k: 'break'; x: number; y: number; kind: ObjKind }
@@ -258,6 +262,35 @@ export interface ViewState {
   base: Record<Facility, number>;
   /** 補給物資の投下地点（なければ null） */
   drop: { x: number; y: number } | null;
+  /** 無線の依頼（その日の分） */
+  jobs?: Job[];
+  /** 無線の信頼度：達成した依頼の数とレベル */
+  radio?: { done: number; lv: number };
+}
+
+/** 無線の依頼 */
+export interface Job {
+  id: number;
+  kind: 'fetch' | 'scout' | 'cache';
+  title: string;
+  desc: string;
+  /** 目的の施設（world.locations の番号） */
+  loc: number;
+  tx: number;
+  ty: number;
+  /** 回収する品と数（fetch） */
+  item?: ItemId;
+  need?: number;
+  /** 持っている数（全員の合計・表示用） */
+  have?: number;
+  /** 危険度 1〜4 */
+  tier: number;
+  /** 拠点からの距離（m） */
+  dist: number;
+  day: number;
+  /** 目的の物資箱のオブジェクトID */
+  crate?: number;
+  done?: boolean;
 }
 
 export interface StorageState {

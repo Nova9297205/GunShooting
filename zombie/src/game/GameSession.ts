@@ -458,6 +458,8 @@ export class GameSession {
       wx: L.wx,
       base: L.base,
       drop: L.drop,
+      jobs: L.jobs,
+      radio: L.radio,
       cont: L.cont,
       storage: this.storage ?? undefined,
       players,
@@ -865,6 +867,7 @@ export class GameSession {
         const usable =
           ob.kind === 'door' ||
           ob.kind === 'stove' ||
+          ob.kind === 'radio' ||
           STORAGE_KINDS.has(ob.kind) ||
           (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) ||
           (BUILD_KINDS.has(ob.kind) && (ob.hp < ob.maxHp || (ob.kind === 'raintank' && ob.ready > 0)));
@@ -919,7 +922,10 @@ export class GameSession {
         let h: string | null = null;
         if (ob.kind === 'door') h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
         else if (STORAGE_KINDS.has(ob.kind)) h = '[F] 倉庫を開く（個人・共有）';
-        else if (ob.kind === 'stove') h = ob.hp < ob.maxHp * 0.6 ? '[F] 料理（かまどが傷んでいる：撤去して建て直せる）' : '[F] 調理かまど：温かい料理を作る';
+        else if (ob.kind === 'radio') {
+          const ready = (this.prevView?.jobs ?? []).some((j) => !j.done && j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1));
+          h = ready ? '[F] 無線で依頼の品を報告する' : '[F] 無線：今日の依頼を確認';
+        } else if (ob.kind === 'stove') h = ob.hp < ob.maxHp * 0.6 ? '[F] 料理（かまどが傷んでいる：撤去して建て直せる）' : '[F] 調理かまど：温かい料理を作る';
         else if (ob.kind === 'raintank') h = ob.ready > 0 ? `[F] 水を回収（${ob.ready}/6）` : ob.hp < ob.maxHp ? '[F] 修理（鉄くず1）' : '雨水タンク：雨の日と毎朝に水が貯まる（0/6）';
         else if (BUILD_KINDS.has(ob.kind) && ob.hp < ob.maxHp) h = `[F] 修理（鉄くず1） ${Math.round((ob.hp / ob.maxHp) * 100)}%`;
         else if (ob.kind === 'bed' && inBase((tx + 0.5) * TILE, (ty + 0.5) * TILE)) {

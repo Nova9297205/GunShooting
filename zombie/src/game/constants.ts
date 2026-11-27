@@ -144,6 +144,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
   barrel: 30,
   raintank: 200,
   stove: 220,
+  radio: 1,
 };
 
 /** 衝突する（通れない）オブジェクト */
@@ -172,6 +173,7 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
   'stash',
   'raintank',
   'stove',
+  'radio',
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */

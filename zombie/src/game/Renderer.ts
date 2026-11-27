@@ -1976,6 +1976,7 @@ export class Renderer {
       if (me) this.drawSelfPanel(view, me);
       this.drawHotbar(o, view);
       this.drawMinimap(view, o.localId);
+      if (me && !o.mapOpen) this.drawJobs(view, me, !!o.touch);
       // モード表示
       ctx.font = `10px ${MONO}`;
       ctx.textAlign = 'left';
@@ -2679,6 +2680,110 @@ export class Renderer {
     return this.vision.explored[cy * MAP_W + cx] === 1 || this.vision.explored[l.y * MAP_W + l.x] === 1;
   }
 
+  private miniBottom = 250;
+  private locConts: number[][] | null = null;
+  private searchCache: { t: number; ratio: (number | undefined)[]; done: number; total: number } | null = null;
+
+  /** 施設ごとの「漁った割合」（入れ物のうち探索済みの割合）。1秒ごとに数え直す */
+  private searchStats(): { ratio: (number | undefined)[]; done: number; total: number } {
+    if (this.searchCache && this.time - this.searchCache.t < 1) return this.searchCache;
+    const locs = this.world.locations;
+    if (!this.locConts) {
+      this.locConts = locs.map(() => []);
+      for (const ob of this.world.objects.values()) {
+        if (!CONTAINER_KINDS.has(ob.kind) || ob.kind === 'car' || ob.kind === 'bag' || ob.kind === 'box') continue;
+        const i = locs.findIndex((l) => ob.tx >= l.x && ob.ty >= l.y && ob.tx < l.x + l.w && ob.ty < l.y + l.h);
+        if (i >= 0 && locs[i].kind !== 'base') this.locConts[i].push(ob.id);
+      }
+    }
+    let done = 0;
+    let total = 0;
+    const ratio = this.locConts.map((ids, i) => {
+      if (!ids.length || locs[i].kind === 'base') return undefined;
+      total++;
+      let n = 0;
+      for (const id of ids) {
+        const ob = this.world.objects.get(id);
+        if (!ob || !ob.ready) n++;
+      }
+      const r = n / ids.length;
+      if (r >= 0.8) done++;
+      return r;
+    });
+    this.searchCache = { t: this.time, ratio, done, total };
+    return this.searchCache;
+  }
+
+  /** 無線の依頼の一覧（画面右・ミニマップの下）。タッチ端末では一番近い依頼だけを上部に */
+  private drawJobs(view: ViewState, me: PlayerSnap, touch: boolean): void {
+    const jobs = view.jobs ?? [];
+    if (!jobs.length) return;
+    const { ctx } = this;
+    const lv = view.radio?.lv ?? 1;
+    const what = (j: (typeof jobs)[number]) =>
+      j.kind === 'fetch' && j.item ? `${ITEMS[j.item].name} ${Math.min(j.have ?? 0, j.need ?? 1)}/${j.need}` : j.kind === 'cache' ? '物資箱を開ける' : '施設に入る';
+    const distTo = (j: (typeof jobs)[number]) => {
+      const ready = j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1);
+      const tx = ready ? BASE_TX : j.tx;
+      const ty = ready ? BASE_TY : j.ty;
+      return Math.round(Math.hypot(tx - me.x / TILE, ty - me.y / TILE));
+    };
+    if (touch) {
+      const open = jobs.map((j, i) => ({ j, i })).filter(({ j }) => !j.done);
+      if (!open.length) return;
+      open.sort((a, b) => distTo(a.j) - distTo(b.j));
+      const { j, i } = open[0];
+      const ready = j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1);
+      const t = `依頼${i + 1} ${'★'.repeat(j.tier)} ${ready ? '無線で報告' : what(j)} ・ ${distTo(j)}m　（残り${open.length}件）`;
+      ctx.font = `bold 11px ${UI}`;
+      const tw = ctx.measureText(t).width + 16;
+      const x = this.w / 2 - tw / 2;
+      const y = 58;
+      panel(ctx, x, y, tw, 20);
+      ctx.fillStyle = '#cfe8f6';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(t, this.w / 2, y + 10.5);
+      return;
+    }
+    const pw = 236;
+    const x = this.w - pw - 12;
+    const y = this.miniBottom + 10;
+    const rowH = 30;
+    const ph = 22 + jobs.length * rowH + 4;
+    panel(ctx, x, y, pw, ph);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#8ac0e0';
+    ctx.fillText('// RADIO 依頼', x + 10, y + 11);
+    ctx.textAlign = 'right';
+    ctx.font = `bold 10px ${UI}`;
+    ctx.fillStyle = '#bdb79e';
+    ctx.fillText(`信頼 Lv${lv}${lv < 5 ? `（次まで ${3 - ((view.radio?.done ?? 0) % 3)}件）` : ''}`, x + pw - 10, y + 11);
+    jobs.forEach((j, i) => {
+      const ry = y + 22 + i * rowH;
+      const ready = !j.done && j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1);
+      ctx.globalAlpha = j.done ? 0.45 : 1;
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = j.done ? '#93b77c' : '#e6e1cc';
+      const kindTag = j.kind === 'fetch' ? '回収' : j.kind === 'cache' ? '救援' : '偵察';
+      let title = `${j.done ? '✓' : `${i + 1}.`} [${kindTag}] ${j.title.replace(/(から回収|の救援物資|の偵察)$/, '')}`;
+      while (ctx.measureText(title).width > pw - 70 && title.length > 4) title = title.slice(0, -2) + '…';
+      ctx.fillText(title, x + 10, ry + 8);
+      ctx.textAlign = 'right';
+      ctx.font = `10px ${MONO}`;
+      ctx.fillStyle = '#e0a33a';
+      ctx.fillText('★'.repeat(j.tier), x + pw - 10, ry + 8);
+      ctx.textAlign = 'left';
+      ctx.font = `10px ${UI}`;
+      ctx.fillStyle = ready ? '#8fe08a' : '#9c967c';
+      ctx.fillText(j.done ? '達成' : ready ? `そろった！ 拠点の無線で報告 ・ ${distTo(j)}m` : `${what(j)} ・ ${distTo(j)}m`, x + 22, ry + 21);
+      ctx.globalAlpha = 1;
+    });
+  }
+
   /** ミニマップ：自分の周り（約 96×72 マス）だけを追従表示。地図の外は霞 */
   private drawMinimap(view: ViewState, localId: number): void {
     const { ctx } = this;
@@ -2695,6 +2800,7 @@ export class Renderer {
     const ctx0 = ctr.x / TILE - RW;
     const cty0 = ctr.y / TILE - RH;
     panel(ctx, mx - 4, my - 18, mw + 8, mh + 22);
+    this.miniBottom = my + mh + 4;
     ctx.font = `9px ${MONO}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
@@ -2751,6 +2857,17 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(X(0) + view.drop.x * k, Y(0) + view.drop.y * k, 3.5, 0, Math.PI * 2);
       ctx.fill();
+    }
+    for (const j of view.jobs ?? []) {
+      if (j.done) continue;
+      const jx = X(j.tx + 0.5);
+      const jy = Y(j.ty + 0.5);
+      ctx.strokeStyle = '#8ac0e0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(jx, jy, 4 + Math.sin(this.time * 4) * 1, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 1;
     }
     for (const z of view.zombies) {
       if (!this.vision.isVisible(z.x, z.y)) continue;
@@ -2959,6 +3076,17 @@ export class Renderer {
       if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
     }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
+    (view.jobs ?? []).forEach((j, i) => {
+      if (j.done) return;
+      // 回収の品がそろったら、行き先は拠点の無線
+      if (j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1)) marker((BASE_TX + 0.5) * TILE, (BASE_TY - 5) * TILE, '#8ac0e0', `報告${i + 1} `, 'dot');
+      else {
+        // 近くまで来たら、施設の中の物資箱を指す
+        const cr = j.crate ? this.world.objects.get(j.crate) : undefined;
+        if (cr && cr.ready && Math.hypot((cr.tx + 0.5) * TILE - me.x, (cr.ty + 0.5) * TILE - me.y) < 30 * TILE) marker((cr.tx + 0.5) * TILE, (cr.ty + 0.5) * TILE, '#8ac0e0', `箱${i + 1} `, 'dot');
+        else marker((j.tx + 0.5) * TILE, (j.ty + 0.5) * TILE, '#8ac0e0', `依${i + 1} `, 'dot');
+      }
+    });
     if (this.fx) for (const p of this.fx.pings) marker(p.x, p.y, p.t === 'enemy' ? '#d0583e' : p.t === 'loot' ? '#e0a33a' : (PLAYER_COLORS[p.id] ?? '#fff'), '', 'dot');
     for (const p of view.players) if (p.id !== localId && p.status !== 'dead') marker(p.x, p.y, p.status === 'down' ? '#ff6a50' : (PLAYER_COLORS[p.id] ?? '#fff'), p.status === 'down' ? 'SOS ' : '', 'dot');
     ctx.restore();
@@ -2998,6 +3126,13 @@ export class Renderer {
     ctx.textAlign = 'right';
     ctx.fillStyle = '#8c8872';
     ctx.fillText('[B] / [Esc] で閉じる ・ 拠点から離れるほど危険（★）・ 外縁は汚染帯', mx + mw, my - 18);
+    {
+      const st = this.searchStats();
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = '#cfe8f6';
+      ctx.fillText(`漁った施設 ${st.done}/${st.total}（${st.total ? Math.round((st.done / st.total) * 100) : 0}%）`, mx + 140, my - 18);
+    }
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
     ctx.drawImage(this.exploredCanvas, mx, my, mw, mh);
@@ -3033,12 +3168,48 @@ export class Renderer {
     ctx.fillRect(mx + mw - B, my + B, B, mh - 2 * B);
     ctx.restore();
     this.drawMapRoutes(ctx, X, Y, s);
-    for (const loc of this.world.locations) {
-      if (loc.kind === 'base' || !this.locExplored(loc)) continue;
-      ctx.strokeStyle = this.locColor(loc);
-      ctx.lineWidth = 1;
+    const searched = this.searchStats();
+    this.world.locations.forEach((loc, i) => {
+      if (loc.kind === 'base' || !this.locExplored(loc)) return;
+      // 漁った割合で塗り分け：未探索＝明るい枠、途中＝橙、ほぼ漁った＝灰色で✓
+      const r = searched.ratio[i];
+      if (r !== undefined) {
+        ctx.fillStyle = r >= 0.8 ? 'rgba(120,120,110,0.45)' : r > 0 ? 'rgba(224,163,58,0.25)' : 'rgba(255,240,200,0.12)';
+        ctx.fillRect(X(loc.x), Y(loc.y), loc.w * s, loc.h * s);
+      }
+      ctx.strokeStyle = r !== undefined && r >= 0.8 ? '#7a776a' : this.locColor(loc);
+      ctx.lineWidth = r === 0 ? 1.5 : 1;
       ctx.strokeRect(X(loc.x), Y(loc.y), loc.w * s, loc.h * s);
-    }
+      if (r !== undefined && r >= 0.8 && s >= 1.6) {
+        ctx.fillStyle = '#c8c4b0';
+        ctx.font = `bold 10px ${UI}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('✓', X(loc.x + loc.w / 2), Y(loc.y + loc.h / 2));
+      }
+    });
+    // 無線の依頼の目的地
+    (view.jobs ?? []).forEach((j, i) => {
+      const jx = X(j.tx + 0.5);
+      const jy = Y(j.ty + 0.5);
+      ctx.globalAlpha = j.done ? 0.35 : 1;
+      ctx.strokeStyle = '#8ac0e0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(jx, jy, 9 + (j.done ? 0 : Math.sin(this.time * 4) * 2), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(20,40,60,0.9)';
+      ctx.beginPath();
+      ctx.arc(jx, jy, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#cfe8f6';
+      ctx.font = `bold 10px ${MONO}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(j.done ? '✓' : `${i + 1}`, jx, jy + 0.5);
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 1;
+    });
     for (const lm of this.world.landmarks) this.landmarkIcon(ctx, X(lm.x), Y(lm.y), lm.kind, 1.6);
     this.baseIcon(ctx, X(BASE_TX), Y(BASE_TY), 1.6);
     if (view.drop) {
@@ -3072,6 +3243,7 @@ export class Renderer {
     // アイコン（目印・橋・補給物資・仲間・ピン）の上にもラベルを重ねない
     const icon = (x: number, y: number, r: number) => placed.push({ x: x - r, y: y - r, w: r * 2, h: r * 2 });
     for (const lm of this.world.landmarks) icon(X(lm.x), Y(lm.y), 7);
+    for (const j of view.jobs ?? []) icon(X(j.tx + 0.5), Y(j.ty + 0.5), 10);
     for (const b of this.world.features.bridges) icon(X(b.x + b.w / 2), Y(b.y + b.h / 2), 6);
     if (view.drop) icon(mx + view.drop.x * k, my + view.drop.y * k, 6);
     for (const p of view.players) if (p.status !== 'dead') icon(mx + p.x * k, my + p.y * k, 6);
@@ -3111,6 +3283,12 @@ export class Renderer {
       put({ text: p.name + (p.status === 'down' ? ' SOS' : ''), x: mx + p.x * k + 8, y: my + p.y * k, fg: p.status === 'down' ? '#ff7a60' : '#ffffff', font: `bold 11px ${UI}`, align: 'left' }, [[0, 0], [0, -12], [0, 12], [-60, 0]]);
     }
     placed.push({ x: X(BASE_TX) - 10, y: Y(BASE_TY) - 10, w: 20, h: 20 });
+    // 依頼の目的地の名前
+    (view.jobs ?? []).forEach((j, i) => {
+      if (j.done) return;
+      const what = j.kind === 'fetch' && j.item ? `回収：${ITEMS[j.item].name}` : j.kind === 'cache' ? '救援物資' : '偵察';
+      put({ text: `依頼${i + 1} ${'★'.repeat(j.tier)} ${what}`, x: X(j.tx + 0.5), y: Y(j.ty + 0.5) - 25, fg: '#0e1a22', bg: 'rgba(138,192,224,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 50], [0, -14], [70, 25], [-70, 25]]);
+    });
     // 2) 川の名前・国道の標識（1本につき見える所に2枚まで）
     const F = this.world.features;
     if (F.river) {
