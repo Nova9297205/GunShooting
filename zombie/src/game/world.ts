@@ -528,6 +528,8 @@ export function generateWorld(seed: number): GeneratedWorld {
       const py = (1 - s2) * (1 - s2) * ay + 2 * (1 - s2) * s2 * cy + s2 * s2 * by;
       for (let yy = Math.floor(py) - 3; yy <= Math.floor(py) + 3 && ok; yy++)
         for (let xx = Math.floor(px) - 3; xx <= Math.floor(px) + 3; xx++) if (isWater(xx, yy) || !inMap(xx, yy)) ok = false;
+      // 拠点の敷地（フェンス）を横切らない（あとで敷地のフェンスが道の上に建ってしまう）
+      if (px > sh.x - 6 && px < sh.x + sh.w + 6 && py > sh.y - 6 && py < sh.y + sh.h + 6) ok = false;
       pts.push([px, py]);
     }
     if (!ok) continue;
