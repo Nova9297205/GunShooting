@@ -166,6 +166,9 @@ export interface RunRecord {
   value: number;
   mode: string;
   players: number;
+  /** 救助されてクリア */
+  won?: boolean;
+  run?: 'd30' | 'endless';
 }
 const REC_KEY = 'deadnights2d.records';
 
@@ -180,7 +183,7 @@ export function loadRecords(): RunRecord[] {
 
 /** 記録を追加して順位を返す（生存日数 → 持ち帰った価値 → 撃破数の順）。best = 1位になった */
 export function addRecord(rec: RunRecord): { rank: number; best: boolean } {
-  const list = [...loadRecords(), rec].sort((a, b) => b.day - a.day || b.value - a.value || b.kills - a.kills);
+  const list = [...loadRecords(), rec].sort((a, b) => Number(!!b.won) - Number(!!a.won) || b.day - a.day || b.value - a.value || b.kills - a.kills);
   const rank = list.indexOf(rec) + 1;
   try {
     localStorage.setItem(REC_KEY, JSON.stringify(list.slice(0, 10)));

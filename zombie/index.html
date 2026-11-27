@@ -40,6 +40,13 @@
               <button id="btn-cont-del" class="btn ghost small" title="セーブを消す">消す</button>
             </div>
           </div>
+          <div class="run-row" id="run-row">
+            <span class="field-label">モード <i>新しく始めるとき</i></span>
+            <div class="run-opts">
+              <button class="btn small run-opt" data-run="d30"><b>30日で救助</b><small>DAY 30 の朝に救助が来る</small></button>
+              <button class="btn small run-opt" data-run="endless"><b>期限なし</b><small>無線を直して自分で呼ぶ</small></button>
+            </div>
+          </div>
           <div class="mode-grid">
             <button id="btn-solo" class="btn mode">
               <b>ソロ出撃</b>
@@ -107,7 +114,8 @@
     <section id="screen-result" class="screen hidden">
       <div class="panel tac result-panel">
         <div class="panel-head"><span class="ph-code">// AFTER ACTION REPORT</span><span>作戦結果</span></div>
-        <h2 class="gameover">K.I.A.</h2>
+        <h2 class="gameover" id="result-head">K.I.A.</h2>
+        <p class="result-sub" id="result-sub"></p>
         <p class="wave-reached">生存日数 <strong id="result-day">1</strong> 日</p>
         <p id="result-record" class="result-record"></p>
         <table class="result-table">

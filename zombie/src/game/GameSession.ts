@@ -559,6 +559,7 @@ export class GameSession {
       drop: L.drop,
       jobs: L.jobs,
       sites: L.sites,
+      rescue: L.rescue,
       vehicles,
       radio: L.radio,
       cont: L.cont,

@@ -2257,3 +2257,41 @@ input[type='range'] {
   background: #6b5a24;
   color: #fff3c8;
 }
+
+/* タイトル：モードの選択（30 日で救助／期限なし） */
+.run-row {
+  margin: 4px 0 10px;
+}
+.run-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 4px;
+}
+.run-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 10px;
+  text-align: left;
+}
+.run-opt small {
+  font-size: 10px;
+  opacity: 0.75;
+  font-weight: 400;
+}
+.run-opt.on {
+  border-color: #e0a33a;
+  background: rgba(224, 163, 58, 0.16);
+  color: #f3dca6;
+}
+.gameover.won {
+  color: #f0d070;
+  text-shadow: 0 0 18px rgba(240, 208, 112, 0.45);
+}
+.result-sub {
+  margin: -4px 0 8px;
+  color: #cfc8a8;
+  font-size: 13px;
+}

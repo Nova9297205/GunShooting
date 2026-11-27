@@ -18,6 +18,8 @@ import type {
   ObjKind,
   ObjSnap,
   PlayerSnap,
+  RescueSnap,
+  RunMode,
   Slot,
   Snapshot,
   SoundKey,
@@ -223,6 +225,8 @@ const BUILD_RANGE_PX = 6 * TILE + 20;
 
 /** 大群の夜が来る日（4日ごと） */
 export const isHordeDay = (day: number): boolean => day % 4 === 0;
+/** 30 日モードで救助が来る日（その日の朝） */
+export const RESCUE_DAY = 30;
 
 /** 拠点の敷地内か（安全地帯） */
 export function inBase(x: number, y: number): boolean {
@@ -540,6 +544,7 @@ export class HostSimulation {
     addItem(this.storage.shared, 'scrap', 8);
     addItem(this.storage.shared, 'cloth', 4);
     this.newSites(true);
+    this.newRescueSites();
     this.dayTip();
     // 初日の天候はランダム（霧で始まることもある）
     if (Math.random() < 0.3) this.setWeather(Math.random() < 0.5 ? 'fog' : 'rain', true);
@@ -672,13 +677,26 @@ export class HostSimulation {
 
   /** 追加の保存項目（拡張用） */
   protected saveExtra(): Record<string, unknown> {
-    return { sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
+    return { runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
   }
 
   /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
   static fromSave(lobby: LobbyPlayer[], data: SaveData): HostSimulation {
     const sim = new HostSimulation(lobby, data.seed);
     sim.events = [];
+    const rx = data.extra as { rsites?: (SiteSnap & { guards: boolean })[]; rescue?: { stage: number; parts: number; day: number }; runMode?: RunMode } | undefined;
+    if (rx?.rsites) {
+      // 生成し直したときの通信塔の箱は捨て、保存してあった物を使う
+      for (const st of sim.rsites) {
+        sim.world.removeObj(st.crate);
+        sim.contents.delete(st.crate);
+        sim.changed.delete(st.crate);
+      }
+      sim.rsites = rx.rsites.map((x) => ({ ...x, guards: false }));
+    }
+    // 古いセーブは「期限なし」。通信塔は新しく置いたものを使う
+    sim.runMode = rx?.runMode ?? 'endless';
+    if (rx?.rescue) sim.rescue = { ...rx.rescue };
     for (const id of data.removed) {
       sim.world.removeObj(id);
       sim.everRemoved.add(id);
@@ -887,7 +905,8 @@ export class HostSimulation {
       base: this.base,
       drop: this.dropPos(),
       jobs: this.jobs,
-      sites: this.sites.map((x) => ({ id: x.id, kind: x.kind, name: x.name, tx: x.tx, ty: x.ty, crate: x.crate, ...(x.done ? { done: true } : {}) })),
+      sites: [...this.sites, ...this.rsites].map((x) => ({ id: x.id, kind: x.kind, name: x.name, tx: x.tx, ty: x.ty, crate: x.crate, ...(x.done ? { done: true } : {}) })),
+      rescue: this.rescueSnap(),
       vehicles: this.vehicles.map((v) => ({ id: v.id, kind: v.kind, x: r1(v.x), y: r1(v.y), a: r2(v.a), spd: Math.round(v.spd), fuel: r1(v.fuel), hp: Math.round(v.hp), maxHp: v.maxHp, broken: v.broken, seats: v.seats })),
       radio: { done: this.radioDone, lv: radioLevel(this.radioDone) },
       players: this.players.map((p) => ({
@@ -969,6 +988,10 @@ export class HostSimulation {
 
   step(dt: number): void {
     if (this.gameOver) return;
+    if (this.winT > 0) {
+      this.winT -= dt;
+      if (this.winT <= 0) return this.finish(true);
+    }
     this.time += dt;
     this.tick++;
     this.updateClock(dt);
@@ -1011,10 +1034,17 @@ export class HostSimulation {
     this.zombies = this.zombies.filter((z) => !z.dead);
     this.bullets = this.bullets.filter((b) => !b.dead);
 
-    if (this.players.length > 0 && !this.players.some((p) => p.status === 'alive' || p.status === 'down')) {
+    if (this.players.length > 0 && !this.players.some((p) => p.status === 'alive' || p.status === 'down')) this.finish(false);
+  }
+
+  /** 終わり：救助された（won）／全滅 */
+  private finish(won: boolean): void {
+    {
       this.gameOver = true;
       this.result = {
         day: this.day,
+        won,
+        run: this.runMode,
         players: this.players.map((p) => ({
           id: p.id,
           name: p.name,
@@ -1045,7 +1075,14 @@ export class HostSimulation {
     if (this.phase === 'night') {
       // 夜：大群が押し寄せるのではなく、闇の中で屋外の感染体が鋭くなる（巡回は少しだけ）
       this.spawnPatrols(1);
-      if (isHordeDay(this.day)) {
+      const finalNight = this.rescue.day > 0 && this.day + 1 >= this.rescue.day;
+      if (finalNight) {
+        // 救助の前の晩：最後の防衛。いつもの大群より多く、長い
+        this.hordeNight = true;
+        this.hordeWaves = 5;
+        this.hordeT = 0;
+        this.events.push({ k: 'banner', t: `DAY ${this.day} - 最後の夜`, s: '夜明けに救助ヘリが来る。それまで拠点を守り抜け！', c: '#f0c040', snd: 'horde' });
+      } else if (isHordeDay(this.day)) {
         // 大群の夜：拠点の柵も破られる。3回に分けて押し寄せる
         this.hordeNight = true;
         this.hordeWaves = 3;
@@ -1098,6 +1135,13 @@ export class HostSimulation {
         }
       }
       this.hordeReward = false;
+      // 救助の朝：生き残っていればクリア（少し間をおいて結果へ）
+      if (this.rescue.day > 0 && this.day >= this.rescue.day) {
+        this.winT = 7;
+        this.events.push({ k: 'banner', t: '救助ヘリが到着！', s: `DAY ${this.day} — 生き延びた。全員、脱出する`, c: '#f0d070', snd: 'clear' });
+        return;
+      }
+      this.checkRescueParts();
       this.newJobs(true);
       this.newSites(true);
       this.dayTip();
@@ -2253,26 +2297,28 @@ export class HostSimulation {
     this.siteT -= dt;
     if (this.siteT > 0) return;
     this.siteT = 0.5;
-    for (const st of this.sites) {
+    for (const st of [...this.sites, ...this.rsites]) {
       if (st.done) continue;
       const crate = this.world.objects.get(st.crate);
       if (!crate || !crate.ready) {
         st.done = true;
-        this.events.push({ k: 'feed', cat: 'up', t: `異変を制圧：${st.name}`, c: '#c08af0', snd: 'clear' });
+        if (st.kind === 'tower') this.events.push({ k: 'feed', cat: 'up', t: `${st.name}を制圧 — 救助無線の部品を拠点の無線へ持ち帰れ`, c: '#f0d070', snd: 'clear' });
+        else this.events.push({ k: 'feed', cat: 'up', t: `異変を制圧：${st.name}`, c: '#c08af0', snd: 'clear' });
         for (const p of this.players) if (p.status === 'alive') this.gainXp(p, 1, 30);
         continue;
       }
       // 誰かが近づいたら見張りを出す（精鋭を含む）
       if (!st.guards && this.players.some((p) => p.status === 'alive' && Math.hypot(p.x / TILE - st.tx, p.y / TILE - st.ty) < 40)) {
         st.guards = true;
-        const types: ZombieType[] = st.kind === 'nest' ? ['walker', 'runner', 'walker', 'runner', 'bloater', 'walker', 'runner', 'brute'] : st.kind === 'armory' ? ['soldier', 'soldier', 'brute', 'soldier'] : ['soldier', 'runner', 'brute', 'soldier', 'runner'];
+        const tier = this.tierAt(st.tx, st.ty);
+        const types: ZombieType[] = st.kind === 'tower' ? (['soldier', 'runner', 'brute', 'walker', 'runner', 'soldier', 'brute', 'runner'] as ZombieType[]).slice(0, 4 + tier) : st.kind === 'nest' ? ['walker', 'runner', 'walker', 'runner', 'bloater', 'walker', 'runner', 'brute'] : st.kind === 'armory' ? ['soldier', 'soldier', 'brute', 'soldier'] : ['soldier', 'runner', 'brute', 'soldier', 'runner'];
         types.forEach((t, k) => {
           const a = (k / types.length) * Math.PI * 2;
           for (let r = 2; r < 7; r++) {
             const x = st.tx + 0.5 + Math.cos(a) * r;
             const y = st.ty + 0.5 + Math.sin(a) * r;
             if (this.world.solid(Math.floor(x), Math.floor(y))) continue;
-            const z = this.spawnZombie(t, x * TILE, y * TILE, k < (st.kind === 'nest' ? 1 : 2));
+            const z = this.spawnZombie(t, x * TILE, y * TILE, k < (st.kind === 'tower' ? Math.max(1, tier - 2) : st.kind === 'nest' ? 1 : 2));
             z.keep = true;
             z.homeX = (st.tx + 0.5) * TILE;
             z.homeY = (st.ty + 0.5) * TILE;
@@ -2281,6 +2327,138 @@ export class HostSimulation {
         });
       }
     }
+  }
+
+  // ======================== 救助（モード・エンディング） ========================
+  /** 遊び方：30 日目の朝に救助が来る／期限なし */
+  runMode: RunMode = 'endless';
+  /** 救助の進み具合：stage 0 部品集め・1 修理待ち・2 呼べる・3 呼んだ。day = 救助が来る日（0 = 未定） */
+  rescue = { stage: 0, parts: 0, day: 0 };
+  /** 救助無線の部品がある場所（通信塔など）。毎朝入れ替わる異変とは別で、ずっと残る */
+  rsites: (SiteSnap & { guards: boolean })[] = [];
+  /** 救助ヘリが着くまでの演出の残り秒 */
+  private winT = 0;
+  /** 救助を呼ぶ前の確認（もう一度 [F]） */
+  private callConfirm = new Map<number, number>();
+
+  /** 新しいゲームの遊び方を決める（ソロ・ホスト・ローカル協力の開始時） */
+  setRunMode(m: RunMode): void {
+    this.runMode = m;
+    if (m === 'd30' && !this.rescue.day) this.rescue.day = RESCUE_DAY;
+    this.events.push({
+      k: 'feed',
+      cat: 'info',
+      t: m === 'd30' ? `30日モード：DAY ${RESCUE_DAY} の朝に救助が来る。前の晩が最後の防衛。無線を直せば早く呼べる` : '期限なしモード：救助は来ない。無線の部品を3つ集めて直せば、自分で救助を呼べる',
+      c: '#f0d070',
+    });
+  }
+
+  private rescueSnap(): RescueSnap {
+    return { mode: this.runMode, stage: this.rescue.stage, parts: this.rescue.parts, ...(this.rescue.day ? { day: this.rescue.day } : {}) };
+  }
+
+  /** 部品の置き場所：近い・中くらい・遠いの 3 か所（危険度 2・3・4 の施設） */
+  private newRescueSites(only?: number): void {
+    const used = new Set<number>();
+    const locOf = (st: SiteSnap) => this.world.locations.findIndex((l) => st.tx >= l.x && st.ty >= l.y && st.tx < l.x + l.w && st.ty < l.y + l.h);
+    for (const st of [...this.sites, ...this.rsites]) used.add(locOf(st));
+    for (const j of this.jobs) used.add(j.loc);
+    const names = ['通信塔', '無線基地', '発電所跡'];
+    for (let k = 0; k < 3; k++) {
+      if (only !== undefined && k !== only) continue;
+      const want = 2 + k;
+      const cands = this.world.locations
+        .map((l, i) => ({ l, i }))
+        .filter(({ l, i }) => l.kind !== 'base' && l.kind !== 'ruin' && !used.has(i))
+        .sort((a, b) => Math.abs(a.l.tier - want) - Math.abs(b.l.tier - want) + (Math.random() - 0.5) * 0.9);
+      for (const { l, i } of cands) {
+        const spot = this.crateSpot(i);
+        if (!spot) continue;
+        used.add(i);
+        const o: SimObj = { id: this.nextObjId++, kind: 'mcrate', tx: spot[0], ty: spot[1], hp: 1, maxHp: 1, ready: 1, regrowT: 0 };
+        this.world.setObj(o);
+        this.changed.add(o.id);
+        const c = emptyBag(8);
+        addItem(c, (['rpart1', 'rpart2', 'rpart3'] as ItemId[])[k], 1);
+        addItem(c, 'ammo762', 10 + k * 10);
+        if (k >= 1) addItem(c, 'medkit', 1);
+        if (k >= 2) addItem(c, 'upkit', 1);
+        this.contents.set(o.id, c);
+        const st = { id: this.siteSeq++, kind: 'tower' as const, name: `${l.name}の${names[k]}`, tx: spot[0], ty: spot[1], crate: o.id, guards: false };
+        this.rsites = [...this.rsites, st];
+        break;
+      }
+    }
+  }
+
+  /** その部品がどこかに残っているか（持ち物・倉庫・箱・落とした袋・トランク） */
+  private partExists(id: ItemId): boolean {
+    for (const p of this.players) if (countItem(p.bag, id) > 0) return true;
+    if (countItem(this.storage.shared, id) > 0) return true;
+    for (const b of Object.values(this.storage.personal)) if (countItem(b, id) > 0) return true;
+    for (const c of this.contents.values()) if (countItem(c, id) > 0) return true;
+    return false;
+  }
+
+  /** 毎朝：失くした部品があれば、新しい場所に置き直す（進行不能にしない） */
+  private checkRescueParts(): void {
+    if (this.rescue.stage > 0) return;
+    (['rpart1', 'rpart2', 'rpart3'] as ItemId[]).forEach((id, k) => {
+      if (this.rescue.parts & (1 << k)) return;
+      if (this.partExists(id)) return;
+      // 古い置き場所（箱の中身が入れ替わった・制圧済み）は地図から消す
+      this.rsites = this.rsites.filter((x) => !x.name.endsWith(['通信塔', '無線基地', '発電所跡'][k]));
+      this.newRescueSites(k);
+      this.events.push({ k: 'feed', cat: 'info', t: `無線：失くした「${ITEMS[id].name}」の代わりが見つかった（地図に◆）`, c: '#f0d070' });
+    });
+  }
+
+  /** 拠点の無線：部品の取り付け → 修理 → 救助を呼ぶ */
+  private rescueRadio(p: SimPlayer): boolean {
+    const r = this.rescue;
+    if (r.stage === 0) {
+      const got: string[] = [];
+      (['rpart1', 'rpart2', 'rpart3'] as ItemId[]).forEach((id, k) => {
+        if (r.parts & (1 << k)) return;
+        if (countItem(p.bag, id) + countItem(this.storage.shared, id) < 1) return;
+        this.payCost(p, { [id]: 1 });
+        r.parts |= 1 << k;
+        got.push(ITEMS[id].name);
+      });
+      if (!got.length) return false;
+      const n = [1, 2, 4].filter((b) => r.parts & b).length;
+      if (n >= 3) r.stage = 1;
+      this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が救助無線に ${got.join('・')} を取り付けた（${n}/3）${n >= 3 ? ' — 部品がそろった！ 修理には 工具セット1・電子部品2' : ''}`, c: '#f0d070', snd: 'clear' });
+      return true;
+    }
+    if (r.stage === 1) {
+      const need: Partial<Record<ItemId, number>> = { tools: 1, electronics: 2 };
+      const short = (Object.entries(need) as [ItemId, number][]).find(([m, n]) => countItem(p.bag, m) + countItem(this.storage.shared, m) < n);
+      if (short) {
+        this.pop(p, `救助無線の修理に必要：工具セット1・電子部品2（足りない：${ITEMS[short[0]].name}）`, '#f0d070', 'error');
+        return true;
+      }
+      this.payCost(p, need);
+      r.stage = 2;
+      this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が救助無線を直した！ もう一度 無線で [F] — 救助を呼べる`, c: '#f0d070', snd: 'clear' });
+      return true;
+    }
+    if (r.stage === 2) {
+      // 呼ぶと次の朝に救助（夜に呼んだら翌々日の朝）。その前の晩が最後の防衛
+      const rd = this.phase === 'night' ? this.day + 2 : this.day + 1;
+      const last = this.callConfirm.get(p.id) ?? -99;
+      if (this.time - last > 4) {
+        this.callConfirm.set(p.id, this.time);
+        this.pop(p, `もう一度 [F] で救助を呼ぶ — DAY ${rd} の朝に救助。前の晩は最後の防衛（大群）`, '#f0d070');
+        return true;
+      }
+      r.stage = 3;
+      r.day = r.day ? Math.min(r.day, rd) : rd;
+      this.events.push({ k: 'banner', t: '救助を呼んだ', s: `救助ヘリは DAY ${r.day} の朝に来る。それまで生き延びろ — 前の晩は最後の防衛`, c: '#f0d070', snd: 'alarm' });
+      return true;
+    }
+    this.pop(p, `救助は DAY ${r.day} の朝に来る`, '#f0d070');
+    return true;
   }
 
   // ======================== 無線の依頼 ========================
@@ -2359,6 +2537,7 @@ export class HostSimulation {
       reported++;
     }
     if (reported) return;
+    if (this.rescueRadio(p)) return;
     const open = this.jobs.filter((j) => !j.done);
     if (!open.length) return this.pop(p, '無線：今日の依頼はすべて達成した。明日の朝に新しい依頼が届く', '#8ac0e0');
     const f = open.find((j) => j.kind === 'fetch');

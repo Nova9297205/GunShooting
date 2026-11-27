@@ -2193,8 +2193,9 @@ export class Renderer {
       this.drawHotbar(o, view);
       this.drawMinimap(view, o.localId);
       this.tutH = 0;
-      // 縦が足りない枠（画面分割）では、はじめの一日・依頼を 1 行ずつに
+      // 縦が足りない枠（画面分割）・スマホでは、救助・はじめの一日・依頼を 1 行ずつに
       const slim = !!o.touch || this.h < 600;
+      if (!o.mapOpen) this.drawRescue(view, slim);
       if (me && !o.mapOpen) this.drawTutorial(view, me, slim);
       if (me && !o.mapOpen) this.drawJobs(view, me, slim);
       // モード表示
@@ -2994,7 +2995,7 @@ export class Renderer {
   private hotbarTop = 0;
   /** 1 行表示の置き場所：スマホは上部中央、画面分割の枠は武器欄の上 */
   private slimPos(row: number): { cx: number; y: number } {
-    if (this.touchUI || this.h >= 600) return { cx: this.w / 2, y: row === 0 ? 58 : 82 };
+    if (this.touchUI || this.h >= 600) return { cx: this.w / 2, y: row === 0 ? 58 : row === 1 ? 82 : 106 };
     return { cx: this.hotbarCX, y: this.hotbarTop - 56 - row * 24 };
   }
   /** はじめの一日：最初の数日、やることのチェックリスト。今やると良い 1 つに「どうやるか」を添える */
@@ -3020,7 +3021,7 @@ export class Renderer {
     }
     const pw = 236;
     const x = this.w - pw - 12;
-    const y = this.miniBottom + 10;
+    const y = this.miniBottom + 10 + this.tutH;
     const rowH = 16;
     const ph = 22 + TUT_STEPS.length * rowH + 18;
     panel(ctx, x, y, pw, ph);
@@ -3049,7 +3050,62 @@ export class Renderer {
     while (ctx.measureText(how).width > pw - 20 && how.length > 4) how = how.slice(0, -2) + '…';
     ctx.fillStyle = '#e0c060';
     ctx.fillText(how, x + 10, y + 22 + TUT_STEPS.length * rowH + 7);
-    this.tutH = ph + 8;
+    this.tutH += ph + 8;
+  }
+
+  /** 救助の進み具合（モード・残り日数・次にやること） */
+  private drawRescue(view: ViewState, slim: boolean): void {
+    const r = view.rescue;
+    if (!r) return;
+    const { ctx } = this;
+    const n = [1, 2, 4].filter((b) => r.parts & b).length;
+    const left = r.day ? r.day - view.day : 0;
+    const when = r.day ? (left <= 0 ? '今朝' : left === 1 ? '明日の朝' : `あと ${left} 日（DAY ${r.day} の朝）`) : '';
+    const step =
+      r.stage === 0
+        ? `無線の部品 ${n}/3 — 地図の金色の◆へ`
+        : r.stage === 1
+          ? '部品がそろった：拠点の無線を修理（工具1・電子部品2）'
+          : r.stage === 2
+            ? '無線が直った：拠点の無線で救助を呼べる'
+            : '救助を呼んだ — 前の晩は最後の防衛';
+    const head = r.day ? `救助まで ${when}` : '救助：まだ呼んでいない';
+    if (slim) {
+      const t = `${head} ・ ${step}`;
+      ctx.font = `bold 11px ${UI}`;
+      const tw = ctx.measureText(t).width + 16;
+      const { cx, y } = this.slimPos(2);
+      panel(ctx, cx - tw / 2, y, tw, 20);
+      ctx.fillStyle = '#f0d070';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(t, cx, y + 10.5);
+      return;
+    }
+    const pw = 236;
+    const x = this.w - pw - 12;
+    const y = this.miniBottom + 10;
+    const ph = 50;
+    panel(ctx, x, y, pw, ph);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#f0d070';
+    ctx.fillText('// RESCUE 救助', x + 10, y + 11);
+    ctx.textAlign = 'right';
+    ctx.font = `bold 10px ${UI}`;
+    ctx.fillStyle = '#bdb79e';
+    ctx.fillText(r.mode === 'd30' ? '30日モード' : '期限なし', x + pw - 10, y + 11);
+    ctx.textAlign = 'left';
+    ctx.font = `bold 11px ${UI}`;
+    ctx.fillStyle = r.day && left <= 1 ? '#f0a040' : '#f0e6c0';
+    ctx.fillText(head, x + 10, y + 26);
+    let t = step;
+    ctx.font = `10px ${UI}`;
+    while (ctx.measureText(t).width > pw - 20 && t.length > 4) t = t.slice(0, -2) + '…';
+    ctx.fillStyle = '#c9c2a0';
+    ctx.fillText(t, x + 10, y + 41);
+    this.tutH += ph + 8;
   }
 
   private drawJobs(view: ViewState, me: PlayerSnap, touch: boolean): void {
@@ -3208,7 +3264,7 @@ export class Renderer {
       if (st.done) continue;
       const sx = X(st.tx + 0.5);
       const sy = Y(st.ty + 0.5);
-      ctx.fillStyle = '#c08af0';
+      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : '#c08af0';
       ctx.beginPath();
       ctx.moveTo(sx, sy - 5);
       ctx.lineTo(sx + 5, sy);
@@ -3440,7 +3496,7 @@ export class Renderer {
       if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
     }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
-    for (const st of view.sites ?? []) if (!st.done) marker((st.tx + 0.5) * TILE, (st.ty + 0.5) * TILE, '#c08af0', '◆ ', 'dot');
+    for (const st of view.sites ?? []) if (!st.done) marker((st.tx + 0.5) * TILE, (st.ty + 0.5) * TILE, st.kind === 'tower' ? '#f0c040' : '#c08af0', '◆ ', 'dot');
     if (me.veh === undefined) {
       let best: VehicleSnap | null = null;
       let bd = 70 * TILE;
@@ -3571,7 +3627,7 @@ export class Renderer {
       const sx = X(st.tx + 0.5);
       const sy = Y(st.ty + 0.5);
       ctx.globalAlpha = st.done ? 0.35 : 1;
-      ctx.fillStyle = '#c08af0';
+      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : '#c08af0';
       ctx.strokeStyle = '#140a1c';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -3695,7 +3751,8 @@ export class Renderer {
     placed.push({ x: X(BASE_TX) - 10, y: Y(BASE_TY) - 10, w: 20, h: 20 });
     for (const st of view.sites ?? []) {
       if (st.done) continue;
-      put({ text: `◆ ${st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
+      const tw = st.kind === 'tower';
+      put({ text: `◆ ${tw ? `救助無線の部品（${st.name}）` : st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: tw ? 'rgba(240,192,64,0.94)' : 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
     }
     // 依頼の目的地の名前
     (view.jobs ?? []).forEach((j, i) => {

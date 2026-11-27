@@ -561,6 +561,15 @@ export class AudioManager {
     this.tone({ type: 'sawtooth', f: 65, dur: 3, g: 0.12, a: 0.5, rel: 1.5, lp: 300, t });
   }
 
+  /** 救助されたときのファンファーレ（明るい上昇音） */
+  victory(): void {
+    if (!this.ready) return;
+    this.setMood(null);
+    const t = this.ctx!.currentTime;
+    [262, 330, 392, 523, 659, 784].forEach((f, i) => this.tone({ type: 'triangle', f, dur: 0.9, g: 0.16, a: 0.01, rel: 0.5, t: t + i * 0.16 }));
+    this.tone({ type: 'sine', f: 131, dur: 2.6, g: 0.12, a: 0.2, rel: 1.2, t });
+  }
+
   /** ゲームイベント → 効果音 */
   handleEvent(ev: GameEvent, localId: number): void {
     if (!this.ready) return;
