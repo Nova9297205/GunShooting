@@ -6,7 +6,7 @@
 //   ・右クリック → 使う・装備   ・Shift+クリック → 足元に捨てる
 //   マスにカーソルを合わせると右端の詳細欄に種類・効果・数値が出る
 // ============================================================
-import { ATTACHMENTS, capacityOf, effectiveStats, ITEMS, type ItemCat, type ItemId, isWeapon, loadKg, slotKg, WEAPON_STATS, type WeaponId } from '../game/items';
+import { AFFIX_NAMES, ATTACHMENTS, QUALITY, weaponLabel, capacityOf, effectiveStats, ITEMS, type ItemCat, type ItemId, isWeapon, loadKg, slotKg, WEAPON_STATS, type WeaponId } from '../game/items';
 import { levelOf, MAX_SKILL_LV, SKILLS, xpForLevel } from '../game/progression';
 import type { PlayerSnap, Slot, StorageState } from '../types';
 
@@ -209,7 +209,10 @@ export class InventoryPanel {
       if (s.w.ap) badge = `<span class="badge">${s.id === 'shotgun' ? 'SLG' : 'AP'}</span>`;
     }
     const mods = s.w ? ATTACHMENTS.filter((a) => s.w![a]).length : 0;
-    return `<div class="islot c-${d.cat} r${d.rarity}${extra}" data-act="${act}" data-i="${i}"${sk}><span class="ic">${ICON[d.cat]}</span><span class="nm">${d.name}</span>${sub}${badge}${mods ? `<span class="mod">+${mods}</span>` : ''}</div>`;
+    // 武器の品質（ハクスラ）：枠と名前の色
+    const q = s.w?.q ?? 0;
+    const qs = q > 0 ? ` style="--q:${QUALITY[q].color}" data-q="${q}"` : '';
+    return `<div class="islot c-${d.cat} r${d.rarity}${q > 0 ? ' qual' : ''}${extra}" data-act="${act}" data-i="${i}"${sk}${qs}><span class="ic">${ICON[d.cat]}</span><span class="nm">${q > 0 ? `<b style="color:${QUALITY[q].color}">${QUALITY[q].name}</b> ` : ''}${d.name}</span>${sub}${badge}${mods ? `<span class="mod">+${mods}</span>` : ''}</div>`;
   }
 
   /** 詳細欄：種類・効果・数値 */
@@ -223,6 +226,7 @@ export class InventoryPanel {
       const base = WEAPON_STATS[wid];
       const cls = (a: number, b: number, higherBetter: boolean) => (Math.abs(a - b) < 1e-6 ? '' : a > b === higherBetter ? 'up' : 'down');
       if (s.w.ap) chips.push(`<span class="chip warn">${wid === 'shotgun' ? 'スラッグ装填' : '徹甲弾装填'}</span>`);
+      if (s.w.q) chips.unshift(`<span class="chip" style="color:${QUALITY[s.w.q].color};border-color:${QUALITY[s.w.q].color}">${QUALITY[s.w.q].name}</span>`);
       rows = [
         ['威力', `${Math.round(st.damage)}${st.pellets > 1 ? ` ×${st.pellets}` : ''}`, cls(st.damage * st.pellets, base.damage * base.pellets, true)],
         ['連射速度', `${Math.round(60 / st.fireInterval)} 発/分`, ''],
@@ -237,6 +241,7 @@ export class InventoryPanel {
       if (st.pierce) rows.push(['貫通', `${st.pierce} 体`, 'up']);
       const atts = ATTACHMENTS.filter((a) => s.w![a]).map((a) => ITEMS[a].name);
       if (atts.length) rows.push(['装着', atts.join('・'), '']);
+      for (const a of s.w.aff ?? []) rows.push(['追加性能', AFFIX_NAMES[a], 'up']);
     } else if (ATT_FX[s.id]) {
       rows = ATT_FX[s.id].map(([k, v, good]) => [k, v, good ? 'up' : 'down']);
     } else if (AMMO_FOR[s.id]) {
@@ -244,7 +249,7 @@ export class InventoryPanel {
       if (s.id === 'ammo9ap' || s.id === 'ammo762ap' || s.id === 'slug') rows.push(['特性', '装甲を無視・貫通', 'up']);
     } else rows = [['所持数', `${s.n} / ${d.stack}`, '']];
     rows.push(['価値', `${d.value * s.n}`, '']);
-    this.detail.innerHTML = `<div class="d-name">${d.name}${s.n > 1 ? ` <small>×${s.n}</small>` : ''}</div>
+    this.detail.innerHTML = `<div class="d-name"${s.w?.q ? ` style="color:${QUALITY[s.w.q].color}"` : ''}>${s.w ? weaponLabel(s) : d.name}${s.n > 1 ? ` <small>×${s.n}</small>` : ''}</div>
       <div class="d-chips">${chips.join('')}</div>
       <p class="d-desc">${d.desc}</p>
       <dl>${rows.map(([k, v, c]) => `<dt>${k}</dt><dd class="${c}">${v}</dd>`).join('')}</dl>`;

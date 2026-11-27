@@ -44,7 +44,7 @@ import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
 import { type Glyphs, padText } from '../ui/Gamepad';
-import { ATTACHMENTS, capacityOf, CONTAINER_NAMES, countItem, loadKg, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
+import { ATTACHMENTS, capacityOf, CONTAINER_NAMES, countItem, loadKg, QUALITY, weaponLabel, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
 /** 落ち影と側面を持つ「高い」建築物 */
@@ -458,11 +458,13 @@ export class Renderer {
   private drawBuildBar(view: ViewState, b: NonNullable<RenderOptions['build']>, me: PlayerSnap, touch: boolean): void {
     const { ctx } = this;
     const n = BUILDS.length;
+    const cols = Math.min(n, 5);
+    const rows = Math.ceil(n / cols);
     const cw = 108;
     const gap = 6;
-    const W = n * cw + (n - 1) * gap;
+    const W = cols * cw + (cols - 1) * gap;
     const x0 = this.w / 2 - W / 2;
-    const y0 = this.h - 214;
+    const y0 = this.h - 140 - rows * 72;
     const shared = view.storage?.shared ?? [];
     ctx.save();
     ctx.textBaseline = 'middle';
@@ -470,25 +472,26 @@ export class Renderer {
     ctx.font = `bold 12px ${UI}`;
     ctx.fillStyle = '#e0a33a';
     ctx.fillText(
-      this.glyphs ? padText('建設モード — {LB}/{RB} 選ぶ・右スティックで場所・{RT} 建てる・{X} 撤去・{A} 修理・{DOWN} 終了', this.glyphs) : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜6]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
+      this.glyphs ? padText('建設モード — {LB}/{RB} 選ぶ・右スティックで場所・{RT} 建てる・{X} 撤去・{A} 修理・{DOWN} 終了', this.glyphs) : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜9,0]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
       this.w / 2,
       y0 - 12,
     );
     BUILDS.forEach((d, i) => {
-      const x = x0 + i * (cw + gap);
+      const x = x0 + (i % cols) * (cw + gap);
+      const yy = y0 + Math.floor(i / cols) * 72;
       const sel = d.kind === b.kind;
       const lock = (d.lv ?? 1) > (view.base.bench ?? 1);
-      panel(ctx, x, y0, cw, 66, sel ? 'rgba(60,48,22,0.92)' : undefined, sel ? '#e0a33a' : undefined);
+      panel(ctx, x, yy, cw, 66, sel ? 'rgba(60,48,22,0.92)' : undefined, sel ? '#e0a33a' : undefined);
       ctx.textAlign = 'left';
       ctx.font = `bold 11px ${UI}`;
       ctx.fillStyle = lock ? '#77735f' : sel ? '#ffe0a0' : '#d8d2b8';
-      ctx.fillText(`${i + 1} ${d.name}`, x + 8, y0 + 12);
+      ctx.fillText(`${(i + 1) % 10} ${d.name}`, x + 8, yy + 12);
       ctx.font = `9px ${UI}`;
       ctx.fillStyle = '#9c967c';
-      ctx.fillText(lock ? `🔒 作業台Lv${d.lv}` : d.role, x + 8, y0 + 26);
+      ctx.fillText(lock ? `🔒 作業台Lv${d.lv}` : d.role, x + 8, yy + 26);
       // 素材（1行に収まらなければ2行目へ）
       let cx = x + 8;
-      let cy = y0 + 40;
+      let cy = yy + 40;
       ctx.font = `9px ${UI}`;
       for (const [m, need] of Object.entries(d.cost) as [ItemId, number][]) {
         const have = countItem(me.bag, m) + countItem(shared, m);
@@ -698,7 +701,7 @@ export class Renderer {
     for (const ob of visible) {
       if (!this.art.drawLowObject(ctx, ob, this.time, this.tallQuery(ob.tx, ob.ty))) tall.push(ob);
       // 焚き火・松明から舞い上がる火の粉
-      if ((ob.kind === 'campfire' || ob.kind === 'torch') && Math.random() < dt * (ob.kind === 'campfire' ? 9 : 3)) {
+      if ((ob.kind === 'campfire' || ob.kind === 'fire' || ob.kind === 'torch') && Math.random() < dt * (ob.kind === 'torch' ? 3 : 9)) {
         fx.burst((ob.tx + 0.5) * TILE + (Math.random() - 0.5) * 10, (ob.ty + 0.5) * TILE - 6, '#ffb060', 1, 40, 1.4, 1.4, 'dot', true, -Math.PI / 2, 0.9);
       }
     }
@@ -1396,7 +1399,7 @@ export class Renderer {
     // 画面の外でも光が届く範囲（約10タイル）までの焚き火・松明
     const [vx0, vy0, vx1, vy1] = this.vrect;
     for (const ob of this.objsIn(Math.floor(vx0 / TILE) - 10, Math.floor(vy0 / TILE) - 10, Math.ceil(vx1 / TILE) + 10, Math.ceil(vy1 / TILE) + 10)) {
-      if (ob.kind === 'campfire') {
+      if (ob.kind === 'campfire' || ob.kind === 'fire') {
         const flick = 1 + Math.sin(this.time * 11) * 0.03 + Math.sin(this.time * 7.3 + 1) * 0.04;
         out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 300 * flick, warm: 1 });
       } else if (ob.kind === 'torch') {
@@ -1854,6 +1857,23 @@ export class Renderer {
     const { ctx } = this;
     for (const z of zs) {
       const r = ZOMBIE[z.type].radius;
+      // 精鋭：紫の光の輪と名札
+      if (z.elite) {
+        const pulse = 0.55 + Math.sin(this.time * 5 + z.id) * 0.25;
+        ctx.strokeStyle = `rgba(192,138,240,${pulse})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(z.x, z.y, r + 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.font = 'bold 10px "Noto Sans JP", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.strokeText('精鋭', z.x, z.y + r + 12);
+        ctx.fillStyle = '#d6a8ff';
+        ctx.fillText('精鋭', z.x, z.y + r + 12);
+      }
       if (z.hp < z.maxHp) {
         const w = z.type === 'brute' ? 40 : 24;
         const y = z.y - r - 10;
@@ -2737,9 +2757,11 @@ export class Renderer {
       const st = effectiveStats(s.id, s.w);
       const mods = ATTACHMENTS.filter((a) => s.w[a]).length;
       ctx.font = `bold 12px ${UI}`;
-      ctx.fillStyle = '#e6e1cc';
-      ctx.fillText(ITEMS[s.id].name, x + 50, iy, 120);
-      let ax = x + 50 + Math.min(120, ctx.measureText(ITEMS[s.id].name).width) + 6;
+      const q = s.w.q ?? 0;
+      ctx.fillStyle = q > 0 ? QUALITY[q].color : '#e6e1cc';
+      const wn = weaponLabel(s);
+      ctx.fillText(wn, x + 50, iy, 120);
+      let ax = x + 50 + Math.min(120, ctx.measureText(wn).width) + 6;
       if (mods) {
         ctx.font = `10px ${MONO}`;
         ctx.fillStyle = '#93b77c';
@@ -3108,6 +3130,19 @@ export class Renderer {
       ctx.fillRect(-4, -2.5, 8, 5);
       ctx.restore();
     }
+    for (const st of view.sites ?? []) {
+      if (st.done) continue;
+      const sx = X(st.tx + 0.5);
+      const sy = Y(st.ty + 0.5);
+      ctx.fillStyle = '#c08af0';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 5);
+      ctx.lineTo(sx + 5, sy);
+      ctx.lineTo(sx, sy + 5);
+      ctx.lineTo(sx - 5, sy);
+      ctx.closePath();
+      ctx.fill();
+    }
     for (const j of view.jobs ?? []) {
       if (j.done) continue;
       const jx = X(j.tx + 0.5);
@@ -3326,6 +3361,7 @@ export class Renderer {
       if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
     }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
+    for (const st of view.sites ?? []) if (!st.done) marker((st.tx + 0.5) * TILE, (st.ty + 0.5) * TILE, '#c08af0', '◆ ', 'dot');
     if (me.veh === undefined) {
       let best: VehicleSnap | null = null;
       let bd = 70 * TILE;
@@ -3451,6 +3487,25 @@ export class Renderer {
         ctx.fillText('✓', X(loc.x + loc.w / 2), Y(loc.y + loc.h / 2));
       }
     });
+    // 異変
+    for (const st of view.sites ?? []) {
+      const sx = X(st.tx + 0.5);
+      const sy = Y(st.ty + 0.5);
+      ctx.globalAlpha = st.done ? 0.35 : 1;
+      ctx.fillStyle = '#c08af0';
+      ctx.strokeStyle = '#140a1c';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 8);
+      ctx.lineTo(sx + 8, sy);
+      ctx.lineTo(sx, sy + 8);
+      ctx.lineTo(sx - 8, sy);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 1;
+    }
     // 見つけた車
     for (const v of view.vehicles ?? []) {
       if (!this.vision.explored[Math.floor(v.y / TILE) * MAP_W + Math.floor(v.x / TILE)]) continue;
@@ -3519,6 +3574,7 @@ export class Renderer {
     const icon = (x: number, y: number, r: number) => placed.push({ x: x - r, y: y - r, w: r * 2, h: r * 2 });
     for (const lm of this.world.landmarks) icon(X(lm.x), Y(lm.y), 7);
     for (const j of view.jobs ?? []) icon(X(j.tx + 0.5), Y(j.ty + 0.5), 10);
+    for (const st of view.sites ?? []) icon(X(st.tx + 0.5), Y(st.ty + 0.5), 10);
     for (const b of this.world.features.bridges) icon(X(b.x + b.w / 2), Y(b.y + b.h / 2), 6);
     if (view.drop) icon(mx + view.drop.x * k, my + view.drop.y * k, 6);
     for (const p of view.players) if (p.status !== 'dead') icon(mx + p.x * k, my + p.y * k, 6);
@@ -3558,6 +3614,10 @@ export class Renderer {
       put({ text: p.name + (p.status === 'down' ? ' SOS' : ''), x: mx + p.x * k + 8, y: my + p.y * k, fg: p.status === 'down' ? '#ff7a60' : '#ffffff', font: `bold 11px ${UI}`, align: 'left' }, [[0, 0], [0, -12], [0, 12], [-60, 0]]);
     }
     placed.push({ x: X(BASE_TX) - 10, y: Y(BASE_TY) - 10, w: 20, h: 20 });
+    for (const st of view.sites ?? []) {
+      if (st.done) continue;
+      put({ text: `◆ ${st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
+    }
     // 依頼の目的地の名前
     (view.jobs ?? []).forEach((j, i) => {
       if (j.done) return;

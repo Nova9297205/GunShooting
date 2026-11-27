@@ -45,7 +45,12 @@ export type ItemId =
   | 'coat'
   | 'pack1'
   | 'pack2'
-  | 'pack3';
+  | 'pack3'
+  | 'painkiller'
+  | 'salve'
+  | 'decoy'
+  | 'pipebomb'
+  | 'upkit';
 
 export type ItemCat = 'ammo' | 'med' | 'food' | 'mat' | 'att' | 'weapon' | 'misc';
 /** レア度（0=ありふれた 1=普通 2=レア 3=非常にレア）。UIの枠色に使う */
@@ -65,6 +70,10 @@ export interface ItemDef {
 /** 武器ごとの状態（装填数・装填中の弾種・アタッチメント） */
 export interface WeaponState {
   mag: number;
+  /** 品質 0=普通 1=良品 2=希少 3=逸品 4=伝説（威力が上がり、追加の性能が付く） */
+  q?: number;
+  /** 追加の性能（品質が高いほど多い） */
+  aff?: Affix[];
   /** 1 = 徹甲弾／スラッグ弾を装填中 */
   ap?: number;
   scope?: number;
@@ -116,6 +125,11 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   antitox: D('antitox', '解毒剤', 3, 'med', 35, 2, '汚染度 -60・HP +10（市街中心部の病院で見つかる）'),
   herbs: D('herbs', '薬草', 8, 'med', 4, 0, 'HP +12・汚染度 -10（森林で採れる）'),
   splint: D('splint', '添え木', 3, 'med', 6, 0, '骨折の手当て。足の遅さが軽くなり、約2分半で治る（布2・鉄くず1で作れる）'),
+  painkiller: D('painkiller', '鎮痛剤', 5, 'med', 12, 1, 'HP +10・疲労 -25（薬品1・薬草1で作れる）'),
+  salve: D('salve', '薬草の軟膏', 5, 'med', 8, 0, '出血を止める・HP +15（薬草2・布1で作れる）'),
+  decoy: D('decoy', 'おとり時計', 3, 'misc', 10, 1, '[X]/右クリックで狙った所へ投げる。10秒間鳴り続け、ゾンビを引き寄せる'),
+  pipebomb: D('pipebomb', 'パイプ爆弾', 3, 'misc', 25, 2, '[X]/右クリックで狙った所へ投げる。2秒後に爆発（近づきすぎに注意）'),
+  upkit: D('upkit', '武器強化キット', 3, 'misc', 30, 2, '[X]/右クリックで、手に持っている武器の品質を 1 段上げる（希少まで）'),
   pack1: D('pack1', '学生かばん', 1, 'misc', 15, 0, '背負うと バッグ +3マス・+6kg（[X]/右クリックで背負う）'),
   pack2: D('pack2', '登山リュック', 1, 'misc', 40, 1, '背負うと バッグ +6マス・+13kg'),
   pack3: D('pack3', '軍用バックパック', 1, 'misc', 90, 2, '背負うと バッグ +8マス・+21kg（軍用地で見つかる）'),
@@ -193,7 +207,7 @@ const KG: Partial<Record<ItemId, number>> = {
   scrap: 0.35, cloth: 0.12, gunpowder: 0.15, parts: 0.3, chem: 0.3, electronics: 0.2, tools: 1.2, fuel: 3,
   scope: 0.3, holo: 0.2, suppressor: 0.35, extmag: 0.25, grip: 0.2,
   pistol: 0.9, smg: 2.4, rifle: 3.6, shotgun: 3.4, hunting: 3.3, dmr: 4.3,
-  valuables: 0.1, intel: 0.1, coat: 1.6, pack1: 0.5, pack2: 1.2, pack3: 1.8,
+  valuables: 0.1, intel: 0.1, upkit: 1.0, pipebomb: 0.8, decoy: 0.4, salve: 0.1, painkiller: 0.1, coat: 1.6, pack1: 0.5, pack2: 1.2, pack3: 1.8,
 };
 export function unitKg(id: ItemId): number {
   return KG[id] ?? 0.3;
@@ -230,6 +244,16 @@ export function ammoOf(wid: WeaponId, w?: WeaponState): ItemId {
 export function effectiveStats(wid: WeaponId, w?: WeaponState): WeaponStats {
   const s = { ...WEAPON_STATS[wid] };
   if (!w) return s;
+  // 品質と追加の性能（ハクスラ要素）
+  if (w.q) s.damage *= 1 + 0.08 * w.q;
+  for (const a of w.aff ?? []) {
+    if (a === 'dmg') s.damage *= 1.15;
+    else if (a === 'rof') s.fireInterval *= 0.88;
+    else if (a === 'mag') s.magSize = Math.round(s.magSize * 1.3);
+    else if (a === 'acc') s.spread *= 0.75;
+    else if (a === 'rel') s.reloadTime *= 0.75;
+    else if (a === 'quiet') s.noiseRadius *= 0.75;
+  }
   if (w.scope) {
     s.spread *= 0.45;
     s.recoil *= 0.9;
@@ -267,6 +291,33 @@ export function effectiveStats(wid: WeaponId, w?: WeaponState): WeaponStats {
   }
   s.ammo = ammoOf(wid, w);
   return s;
+}
+
+// ---------------- 武器の品質と追加の性能（ハクスラ） ----------------
+export type Affix = 'dmg' | 'rof' | 'mag' | 'acc' | 'rel' | 'quiet';
+export const AFFIX_NAMES: Record<Affix, string> = { dmg: '威力 +15%', rof: '連射 +12%', mag: '装弾数 +30%', acc: '集弾率 +25%', rel: 'リロード -25%', quiet: '銃声 -25%' };
+export const QUALITY = [
+  { name: '普通', color: '#bdb79e' },
+  { name: '良品', color: '#93d07c' },
+  { name: '希少', color: '#6fb0f0' },
+  { name: '逸品', color: '#c08af0' },
+  { name: '伝説', color: '#f0b040' },
+];
+/** 品質を決めて、その数だけ追加の性能を付ける（重複なし） */
+export function rollQuality(q: number, rnd: () => number = Math.random): Pick<WeaponState, 'q' | 'aff'> {
+  if (q <= 0) return {};
+  const all: Affix[] = ['dmg', 'rof', 'mag', 'acc', 'rel', 'quiet'];
+  const aff: Affix[] = [];
+  while (aff.length < Math.min(q, all.length)) {
+    const a = all[Math.floor(rnd() * all.length)];
+    if (!aff.includes(a)) aff.push(a);
+  }
+  return { q, aff };
+}
+/** 武器の表示名（品質つき） */
+export function weaponLabel(s: Slot): string {
+  const q = s.w?.q ?? 0;
+  return q > 0 ? `${QUALITY[q].name}の${ITEMS[s.id].name}` : ITEMS[s.id].name;
 }
 
 export function isWeapon(id: ItemId): id is WeaponId {
@@ -355,6 +406,7 @@ export function heldWeapon(p: { tool: number; prim: Slot | null; sec: Slot | nul
 
 /** 入れ物の表示名 */
 export const CONTAINER_NAMES: Record<string, string> = {
+  sbox: '保管箱',
   shelf: '棚',
   cabinet: '薬品棚',
   locker: 'ロッカー',

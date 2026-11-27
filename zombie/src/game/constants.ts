@@ -144,6 +144,10 @@ export const OBJ_HP: Record<ObjKind, number> = {
   barrel: 30,
   raintank: 200,
   stove: 220,
+  cot: 150,
+  wbench: 300,
+  sbox: 300,
+  fire: 120,
   radio: 1,
 };
 
@@ -174,6 +178,9 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
   'raintank',
   'stove',
   'radio',
+  'cot',
+  'wbench',
+  'sbox',
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */
@@ -235,6 +242,11 @@ export const RECIPES: Recipe[] = [
   { id: 'suppressor', name: 'サプレッサー', desc: '銃声を約1/3に抑える', bench: true, lv: 3, cost: { parts: 2, scrap: 4, tools: 1 }, out: { id: 'suppressor', n: 1 } },
   { id: 'scope', name: '4倍スコープ', desc: '集弾率が大きく上がり視界が伸びる', bench: true, lv: 3, cost: { parts: 2, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
   { id: 'splint', name: '添え木', desc: '骨折の手当て（足が遅い・ダッシュできない状態を治す）', bench: false, cost: { cloth: 2, scrap: 1 }, out: { id: 'splint', n: 1 } },
+  { id: 'salve', name: '薬草の軟膏', desc: '出血を止める・HP +15', bench: false, cost: { herbs: 2, cloth: 1 }, out: { id: 'salve', n: 1 } },
+  { id: 'painkiller', name: '鎮痛剤', desc: 'HP +10・疲労 -25', bench: true, cost: { chem: 1, herbs: 1 }, out: { id: 'painkiller', n: 1 } },
+  { id: 'decoy', name: 'おとり時計', desc: '投げた所で10秒鳴り、ゾンビを引き寄せる', bench: true, cost: { electronics: 1, scrap: 1 }, out: { id: 'decoy', n: 1 } },
+  { id: 'pipebomb', name: 'パイプ爆弾', desc: '投げて2秒後に爆発。群れをまとめて倒す', bench: true, lv: 2, cost: { gunpowder: 3, scrap: 2, chem: 1 }, out: { id: 'pipebomb', n: 1 } },
+  { id: 'upkit', name: '武器強化キット', desc: '手に持っている武器の品質を1段上げる（希少まで）', bench: true, lv: 2, cost: { parts: 3, scrap: 4, tools: 1 }, out: { id: 'upkit', n: 1 } },
   { id: 'pack1', name: '学生かばん', desc: '背負うとバッグ +3マス・+6kg', bench: false, cost: { cloth: 5, scrap: 1 }, out: { id: 'pack1', n: 1 } },
   { id: 'pack2', name: '登山リュック', desc: '背負うとバッグ +6マス・+13kg', bench: true, lv: 2, cost: { cloth: 9, scrap: 4, parts: 1 }, out: { id: 'pack2', n: 1 } },
   { id: 'coat', name: '防寒コート', desc: '持っているだけで雨・夜の冷えが半分に', bench: true, cost: { cloth: 6, scrap: 1 }, out: { id: 'coat', n: 1 } },
@@ -244,7 +256,7 @@ export const RECIPES: Recipe[] = [
 ];
 
 // ---------------- 拠点に建てる物 ----------------
-export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'raintank' | 'stove';
+export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'raintank' | 'stove' | 'cot' | 'wbench' | 'sbox' | 'fire';
 export interface BuildDef {
   kind: BuildKind;
   name: string;
@@ -263,6 +275,10 @@ export const BUILDS: BuildDef[] = [
   { kind: 'torch', name: 'たいまつ', role: '明かり', desc: '夜の拠点を照らす。光の中は敵が見える', cost: { cloth: 2, scrap: 1 }, hp: 80 },
   { kind: 'raintank', name: '雨水タンク', role: '生産', desc: '雨・嵐で水が貯まる（毎朝も少し）。[F] で回収', cost: { scrap: 6, cloth: 2 }, hp: 200 },
   { kind: 'stove', name: '調理かまど', role: '調理', desc: '水・缶詰・薬草で温かい料理。[F] で料理メニュー', cost: { scrap: 5, parts: 1 }, hp: 220 },
+  { kind: 'cot', name: '寝床', role: '睡眠', desc: 'どこでも夜に眠れる。最後に眠った寝床が、戦闘不能から戻る場所になる', cost: { cloth: 6, scrap: 2 }, hp: 150 },
+  { kind: 'wbench', name: '作業台', role: 'クラフト', desc: '拠点の外でもクラフト・改造ができる（レベルは拠点の作業台と同じ）', cost: { scrap: 10, parts: 1 }, hp: 300 },
+  { kind: 'sbox', name: '保管箱', role: '収納', desc: '16 マスの箱。中身はずっと残る（撤去は空にしてから）', cost: { scrap: 6 }, hp: 300 },
+  { kind: 'fire', name: '焚き火', role: '暖・明かり', desc: '体が温まり、そばで食べると休息済み。夜は明るい', cost: { scrap: 2, cloth: 1 }, hp: 120 },
 ];
 export const BUILD_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(BUILDS.map((b) => b.kind));
 /** 建てた物は補強されていて、ゾンビの攻撃で受けるダメージがこの倍率になる */

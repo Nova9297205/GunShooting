@@ -46,6 +46,11 @@ export type ObjKind =
   // 拠点に建てる物
   | 'raintank'
   | 'stove'
+  // どこでも建てられる拠点の設備
+  | 'cot'
+  | 'wbench'
+  | 'sbox'
+  | 'fire'
   // 以下は旧バージョンの建築物（描画コードの互換用）
   | 'stone'
   | 'woodWall'
@@ -127,6 +132,8 @@ export interface PlayerSnap extends MoveBody {
   cold?: number;
   bleed?: boolean;
   frac?: number;
+  /** 寝床（最後に眠った所。戦闘不能から朝に戻る場所） */
+  home?: { x: number; y: number };
   /** 背負っているリュック（バッグのマスと重さが増える） */
   pack?: ItemId;
   /** 乗っている車の ID と座席（0 = 運転席） */
@@ -180,6 +187,8 @@ export interface ZombieSnap {
   alert: number;
   /** 攻撃回数カウンタ（攻撃モーション用） */
   atk: number;
+  /** 精鋭（手強く、良い戦利品を落とす） */
+  elite?: boolean;
 }
 
 export interface BulletSnap {
@@ -282,8 +291,21 @@ export interface ViewState {
   jobs?: Job[];
   /** 車両 */
   vehicles?: VehicleSnap[];
+  /** 異変（特定の場所のイベント） */
+  sites?: SiteSnap[];
   /** 無線の信頼度：達成した依頼の数とレベル */
   radio?: { done: number; lv: number };
+}
+
+/** 異変：墜落したヘリ・感染体の巣・封鎖された武器庫。見張りを倒して箱を開けると制圧 */
+export interface SiteSnap {
+  id: number;
+  kind: 'heli' | 'nest' | 'armory';
+  name: string;
+  tx: number;
+  ty: number;
+  crate: number;
+  done?: boolean;
 }
 
 /** 車両 */

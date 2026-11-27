@@ -2178,3 +2178,11 @@ input[type='range'] {
 .islot.over {
   outline: 1px solid #c0583e;
 }
+
+/* 武器の品質（ハクスラ） */
+.islot.qual {
+  box-shadow: inset 0 0 0 2px var(--q), 0 0 8px var(--q);
+}
+.islot.qual .nm b {
+  font-size: 9px;
+}

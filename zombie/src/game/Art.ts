@@ -59,6 +59,13 @@ export interface ArtSet {
 
 // ---------------- ヘルパー ----------------
 
+/** 建てた設備は、同じ役割の既存の絵で描く（寝床＝ベッド、作業台、保管箱＝倉庫、焚き火） */
+const ALIAS: Partial<Record<string, ObjSnap['kind']>> = { cot: 'bed', wbench: 'bench', sbox: 'chest', fire: 'campfire' };
+function alias(o: ObjSnap): ObjSnap {
+  const k = ALIAS[o.kind];
+  return k ? { ...o, kind: k } : o;
+}
+
 /** タイル座標から決定的な疑似乱数 0..1 */
 export function hash2(x: number, y: number, s = 0): number {
   let h = (x * 374761393 + y * 668265263 + s * 1442695041) | 0;
@@ -121,6 +128,7 @@ export class VectorArt implements ArtSet {
   }
 
   drawLowObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number, tall: TallQuery): boolean {
+    o = alias(o);
     const x = o.tx * TILE;
     const y = o.ty * TILE;
     const cx = x + TILE / 2;
@@ -994,6 +1002,7 @@ export class VectorArt implements ArtSet {
   }
 
   drawTallObject(ctx: CanvasRenderingContext2D, o: ObjSnap, t: number, aim?: { a: number; flash: number }): void {
+    o = alias(o);
     const x = o.tx * TILE;
     const y = o.ty * TILE;
     const cx = x + TILE / 2;
