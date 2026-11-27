@@ -103,6 +103,8 @@ import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND
 
 interface SimPlayer extends PlayerSnap {
   queue: InputFrame[];
+  /** 酸だまりのダメージ間隔 */
+  acidT?: number;
   /** 骨折が治るまでの秒数 */
   fracT?: number;
   fire: boolean;
@@ -139,6 +141,8 @@ interface SimZombie extends ZombieSnap {
   bossCd?: number;
   stunT?: number;
   hitIds?: number[];
+  /** 酸を吐く者：次に吐けるまで */
+  spitCd?: number;
   kx: number;
   ky: number;
   attackCd: number;
@@ -276,12 +280,12 @@ const DISTRICT_LOOT: Record<DistrictKind, { mul: LootMul; extra: LootRow[] }> = 
 };
 /** 地区ごとのゾンビの出やすさ（危険度ごとの基本の重みに掛ける・足す） */
 const DISTRICT_ZOMBIES: Record<DistrictKind, { mul: Partial<Record<ZombieType, number>>; add: Partial<Record<ZombieType, number>>; density: number; pack: number }> = {
-  residential: { mul: { walker: 1.7, runner: 1, brute: 0.6, soldier: 0.3 }, add: { screamer: 2 }, density: 1.35, pack: 0.45 },
+  residential: { mul: { walker: 1.7, runner: 1, brute: 0.6, soldier: 0.3 }, add: { screamer: 2, crawler: 6 }, density: 1.35, pack: 0.45 },
   commercial: { mul: { walker: 1, runner: 1.9, brute: 0.6, soldier: 0.4 }, add: { screamer: 9 }, density: 1.1, pack: 0.3 },
-  industrial: { mul: { walker: 1, runner: 0.6, brute: 2.2, soldier: 0.5 }, add: { bloater: 13 }, density: 1, pack: 0.15 },
-  civic: { mul: { walker: 1, runner: 1, brute: 0.8, soldier: 1.5 }, add: { bloater: 8, screamer: 3 }, density: 1.1, pack: 0.2 },
-  military: { mul: { walker: 0.5, runner: 0.6, brute: 1.2, soldier: 2.4 }, add: {}, density: 1.2, pack: 0.2 },
-  forest: { mul: { walker: 0.9, runner: 2.3, brute: 0.5, soldier: 0.3 }, add: { screamer: 2 }, density: 0.7, pack: 0.1 },
+  industrial: { mul: { walker: 1, runner: 0.6, brute: 2.2, soldier: 0.5 }, add: { bloater: 13, spitter: 8 }, density: 1, pack: 0.15 },
+  civic: { mul: { walker: 1, runner: 1, brute: 0.8, soldier: 1.5 }, add: { bloater: 8, screamer: 3, crawler: 5, spitter: 3 }, density: 1.1, pack: 0.2 },
+  military: { mul: { walker: 0.5, runner: 0.6, brute: 1.2, soldier: 2.4 }, add: { spitter: 2 }, density: 1.2, pack: 0.2 },
+  forest: { mul: { walker: 0.9, runner: 2.3, brute: 0.5, soldier: 0.3 }, add: { screamer: 2, crawler: 4 }, density: 0.7, pack: 0.1 },
   wild: { mul: { walker: 1.2, runner: 1.2, brute: 1, soldier: 0.7 }, add: { screamer: 7 }, density: 1.15, pack: 0.4 },
 };
 const BASE_ZOMBIE_WEIGHTS: Record<number, Partial<Record<ZombieType, number>>> = {
@@ -920,6 +924,8 @@ export class HostSimulation {
       sites: [...this.sites, ...this.rsites].map((x) => ({ id: x.id, kind: x.kind, name: x.name, tx: x.tx, ty: x.ty, crate: x.crate, ...(x.done ? { done: true } : {}) })),
       rescue: this.rescueSnap(),
       ...(this.winter() ? { winter: true } : {}),
+      ...(this.acid.length ? { acid: this.acid.map((a) => ({ x: Math.round(a.x), y: Math.round(a.y), r: a.r, t: r1(a.t) })) } : {}),
+      ...(this.spits.length ? { spits: this.spits.map((q) => ({ sx: Math.round(q.sx), sy: Math.round(q.sy), tx: Math.round(q.tx), ty: Math.round(q.ty), p: r2(1 - q.t / q.dur) })) } : {}),
       vehicles: this.vehicles.map((v) => ({ id: v.id, kind: v.kind, x: r1(v.x), y: r1(v.y), a: r2(v.a), spd: Math.round(v.spd), fuel: r1(v.fuel), hp: Math.round(v.hp), maxHp: v.maxHp, broken: v.broken, seats: v.seats })),
       radio: { done: this.radioDone, lv: radioLevel(this.radioDone) },
       players: this.players.map((p) => ({
@@ -1013,6 +1019,7 @@ export class HostSimulation {
     this.updateJobs(dt);
     this.updateVehicles(dt);
     this.updateThrowns(dt);
+    this.updateAcid(dt);
     this.updateSites(dt);
     if (this.tick % 10 === 0) this.updateTracks();
     this.updateSleep();
@@ -3318,7 +3325,7 @@ export class HostSimulation {
     const tr = DISTRICT_ZOMBIES[d.kind];
     const base = BASE_ZOMBIE_WEIGHTS[Math.max(1, Math.min(4, tier))];
     const w: [ZombieType, number][] = [];
-    for (const t of ['walker', 'runner', 'brute', 'soldier', 'bloater', 'screamer'] as ZombieType[]) {
+    for (const t of ['walker', 'runner', 'brute', 'soldier', 'bloater', 'screamer', 'crawler', 'spitter'] as ZombieType[]) {
       const v = (base[t] ?? 0) * (tr.mul[t] ?? 1) + (tr.add[t] ?? 0) * (tier >= 2 ? 1 : 0.4);
       if (v > 0) w.push([t, v]);
     }
@@ -3367,6 +3374,105 @@ export class HostSimulation {
       z.targetY = next.y;
       z.alert = 1;
       return;
+    }
+  }
+
+  // ======================== 這う者・酸を吐く者 ========================
+  /** 這う者：伏せたまま動かない。近づいた人に、ぴくっと動いてから噛みつく（出血） */
+  private updateCrawler(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): boolean {
+    if ((z.teleT ?? 0) > 0) {
+      z.teleT! -= dt;
+      if (z.teleT! > 0) return true;
+      z.tele = 0;
+      if (near && near.d < 100) {
+        this.damagePlayer(near.p, ZOMBIE.crawler.damage * (z.elite ? 1.4 : 1));
+        this.injure(near.p, 0, 0.6);
+        this.pop(near.p, '足を噛まれた！', '#e07a60');
+      }
+      z.atk++;
+      z.attackCd = ZOMBIE.crawler.attackInterval;
+      this.startChase(z);
+      return true;
+    }
+    if (near && near.d < 72 && z.attackCd <= 0) {
+      z.tele = 3;
+      z.teleT = 0.45;
+      z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+      return true;
+    }
+    // 待ち伏せ：撃たれるか、すぐ近く（200px）に来るまでは伏せたまま動かない
+    if (z.hp >= z.maxHp && (!near || near.d > 200)) return true;
+    return z.state !== 'chase';
+  }
+
+  /** 酸を吐く者：間合いを保ち、構えてから酸を放る（着いた所に酸だまり）。近寄られると下がる */
+  private updateSpitter(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): boolean {
+    z.spitCd = (z.spitCd ?? 1.5) - dt;
+    if ((z.teleT ?? 0) > 0) {
+      z.teleT! -= dt;
+      if (near) z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+      if (z.teleT! > 0) return true;
+      z.tele = 0;
+      if (near) {
+        // いる場所に吐く（飛ぶのに時間がかかるので、動き続ければ避けられる）
+        const tx = near.p.x;
+        const ty = near.p.y;
+        const dur = 0.55 + near.d / 900;
+        this.spits.push({ sx: z.x, sy: z.y, tx, ty, t: dur, dur });
+      }
+      z.spitCd = 3.4;
+      return true;
+    }
+    if (z.state !== 'chase' || !near) return false;
+    const clear = this.world.lineClear(z.x, z.y, near.p.x, near.p.y);
+    if (clear && near.d > 150 && near.d < 430 && z.spitCd <= 0 && this.zActive(z)) {
+      z.tele = 4;
+      z.teleT = 0.7;
+      return true;
+    }
+    // 近すぎたら下がる
+    if (clear && near.d < 210) {
+      const sp = (this.phase === 'night' ? ZOMBIE.spitter.nightSpeed : ZOMBIE.spitter.daySpeed) * z.speedMul * 0.9;
+      const ax = (z.x - near.p.x) / (near.d || 1);
+      const ay = (z.y - near.p.y) / (near.d || 1);
+      moveCircle(z, ax * sp * dt, ay * sp * dt, ZOMBIE.spitter.radius, this.world);
+      z.angle = Math.atan2(-ay, -ax);
+      // 追い詰められたら殴り返す
+      if (near.d < ZOMBIE.spitter.radius + PLAYER.radius + 6 && z.attackCd <= 0) {
+        this.damagePlayer(near.p, ZOMBIE.spitter.damage);
+        z.attackCd = ZOMBIE.spitter.attackInterval;
+        z.atk++;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /** 飛んでいる酸と、地面の酸だまり */
+  private spits: { sx: number; sy: number; tx: number; ty: number; t: number; dur: number }[] = [];
+  acid: { x: number; y: number; r: number; t: number }[] = [];
+  private updateAcid(dt: number): void {
+    for (const q of this.spits) {
+      q.t -= dt;
+      if (q.t > 0) continue;
+      this.acid.push({ x: q.tx, y: q.ty, r: 46, t: 4.5 });
+      this.events.push({ k: 'gas', x: q.tx, y: q.ty });
+    }
+    this.spits = this.spits.filter((q) => q.t > 0);
+    for (const a of this.acid) a.t -= dt;
+    this.acid = this.acid.filter((a) => a.t > 0);
+    if (!this.acid.length) return;
+    for (const p of this.players) {
+      if (p.status !== 'alive' || p.away || p.veh) continue;
+      const inAcid = this.acid.some((a) => Math.hypot(p.x - a.x, p.y - a.y) < a.r + PLAYER.radius * 0.5);
+      if (!inAcid) continue;
+      p.tox = Math.min(100, (p.tox ?? 0) + 4 * dt);
+      p.acidT = (p.acidT ?? 0) - dt;
+      if (p.acidT <= 0) {
+        p.acidT = 0.5;
+        this.damagePlayer(p, 5);
+        if (Math.random() < 0.3) this.pop(p, '酸で焼ける！ 離れろ', '#a8d060');
+      }
     }
   }
 
@@ -3929,6 +4035,8 @@ export class HostSimulation {
 
     const near = this.nearestAlive(z.x, z.y);
     if (z.type === 'titan' && this.updateTitan(z, dt, near)) return;
+    if (z.type === 'crawler' && this.updateCrawler(z, dt, near)) return;
+    if (z.type === 'spitter' && this.updateSpitter(z, dt, near)) return;
     let speed = (night ? st.nightSpeed : st.daySpeed) * z.speedMul * this.world.speedAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE));
     let dx = 0;
     let dy = 0;
@@ -4160,7 +4268,7 @@ export class HostSimulation {
     const killer = this.players.find((p) => p.id === owner);
     if (killer) {
       killer.kills++;
-      const xp = z.type === 'brute' ? 12 : z.type === 'soldier' ? 9 : z.type === 'bloater' ? 7 : z.type === 'runner' || z.type === 'screamer' ? 4 : 3;
+      const xp = z.type === 'brute' ? 12 : z.type === 'soldier' ? 9 : z.type === 'bloater' || z.type === 'spitter' ? 7 : z.type === 'crawler' ? 5 : z.type === 'runner' || z.type === 'screamer' ? 4 : 3;
       this.gainXp(killer, killer.tool === Tool.Melee ? 1 : 2, xp);
     }
     this.events.push({ k: 'kill', x: z.x, y: z.y, r: ZOMBIE[z.type].radius, o: owner, t: z.type, id: z.id, a: z.angle, dx: r2(dx), dy: r2(dy) });

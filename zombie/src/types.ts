@@ -13,7 +13,7 @@ export interface Vec2 {
 
 export type PlayerStatus = 'alive' | 'down' | 'dead';
 /** walker=徘徊型 / runner=俊敏型 / brute=重装型 / soldier=感染兵士 */
-export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier' | 'bloater' | 'screamer' | 'titan';
+export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier' | 'bloater' | 'screamer' | 'titan' | 'crawler' | 'spitter';
 export type TimePhase = 'day' | 'night';
 export type GameMode = 'solo' | 'host' | 'guest';
 /** 遊び方：30 日目に救助が来る／期限なし（無線を直して自分で呼ぶ） */
@@ -206,7 +206,7 @@ export interface ZombieSnap {
   atk: number;
   /** 精鋭（手強く、良い戦利品を落とす） */
   elite?: boolean;
-  /** ボスの予備動作（1 = 突進の構え・2 = 地鳴りの構え） */
+  /** 予備動作（1 = 巨像の突進・2 = 巨像の地鳴り・3 = 這う者の噛みつき・4 = 酸を吐く者の構え） */
   tele?: number;
 }
 
@@ -316,6 +316,9 @@ export interface ViewState {
   rescue?: RescueSnap;
   /** 冬（雪・足跡） */
   winter?: boolean;
+  /** 酸だまり（地面）と、飛んでいる酸 */
+  acid?: { x: number; y: number; r: number; t: number }[];
+  spits?: { sx: number; sy: number; tx: number; ty: number; p: number }[];
   /** 無線の信頼度：達成した依頼の数とレベル */
   radio?: { done: number; lv: number };
 }

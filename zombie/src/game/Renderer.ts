@@ -689,6 +689,7 @@ export class Renderer {
     if (view.winter) this.drawSnowGround(view, vx0, vy0, vx1, vy1, o.dt);
 
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
+    this.drawAcid(view);
     if (view.base.garden >= 1) this.drawGarden(view.base.garden);
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
@@ -1938,6 +1939,20 @@ export class Renderer {
     const { ctx } = this;
     for (const z of zs) {
       const r = ZOMBIE[z.type].radius;
+      // 酸を吐く者の構え：喉が緑に光る／這う者の構え：足元に小さな警告
+      if (z.tele === 4) {
+        const g = 0.5 + Math.sin(this.time * 18) * 0.3;
+        ctx.fillStyle = `rgba(160,230,80,${g * 0.5})`;
+        ctx.beginPath();
+        ctx.arc(z.x + Math.cos(z.angle) * r * 0.6, z.y + Math.sin(z.angle) * r * 0.6, r * 0.9, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (z.tele === 3) {
+        ctx.strokeStyle = `rgba(240,90,60,${0.5 + Math.sin(this.time * 30) * 0.4})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(z.x, z.y, r + 10, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       // 巨像の予備動作：突進は向きの矢印、地鳴りは広がる輪（どちらも赤く点滅）
       if (z.type === 'titan' && z.tele) {
         const blink = 0.5 + Math.sin(this.time * 22) * 0.35;
@@ -3282,6 +3297,44 @@ export class Renderer {
       ctx.fillText(j.done ? '達成' : ready ? `そろった！ 拠点の無線で報告 ・ ${distTo(j)}m` : `${what(j)} ・ ${distTo(j)}m`, x + 22, ry + 21);
       ctx.globalAlpha = 1;
     });
+  }
+
+  /** 酸だまり（地面の緑の泡）と、放物線で飛ぶ酸 */
+  private drawAcid(view: ViewState): void {
+    const { ctx } = this;
+    for (const a of view.acid ?? []) {
+      const fade = Math.min(1, a.t / 1.5);
+      const g = ctx.createRadialGradient(a.x, a.y, 4, a.x, a.y, a.r);
+      g.addColorStop(0, `rgba(170,230,70,${0.55 * fade})`);
+      g.addColorStop(0.7, `rgba(120,190,50,${0.35 * fade})`);
+      g.addColorStop(1, 'rgba(100,160,40,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(a.x, a.y, a.r, a.r * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 泡
+      for (let i = 0; i < 5; i++) {
+        const ph = (this.time * 0.8 + i * 0.37 + a.x * 0.01) % 1;
+        ctx.fillStyle = `rgba(210,250,130,${0.6 * (1 - ph) * fade})`;
+        ctx.beginPath();
+        ctx.arc(a.x + Math.cos(i * 2.4) * a.r * 0.5, a.y + Math.sin(i * 1.7) * a.r * 0.4, 2 + ph * 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    for (const q of view.spits ?? []) {
+      const x = q.sx + (q.tx - q.sx) * q.p;
+      const y = q.sy + (q.ty - q.sy) * q.p - Math.sin(q.p * Math.PI) * 70;
+      // 落ちる所の印（よければ避けられる）
+      ctx.strokeStyle = `rgba(170,230,70,${0.25 + q.p * 0.5})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(q.tx, q.ty, 40, 32, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#b8f060';
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   /** ボスの体力（画面上部・コンパスの下） */

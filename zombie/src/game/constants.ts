@@ -103,6 +103,10 @@ export const ZOMBIE: Record<ZombieType, ZombieStats> = {
   bloater: { radius: 18, hp: 130, daySpeed: 30, nightSpeed: 56, damage: 9, wallDamage: 20, attackInterval: 1.2, color: '#4e5a3a', skin: '#9aa06a', armor: 0 },
   /** 叫び屋：獲物を見つけると叫び、周りのゾンビを呼び寄せる（商業地区・荒野） */
   screamer: { radius: 12, hp: 45, daySpeed: 52, nightSpeed: 112, damage: 5, wallDamage: 6, attackInterval: 0.8, color: '#5a5450', skin: '#b8b0a0', armor: 0 },
+  /** 這う者：床に伏せて動かない。近づくと噛みつく（出血）。暗いと見えにくい（住宅・病院・森） */
+  crawler: { radius: 13, hp: 70, daySpeed: 26, nightSpeed: 48, damage: 16, wallDamage: 4, attackInterval: 1.6, color: '#3e3a34', skin: '#8e8270', armor: 0 },
+  /** 酸を吐く者：距離をとって酸を吐き、床に酸だまりを残す。近寄られると弱い（工業地区） */
+  spitter: { radius: 14, hp: 85, daySpeed: 40, nightSpeed: 70, damage: 6, wallDamage: 6, attackInterval: 1.0, color: '#3c4a30', skin: '#9ab070', armor: 0 },
   /** 巨像（ボス）：ボスの夜にだけ現れる。突進で壁を破り、地鳴りで周りを吹き飛ばす */
   titan: { radius: 34, hp: 7000, daySpeed: 40, nightSpeed: 58, damage: 30, wallDamage: 160, attackInterval: 1.5, color: '#3a3c34', skin: '#8a7e6a', armor: 0.35 },
 };

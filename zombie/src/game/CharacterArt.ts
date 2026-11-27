@@ -639,6 +639,12 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
   // 被弾：小刻みに揺れる
   if (hit > 0) ctx.translate((h2(id, Math.floor(t * 40)) - 0.5) * 3 * hit, (h2(id, Math.floor(t * 40), 3) - 0.5) * 3 * hit);
   ctx.rotate(z.angle - hit * 0.25);
+  // 這う者：床に伏せて平たい。待ち伏せ中は暗がりに溶けて見えにくい（構えるとぴくっと動く）
+  if (z.type === 'crawler') {
+    if (z.tele === 3) ctx.translate((h2(id, Math.floor(t * 50)) - 0.5) * 4, (h2(id, Math.floor(t * 50), 2) - 0.5) * 4);
+    else if (z.alert !== 2) ctx.globalAlpha *= 0.55;
+    ctx.scale(1.5, 0.78);
+  }
   ctx.lineJoin = 'round';
 
   // ---- 脚（引きずる歩き方） ----
@@ -828,6 +834,20 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
     ctx.beginPath();
     ctx.arc(r * 0.62, 0, r * 0.3, 0, Math.PI * 2);
     blob(ctx, skinD, OUT, 1.3);
+  } else if (z.type === 'spitter') {
+    // ---- 酸を吐く者：痩せた体・膨らんだ緑の喉袋（構えると光る） ----
+    arm(-1, 0.24, 0.9, 0.1);
+    arm(1, 0.24, 0.9, 0.1);
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.1, 0, r * 0.5, r * 0.7, 0, 0, Math.PI * 2);
+    blob(ctx, W('#4a5838'), OUT, 1.3);
+    const sw = 1 + (z.tele === 4 ? 0.35 + Math.sin(t * 20) * 0.1 : Math.sin(t * 2 + id) * 0.05);
+    ctx.beginPath();
+    ctx.arc(r * 0.35, 0, r * 0.42 * sw, 0, Math.PI * 2);
+    blob(ctx, flash ? '#fff' : z.tele === 4 ? '#c8f070' : '#9ab860', OUT, 1.2);
+    ctx.beginPath();
+    ctx.arc(r * 0.62, 0, r * 0.3, 0, Math.PI * 2);
+    blob(ctx, skin, OUT, 1.3);
   } else if (z.type === 'screamer') {
     // ---- 叫び屋：痩せこけた体・異様に大きく開いた口 ----
     arm(-1, 0.22, 1.0, -0.2);

@@ -561,6 +561,8 @@ export class GameSession {
       sites: L.sites,
       rescue: L.rescue,
       winter: L.winter,
+      acid: L.acid,
+      spits: L.spits,
       vehicles,
       radio: L.radio,
       cont: L.cont,
