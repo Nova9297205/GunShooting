@@ -31,7 +31,7 @@ import { audio } from './Audio';
 import { CraftMenu } from '../ui/CraftMenu';
 import { InventoryPanel } from '../ui/InventoryPanel';
 import { BUILD_KINDS, BUILDS, type BuildKind, PLAYER_COLORS, AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
-import { CONTAINER_KINDS, GIVE_RANGE, inBase, STORAGE_KINDS } from './Engine';
+import { CONTAINER_KINDS, GIVE_RANGE, STORAGE_KINDS } from './Engine';
 import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS } from './items';
 import { loadProfile, saveProfile } from './progression';
 import { Effects } from './Effects';
@@ -555,6 +555,7 @@ export class GameSession {
       base: L.base,
       drop: L.drop,
       jobs: L.jobs,
+      sites: L.sites,
       vehicles,
       radio: L.radio,
       cont: L.cont,
@@ -643,7 +644,7 @@ export class GameSession {
     }
     if (this.buildKind) {
       for (let i = 0; i < BUILDS.length; i++)
-        if (this.input.consume(`Digit${i + 1}`)) {
+        if (this.input.consume(`Digit${(i + 1) % 10}`)) {
           this.buildKind = BUILDS[i].kind;
           audio.click();
         }
@@ -976,6 +977,9 @@ export class GameSession {
           ob.kind === 'door' ||
           ob.kind === 'stove' ||
           ob.kind === 'radio' ||
+          ob.kind === 'sbox' ||
+          ob.kind === 'cot' ||
+          ob.kind === 'bed' ||
           STORAGE_KINDS.has(ob.kind) ||
           (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) ||
           (BUILD_KINDS.has(ob.kind) && (ob.hp < ob.maxHp || (ob.kind === 'raintank' && ob.ready > 0)));
@@ -1010,7 +1014,7 @@ export class GameSession {
     for (let ty = pty - r; ty <= pty + r; ty++)
       for (let tx = ptx - r; tx <= ptx + r; tx++) {
         const ob = this.world.objAt(tx, ty);
-        if (ob && ob.kind === 'bench' && Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) <= BENCH_RANGE) return true;
+        if (ob && (ob.kind === 'bench' || ob.kind === 'wbench') && Math.hypot((tx + 0.5) * TILE - pos.x, (ty + 0.5) * TILE - pos.y) <= BENCH_RANGE) return true;
       }
     return false;
   }
@@ -1095,7 +1099,7 @@ export class GameSession {
         if (el.dataset.orig === undefined) el.dataset.orig = el.innerHTML;
         const want = g
           ? el.classList.contains('ph-sub')
-            ? padText('{A} 移す／使う ・ {X} 使う・装備 ・ {Y} 捨てる ・ {LB}/{RB} タブ', g)
+            ? padText('{A} 移す／使う ・ {X} 使う・装備 ・ {Y} 全部取る（入れ物）／捨てる ・ {LB}/{RB} タブ', g)
             : padText('{B} で閉じる ・ 十字キーで選ぶ ・ 右スティックでカーソル ・ ゲームは止まりません', g)
           : el.dataset.orig;
         if (el.innerHTML !== want) el.innerHTML = want;
@@ -1212,9 +1216,10 @@ export class GameSession {
         } else if (ob.kind === 'stove') h = ob.hp < ob.maxHp * 0.6 ? '[F] 料理（かまどが傷んでいる：撤去して建て直せる）' : '[F] 調理かまど：温かい料理を作る';
         else if (ob.kind === 'raintank') h = ob.ready > 0 ? `[F] 水を回収（${ob.ready}/6）` : ob.hp < ob.maxHp ? '[F] 修理（鉄くず1）' : '雨水タンク：雨の日と毎朝に水が貯まる（0/6）';
         else if (BUILD_KINDS.has(ob.kind) && ob.hp < ob.maxHp) h = `[F] 修理（鉄くず1） ${Math.round((ob.hp / ob.maxHp) * 100)}%`;
-        else if (ob.kind === 'bed' && inBase((tx + 0.5) * TILE, (ty + 0.5) * TILE)) {
+        else if (ob.kind === 'sbox') h = '[F] 保管箱を開く';
+        else if (ob.kind === 'bed' || ob.kind === 'cot') {
           const m = this.prevView?.minute ?? 0;
-          h = m >= 20 * 60 || m < 5 * 60 ? (me.sleeping ? null : '[F] ベッドで眠る（全員が眠ると朝 6:00 まで進む）') : '眠れるのは夜 20:00〜05:00';
+          h = m >= 20 * 60 || m < 5 * 60 ? (me.sleeping ? null : '[F] 眠る（全員が眠ると朝 6:00 ・ ここが戻る場所になる）') : '眠れるのは夜 20:00〜05:00';
         }
         else if (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) {
           const name = CONTAINER_NAMES[ob.kind] ?? '入れ物';

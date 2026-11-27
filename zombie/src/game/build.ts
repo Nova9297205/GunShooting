@@ -28,7 +28,8 @@ export function inBuildArea(tx: number, ty: number): boolean {
  * @param occupants プレイヤー・ゾンビの位置（固い物を体の上に置かない）
  */
 export function buildSpotError(world: WorldLike, kind: BuildKind, tx: number, ty: number, px: number, py: number, occupants: { x: number; y: number }[]): string | null {
-  if (!inBuildArea(tx, ty)) return '拠点の敷地の中にしか建てられない';
+  // どこにでも建てられる（ゾンボイドのように、好きな建物を拠点にできる）
+  if (!world.inBounds(tx, ty)) return 'ここには置けない';
   const t = world.terrainAt(tx, ty);
   if (t === T_WALL || t === T_WINDOW || t === T_FENCE || t === T_WATER) return 'ここには置けない';
   if (world.objAt(tx, ty)) return 'すでに物がある';

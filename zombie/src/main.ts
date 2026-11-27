@@ -172,7 +172,7 @@ function startSession(m: GameMode, info: StartInfo, localId: number, sim?: HostS
 function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[], save: SaveData | null = null): void {
   const sim = save ? HostSimulation.fromSave(players, save) : new HostSimulation(players, (Math.random() * 0x7fffffff) | 0);
   // 続きからのときは、生成直後からの変化をすべてゲストに渡す
-  const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, objs: sim.initialObjs() };
+  const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, ...sim.fullWorldDiff() };
   if (m === 'host') net?.startGame(info);
   // 開発時のみ：コンソールから時間を進めるなどのデバッグ用
   if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio, __place: (k: ObjKind, x: number, y: number) => sim.debugPlace(k, x, y) });
@@ -205,7 +205,7 @@ function startLocal(cfg: LocalPlayerCfg[], save: SaveData | null): void {
   show(null);
   const players: LobbyPlayer[] = cfg.map((c, i) => ({ id: i, name: sanitizeName(c.name, i), prof: i === 0 ? loadProfile() : undefined }));
   const sim = save ? HostSimulation.fromSave(players, save) : new HostSimulation(players, (Math.random() * 0x7fffffff) | 0);
-  const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, objs: sim.initialObjs() };
+  const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, ...sim.fullWorldDiff() };
   if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio });
   canvas.style.display = 'none';
   const rects = splitRects(cfg.length);
