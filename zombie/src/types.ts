@@ -28,6 +28,8 @@ export interface RescueSnap {
   parts: number;
   /** 救助が来る日（その日の朝） */
   day?: number;
+  /** 脅威の段階（0〜3） */
+  threat?: number;
 }
 
 /** マップ上のオブジェクト種別（設備・家具・入れ物・ドアなど） */

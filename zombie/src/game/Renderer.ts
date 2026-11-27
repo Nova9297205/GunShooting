@@ -3095,7 +3095,7 @@ export class Renderer {
     ctx.textAlign = 'right';
     ctx.font = `bold 10px ${UI}`;
     ctx.fillStyle = '#bdb79e';
-    ctx.fillText(r.mode === 'd30' ? '30日モード' : '期限なし', x + pw - 10, y + 11);
+    ctx.fillText(`${r.mode === 'd30' ? '30日モード' : '期限なし'}・脅威 Lv${(r.threat ?? 0) + 1}`, x + pw - 10, y + 11);
     ctx.textAlign = 'left';
     ctx.font = `bold 11px ${UI}`;
     ctx.fillStyle = r.day && left <= 1 ? '#f0a040' : '#f0e6c0';

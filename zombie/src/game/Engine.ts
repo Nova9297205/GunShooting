@@ -1142,6 +1142,7 @@ export class HostSimulation {
         return;
       }
       this.checkRescueParts();
+      this.announceThreat();
       this.newJobs(true);
       this.newSites(true);
       this.dayTip();
@@ -2354,7 +2355,7 @@ export class HostSimulation {
   }
 
   private rescueSnap(): RescueSnap {
-    return { mode: this.runMode, stage: this.rescue.stage, parts: this.rescue.parts, ...(this.rescue.day ? { day: this.rescue.day } : {}) };
+    return { mode: this.runMode, stage: this.rescue.stage, parts: this.rescue.parts, threat: this.threat(), ...(this.rescue.day ? { day: this.rescue.day } : {}) };
   }
 
   /** 部品の置き場所：近い・中くらい・遠いの 3 か所（危険度 2・3・4 の施設） */
@@ -2454,6 +2455,7 @@ export class HostSimulation {
       }
       r.stage = 3;
       r.day = r.day ? Math.min(r.day, rd) : rd;
+      this.announceThreat();
       this.events.push({ k: 'banner', t: '救助を呼んだ', s: `救助ヘリは DAY ${r.day} の朝に来る。それまで生き延びろ — 前の晩は最後の防衛`, c: '#f0d070', snd: 'alarm' });
       return true;
     }
@@ -3268,6 +3270,7 @@ export class HostSimulation {
   private typeAt(tier: number, tx: number, ty: number): ZombieType {
     const d = districtAt(this.world.districts, tx, ty);
     if (!d) return this.typeForTier(tier);
+    tier = this.boostTier(tier);
     const tr = DISTRICT_ZOMBIES[d.kind];
     const base = BASE_ZOMBIE_WEIGHTS[Math.max(1, Math.min(4, tier))];
     const w: [ZombieType, number][] = [];
@@ -3280,7 +3283,37 @@ export class HostSimulation {
     return 'walker';
   }
 
+  // ======================== 脅威の段階（日数と救助の進み具合で難しくなる） ========================
+  /** 0 = 1〜10 日・1 = 11〜20 日・2 = 21 日〜。救助を呼ぶと +1（無線の電波に寄ってくる） */
+  threat(): number {
+    const band = this.day <= 10 ? 0 : this.day <= 20 ? 1 : 2;
+    return Math.min(3, band + (this.rescue.stage >= 3 ? 1 : 0));
+  }
+  /** 体力の倍率：段階ごとに少しずつ。30 日目でも 1 日目の 2 倍未満（弾を撃ち込むだけの作業にしない） */
+  private hpMul(): number {
+    return [1, 1.2, 1.4, 1.6][this.threat()] * (1 + 0.02 * ((Math.max(1, this.day) - 1) % 10));
+  }
+  /** 出てくる種類：段階が上がるほど、危険な地区の顔ぶれに近づく */
+  private boostTier(tier: number): number {
+    const t = this.threat();
+    const up = t >= 3 ? (Math.random() < 0.3 ? 2 : 1) : t >= 2 ? 1 : t >= 1 ? (Math.random() < 0.35 ? 1 : 0) : 0;
+    return Math.max(1, Math.min(4, tier + up));
+  }
+  private lastThreat = 0;
+  /** 段階が上がったら知らせる（朝・救助を呼んだとき） */
+  private announceThreat(): void {
+    const t = this.threat();
+    if (t <= this.lastThreat) {
+      this.lastThreat = t;
+      return;
+    }
+    this.lastThreat = t;
+    const msg = ['', '感染が広がった — 走る個体・大男が増え、群れも大きくなる', '感染が拠点の近くまで来た — 精鋭がどこにでも現れる', '無線の電波に感染体が集まってくる — 救助まで持ちこたえろ'][t];
+    this.events.push({ k: 'feed', cat: 'danger', t: `脅威 Lv${t + 1}：${msg}`, c: '#e0583e', snd: 'alarm' });
+  }
+
   private typeForTier(tier: number): ZombieType {
+    tier = this.boostTier(tier);
     const r = Math.random();
     if (tier >= 4) return r < 0.45 ? 'soldier' : r < 0.7 ? 'brute' : r < 0.92 ? 'runner' : 'walker';
     if (tier >= 3) return r < 0.5 ? 'soldier' : r < 0.68 ? 'brute' : r < 0.88 ? 'runner' : 'walker';
@@ -3363,7 +3396,7 @@ export class HostSimulation {
     }
     const outdoor = this.zombies.filter((z) => this.zActive(z) && !this.world.buildingAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE))).length;
     // アクティブな範囲の広さに比例（仲間と離れて探索していると、それぞれの周りに湧く）
-    const per = (this.phase === 'night' ? 1.4 : 0.9) + this.day * 0.05 + (this.weather === 'storm' ? 0.4 : 0);
+    const per = (this.phase === 'night' ? 1.4 : 0.9) + Math.min(0.6, this.day * 0.03) + this.threat() * 0.2 + (this.weather === 'storm' ? 0.4 : 0);
     const want = Math.round(this.stats.active * per);
     if (outdoor < want) this.spawnOutdoor(650);
   }
@@ -3374,8 +3407,9 @@ export class HostSimulation {
     const elite = loc?.hot ? 1.3 : 1;
     // 精鋭（ハクスラ）：まれに現れる手強い個体。倒すと良い戦利品を必ず落とす
     const tier = this.tierAt(Math.floor(x / TILE), Math.floor(y / TILE));
-    const isElite = forceElite || tier >= 2 && type !== 'screamer' && type !== 'bloater' && Math.random() < 0.015 + tier * 0.008 + (this.phase === 'night' ? 0.01 : 0);
-    const hp = ZOMBIE[type].hp * (1 + 0.06 * (this.day - 1)) * elite * (isElite ? 3.2 : 1);
+    const th = this.threat();
+    const isElite = forceElite || (tier >= 2 || th >= 2) && type !== 'screamer' && type !== 'bloater' && Math.random() < 0.015 + tier * 0.008 + th * 0.008 + (this.phase === 'night' ? 0.01 : 0);
+    const hp = ZOMBIE[type].hp * this.hpMul() * elite * (isElite ? 3.2 : 1);
     this.zombies.push({
       id: this.nextId++,
       type,
@@ -3582,7 +3616,7 @@ export class HostSimulation {
   private spawnHordeWave(): void {
     const alive = this.players.filter((p) => p.status === 'alive' && !p.away);
     if (!alive.length) return;
-    const total = Math.min(48, 10 + this.day * 2);
+    const total = Math.min(56, 10 + Math.min(19, this.day) * 2 + this.threat() * 4);
     for (const p of alive) {
       const n = Math.ceil(total / alive.length);
       for (let k = 0; k < n && this.zombies.length < MAX_ZOMBIES; k++) {
