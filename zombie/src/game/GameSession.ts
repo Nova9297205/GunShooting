@@ -9,7 +9,7 @@ import { isTouchDevice, TouchControls } from '../ui/TouchControls';
 import { clearSave, writeSave } from './save';
 import { buildDef, buildSpotError, canAfford } from './build';
 import { seatPos, trunkPos, VEHICLE } from './vehicles';
-import { gamepad, PAD, type PadReader, padPrefs, padSettings, padText } from '../ui/Gamepad';
+import { gamepad, PAD, padBtn, type PadReader, padPrefs, padSettings, padText } from '../ui/Gamepad';
 import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
   VehicleSnap,
@@ -117,6 +117,9 @@ export class GameSession {
   private padSettings = padSettings();
   /** このプレイヤーが使うコントローラー（null = 使わない） */
   private pad: PadReader | null;
+  /** 蘇生を「押すたびに切り替え」にしたときの状態 */
+  private padLtHeld = false;
+  private padReviveOn = false;
   /** ローカル協力：同じ画面の 2 人目以降のセッション（1 人目が持つ） */
   locals: GameSession[] = [];
   private padBtn = document.getElementById('btn-pad');
@@ -824,7 +827,7 @@ export class GameSession {
       interactHint: me && me.status === 'alive' && !this.buildKind ? this.touchWords(this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
       build: this.buildKind && this.buildGhost ? { kind: this.buildKind, ...this.buildGhost } : null,
       touch: !!this.touch,
-      pad: !!this.pad?.active && this.pad.usedT > this.input.mouseT,
+      pad: !!this.pad?.active && (!!this.o.secondary || this.pad.usedT > this.input.mouseT),
       glyphs: this.pad?.active ? this.pad.glyphs() : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
       muted: audio.settings.muted,
@@ -1050,8 +1053,14 @@ export class GameSession {
       this.input.touchFire = fire;
       this.padFire = fire;
     }
-    // 蘇生（LT 長押し）
-    const rev = pad.lt > 0.5;
+    // 蘇生（LT 長押し。設定で「押すたびに切り替え」：もう一度押すか、動くと止まる）
+    let rev = pad.lt > 0.5;
+    if (padPrefs.toggle) {
+      if (rev && !this.padLtHeld) this.padReviveOn = !this.padReviveOn;
+      this.padLtHeld = rev;
+      if (pad.lx || pad.ly) this.padReviveOn = false;
+      rev = this.padReviveOn;
+    }
     if (rev !== this.padRevive) {
       this.input.setKey('KeyE', rev);
       this.padRevive = rev;
@@ -1070,19 +1079,20 @@ export class GameSession {
     const key = (b: number, code: string) => {
       if (pr.has(b)) this.input.press(code);
     };
-    key(PAD.A, 'KeyF');
-    if (pr.has(PAD.B)) this.input.pressDash();
-    key(PAD.X, this.buildKind ? 'KeyX' : 'KeyR');
-    if (pr.has(PAD.Y) || pr.has(PAD.RB)) this.input.wheel += 1;
+    // ボタンの割り当ては設定で変えられる（padBtn）。LB/RB・トリガーは固定
+    key(padBtn('use'), 'KeyF');
+    if (pr.has(padBtn('dash'))) this.input.pressDash();
+    key(padBtn('reload'), this.buildKind ? 'KeyX' : 'KeyR');
+    if (pr.has(padBtn('next')) || pr.has(PAD.RB)) this.input.wheel += 1;
     if (pr.has(PAD.LB)) this.input.wheel -= 1;
-    key(PAD.START, 'Tab');
-    key(PAD.BACK, 'KeyB');
-    key(PAD.L3, 'KeyQ');
-    key(PAD.R3, 'KeyH');
-    key(PAD.UP, 'KeyG');
-    key(PAD.DOWN, 'KeyV');
-    key(PAD.LEFT, 'KeyC');
-    key(PAD.RIGHT, 'KeyT');
+    key(padBtn('inv'), 'Tab');
+    key(padBtn('map'), 'KeyB');
+    key(padBtn('eat'), 'KeyQ');
+    key(padBtn('heal'), 'KeyH');
+    key(padBtn('ping'), 'KeyG');
+    key(padBtn('build'), 'KeyV');
+    key(padBtn('craft'), 'KeyC');
+    key(padBtn('ammo'), 'KeyT');
   }
 
   /** コントローラーで遊んでいる間は、パネルの説明文もボタン名に（戻せるよう元の文を覚えておく） */
@@ -1129,10 +1139,18 @@ export class GameSession {
       const key = `${root.clientWidth}x${root.clientHeight}|${el.innerHTML.length}`;
       if (this.fitted.get(el) === key) continue;
       el.style.zoom = '1';
+      el.style.maxHeight = el.style.maxWidth = el.style.overflow = '';
       const w = el.offsetWidth;
       const h = el.offsetHeight;
       const k = Math.min(1, (root.clientWidth - 16) / Math.max(1, w), (root.clientHeight - 16) / Math.max(1, h));
-      el.style.zoom = String(Math.max(0.45, k));
+      // 文字が読める大きさ（0.75 倍）より小さくはしない。はみ出す分はスクロール（十字キーで選ぶと自動で追う）
+      const z = Math.max(0.75, k);
+      el.style.zoom = String(z);
+      if (k < z) {
+        el.style.maxHeight = `${Math.floor((root.clientHeight - 16) / z)}px`;
+        el.style.maxWidth = `${Math.floor((root.clientWidth - 16) / z)}px`;
+        el.style.overflow = 'auto';
+      }
       this.fitted.set(el, key);
     }
   }

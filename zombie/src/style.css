@@ -2186,3 +2186,74 @@ input[type='range'] {
 .islot.qual .nm b {
   font-size: 9px;
 }
+
+/* 画面分割：武器欄に重ならないよう、右下に縦並びのアイコンだけ（作業台・持ち物・地図はキーで開ける） */
+.vp #hud-buttons {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  flex-direction: column;
+}
+.vp #hud-buttons .hud-btn:not(.icon) {
+  display: none;
+}
+
+/* 画面上のキーボード（コントローラーで名前・ルームID を入力） */
+#osk {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 6, 4, 0.6);
+}
+#osk.hidden {
+  display: none;
+}
+#osk .osk-card {
+  background: #15170f;
+  border: 1px solid #4a4a36;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: calc(100vw - 32px);
+}
+#osk .osk-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: #bdb79e;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+#osk .osk-val {
+  flex: 1;
+  font-size: 20px;
+  color: #f0e6c0;
+  border-bottom: 1px solid #6b6a4e;
+  min-width: 180px;
+  letter-spacing: 1px;
+}
+#osk .osk-row {
+  display: flex;
+  gap: 4px;
+}
+#osk button {
+  min-width: 38px;
+  height: 36px;
+  font-size: 16px;
+  background: #24261b;
+  color: #e6e1cc;
+  border: 1px solid #3c3e2c;
+  cursor: pointer;
+}
+#osk .osk-cmd button {
+  flex: 1;
+  font-size: 13px;
+}
+#osk button.primary {
+  background: #6b5a24;
+  color: #fff3c8;
+}
