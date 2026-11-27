@@ -83,6 +83,13 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
     if (t === T_ROAD && world.inBounds(tx, ty) && world.vec[ty * MAP_W + tx]) return T_GRASS;
     return t;
   };
+  // 道路の縁取り用：橋は道路の続きとして扱う（橋との継ぎ目に白線や縁石を描かない）
+  const roadAt = (tx: number, ty: number) => {
+    const t = terrainAt(tx, ty);
+    if (t === T_BRIDGE) return T_ROAD;
+    if (t === T_ROAD && world.inBounds(tx, ty) && world.vec[ty * MAP_W + tx]) return T_GRASS;
+    return t;
+  };
   const tx0 = ccx * CHUNK;
   const ty0 = ccy * CHUNK;
   const tx1 = tx0 + CHUNK;
@@ -411,7 +418,7 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
           ctx.fillRect(x + hash(tx, ty, i + 13) * TILE, y + hash(tx, ty, i + 17) * TILE, 1.5, 1.5);
         }
       } else if (t === T_ROAD) {
-        drawRoadDetails(ctx, tx, ty, visualAt);
+        drawRoadDetails(ctx, tx, ty, roadAt);
       } else if (t === T_WOOD) {
         // 板の継ぎ目
         ctx.strokeStyle = 'rgba(30,18,10,0.35)';
@@ -493,7 +500,7 @@ export function* bakeChunkSteps(world: TileWorld, ccx: number, ccy: number, out:
     }
 
   yield;
-  detailPass(ctx, world, visualAt, tx0 - 1, ty0 - 1, tx1 + 1, ty1 + 1);
+  detailPass(ctx, world, roadAt, tx0 - 1, ty0 - 1, tx1 + 1, ty1 + 1);
   yield;
   // カーブの旧道・橋・国道の車線（タイルに縛られないベクターで描く）
   drawRoadFeatures(ctx, world, terrainAt, tx0, ty0, tx1, ty1);
@@ -1458,17 +1465,14 @@ function drawRoadFeatures(ctx: CanvasRenderingContext2D, world: TileWorld, at: (
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(x0 - ext + 10, y0 + 18, w + ext * 2, h + 4);
     ctx.restore();
-    // 橋台（両岸のコンクリートの土台と袖壁）
+    // 橋台（両岸の土台と袖壁：欄干の外側だけに見せ、道路の上には描かない）
     for (const side of [0, 1]) {
       const ax = side ? x0 + w + ext - 6 : x0 - ext - 22;
-      ctx.fillStyle = '#56534b';
-      ctx.fillRect(ax, y0 - 16, 28, h + 32);
-      ctx.fillStyle = '#6c685e';
-      ctx.fillRect(ax, y0 - 16, 28, 5);
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.fillRect(ax, y0 + h + 12, 28, 4);
+      ctx.fillStyle = 'rgba(70,67,60,0.9)';
+      ctx.fillRect(ax, y0 - 16, 28, 8);
+      ctx.fillRect(ax, y0 + h + 8, 28, 8);
       // 袖壁（斜めに広がる）
-      ctx.strokeStyle = '#4a4740';
+      ctx.strokeStyle = 'rgba(70,67,60,0.85)';
       ctx.lineWidth = 5;
       ctx.beginPath();
       const ox = side ? ax + 28 : ax;
@@ -1479,34 +1483,30 @@ function drawRoadFeatures(ctx: CanvasRenderingContext2D, world: TileWorld, at: (
       ctx.lineTo(ox + d * 18, y0 + h + 30);
       ctx.stroke();
     }
-    // 床版（コンクリート）：側面の厚みを見せる
-    ctx.fillStyle = '#3a3833';
-    ctx.fillRect(x0 - ext, y0 + h + 8, w + ext * 2, 6);
-    ctx.fillStyle = '#5b5850';
-    ctx.fillRect(x0 - ext, y0 - 10, w + ext * 2, h + 20);
-    ctx.fillStyle = '#44433f';
+    // 床版：側面の厚み（水面側だけ）と、道路と同じ色の路面。岸の道路へ自然につながる
+    ctx.fillStyle = '#34322e';
+    ctx.fillRect(x0, y0 + h + 8, w, 6);
+    ctx.fillStyle = '#4c4a44';
+    ctx.fillRect(x0, y0 - 10, w, 10);
+    ctx.fillRect(x0, y0 + h, w, 10);
+    ctx.fillStyle = '#3e3d3a';
     ctx.fillRect(x0 - ext, y0, w + ext * 2, h);
-    // 縁石の影
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(x0 - ext, y0, w + ext * 2, 3);
-    ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    ctx.fillRect(x0 - ext, y0 + h - 3, w + ext * 2, 3);
-    // 伸縮継手
-    ctx.fillStyle = 'rgba(20,20,20,0.6)';
-    for (let xx = x0; xx <= x0 + w; xx += TILE * 2) ctx.fillRect(xx - 1, y0, 2, h);
+    // 路面の継ぎ目（伸縮継手）は細く控えめに
+    ctx.fillStyle = 'rgba(20,20,20,0.35)';
+    for (let xx = x0; xx <= x0 + w; xx += TILE * 2) ctx.fillRect(xx - 0.5, y0, 1.5, h);
     // 欄干（柱＋手すり。上面は明るく、外側に影）
     for (const [ry, outer] of [
-      [y0 - 10, -1],
+      [y0 - 9, -1],
       [y0 + h + 3, 1],
     ] as [number, number][]) {
-      ctx.fillStyle = 'rgba(0,0,0,0.35)';
-      ctx.fillRect(x0 - ext, outer < 0 ? ry - 3 : ry + 7, w + ext * 2, 3);
-      ctx.fillStyle = '#8f8a7e';
-      ctx.fillRect(x0 - ext, ry, w + ext * 2, 7);
-      ctx.fillStyle = '#b4ad9e';
-      ctx.fillRect(x0 - ext, ry, w + ext * 2, 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillRect(x0 - 4, outer < 0 ? ry - 3 : ry + 6, w + 8, 3);
+      ctx.fillStyle = '#7a766b';
+      ctx.fillRect(x0 - 4, ry, w + 8, 6);
+      ctx.fillStyle = 'rgba(200,192,175,0.55)';
+      ctx.fillRect(x0 - 4, ry, w + 8, 1.5);
       ctx.fillStyle = '#2f2e2a';
-      for (let xx = x0 - ext; xx <= x0 + w + ext; xx += 14) ctx.fillRect(xx, ry + 2, 3, 5);
+      for (let xx = x0 - 4; xx <= x0 + w + 4; xx += 14) ctx.fillRect(xx, ry + 1.5, 2.5, 4);
     }
     if (!b.hwy) {
       ctx.fillStyle = 'rgba(225,190,80,0.55)';

@@ -316,8 +316,15 @@ export class Renderer {
   }
 
   // ============================================================
+  private hudHidden = false;
+
   render(view: ViewState, o: RenderOptions): void {
     const { ctx } = this;
+    // 全体地図を開いている間は、パネル類の HUD キャンバスを丸ごと隠す（地図の後ろに透けない）
+    if (this.hudHidden !== !!o.mapOpen) {
+      this.hudHidden = !!o.mapOpen;
+      this.hudCanvas.style.visibility = this.hudHidden ? 'hidden' : '';
+    }
     const dt = o.dt;
     this.time += dt;
     const fx = o.effects;
@@ -1583,6 +1590,18 @@ export class Renderer {
     // ---- クロスヘア（連射で広がる） ----
     const cx = o.mouseX;
     const cy = o.mouseY;
+    // HUD パネルの上では、文字に重ならない小さなカーソルだけにする
+    if (this.hudRects.some((r) => cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h)) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = '#e6e1cc';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      return;
+    }
     const alive = me && me.status === 'alive';
     const held = me ? heldWeapon({ ...me, tool: o.localTool }) : null;
     const isGun = !!held;
@@ -2021,19 +2040,27 @@ export class Renderer {
       ctx.fillRect(x + 6, y, pw - 12, rowH - 4);
       ctx.fillStyle = color;
       ctx.fillRect(x + 6, y, 3, rowH - 4);
+      // 右側のキル数・所持数の幅を先に測り、名前と「YOU」はその手前に収める
+      const stat = `K${p.kills} ▣${p.bag.filter((b) => b).length}`;
+      ctx.font = `10px ${MONO}`;
+      const statW = ctx.measureText(stat).width;
+      ctx.font = `9px ${MONO}`;
+      const youW = p.id === localId ? ctx.measureText('YOU').width + 8 : 0;
+      const nameMax = pw - 15 - 12 - statW - 10 - youW;
       ctx.textAlign = 'left';
       ctx.font = `bold 12px ${UI}`;
       ctx.fillStyle = '#e6e1cc';
-      ctx.fillText(p.name, x + 15, y + 9, 110);
+      ctx.fillText(p.name, x + 15, y + 9, nameMax);
+      const nameW = Math.min(nameMax, ctx.measureText(p.name).width);
       if (p.id === localId) {
         ctx.font = `9px ${MONO}`;
         ctx.fillStyle = '#93b77c';
-        ctx.fillText('YOU', x + 15 + Math.min(110, ctx.measureText(p.name).width * 1.25) + 6, y + 9);
+        ctx.fillText('YOU', x + 15 + nameW + 6, y + 9.5);
       }
       ctx.textAlign = 'right';
       ctx.font = `10px ${MONO}`;
       ctx.fillStyle = '#8c8872';
-      ctx.fillText(`K${p.kills} ▣${p.bag.filter((b) => b).length}`, x + pw - 12, y + 9);
+      ctx.fillText(stat, x + pw - 12, y + 9);
       const bw = pw - 30;
       if (p.status === 'alive') {
         segBar(ctx, x + 15, y + 18, bw, 5, p.hp / p.maxHp, p.hp / p.maxHp > 0.3 ? color : '#d0583e', 20);
@@ -2690,8 +2717,16 @@ export class Renderer {
 
     // ---- ラベル：優先度の高いものから置き、すでに置いたものと重なるラベルは位置をずらすか省く ----
     const placed: { x: number; y: number; w: number; h: number }[] = [];
+    const PAD = 5;
     const fits = (x: number, y: number, bw: number, bh: number) =>
-      x >= mx && y >= my && x + bw <= mx + mw && y + bh <= my + mh && !placed.some((r) => x < r.x + r.w + 2 && x + bw + 2 > r.x && y < r.y + r.h + 2 && y + bh + 2 > r.y);
+      x >= mx && y >= my && x + bw <= mx + mw && y + bh <= my + mh && !placed.some((r) => x < r.x + r.w + PAD && x + bw + PAD > r.x && y < r.y + r.h + PAD && y + bh + PAD > r.y);
+    // アイコン（目印・橋・補給物資・仲間・ピン）の上にもラベルを重ねない
+    const icon = (x: number, y: number, r: number) => placed.push({ x: x - r, y: y - r, w: r * 2, h: r * 2 });
+    for (const lm of this.world.landmarks) icon(X(lm.x), Y(lm.y), 7);
+    for (const b of this.world.features.bridges) icon(X(b.x + b.w / 2), Y(b.y + b.h / 2), 6);
+    if (view.drop) icon(mx + view.drop.x * k, my + view.drop.y * k, 6);
+    for (const p of view.players) if (p.status !== 'dead') icon(mx + p.x * k, my + p.y * k, 6);
+    if (this.fx) for (const p of this.fx.pings) icon(mx + p.x * k, my + p.y * k, 8);
     type Lb = { text: string; x: number; y: number; fg: string; bg?: string; font: string; align?: 'center' | 'left' };
     const put = (lb: Lb, tries: [number, number][] = [[0, 0]]): boolean => {
       ctx.font = lb.font;
@@ -2720,7 +2755,7 @@ export class Renderer {
       }
       return false;
     };
-    const around: [number, number][] = [[0, 0], [0, -14], [0, 14], [-24, 0], [24, 0], [0, -28], [0, 28]];
+    const around: [number, number][] = [[0, 0], [0, -16], [0, 16], [-30, 0], [30, 0], [0, -30], [0, 30], [-30, -16], [30, 16]];
     // 1) 仲間の名前（いちばん大事）
     for (const p of view.players) {
       if (p.status === 'dead') continue;
@@ -2743,7 +2778,9 @@ export class Renderer {
         const along = (hw.horiz ? MAP_W : MAP_H) * f;
         const x = hw.horiz ? X(along) : X(hw.at + hw.w / 2);
         const y = hw.horiz ? Y(hw.at + hw.w / 2) : Y(along);
-        if (put({ text: hw.name, x, y, fg: '#ffffff', bg: 'rgba(40,80,140,0.92)', font: `bold 10px ${UI}` })) n++;
+        // 標識は道に沿って少しずらしても良い（交差する地区名などを避ける）
+        const slide: [number, number][] = hw.horiz ? [[0, 0], [30, 0], [-30, 0], [60, 0], [-60, 0]] : [[0, 0], [0, 24], [0, -24], [0, 48], [0, -48]];
+        if (put({ text: hw.name, x, y, fg: '#ffffff', bg: 'rgba(40,80,140,0.92)', font: `bold 10px ${UI}` }, slide)) n++;
       }
     }
     // 3) 橋の名前
