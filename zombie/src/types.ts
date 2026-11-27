@@ -109,6 +109,8 @@ export interface MoveBody {
 export interface PlayerSnap extends MoveBody {
   id: number;
   name: string;
+  /** 通信が切れて再接続を待っている（その間はゾンビに狙われない） */
+  away?: boolean;
   aim: number;
   hp: number;
   maxHp: number;
@@ -223,6 +225,8 @@ export type GameEvent =
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {
+  /** 大群の夜 */
+  horde?: boolean;
   time: number;
   tick: number;
   day: number;
@@ -272,6 +276,8 @@ export interface StartInfo {
   players: LobbyPlayer[];
   seed: number;
   objs: ObjSnap[];
+  /** 生成直後から取り除かれたオブジェクト（続きから・再接続のとき） */
+  removed?: number[];
 }
 
 export interface GameResult {
@@ -281,10 +287,11 @@ export interface GameResult {
 
 // ---------------- 通信パケット ----------------
 
-export type GuestMessage = { type: 'hello'; name: string; prof?: Profile } | { type: 'input'; f: InputFrame };
+/** rejoin：通信が切れたゲストが、同じスロットに戻るための合言葉 */
+export type GuestMessage = { type: 'hello'; name: string; prof?: Profile; rejoin?: { slot: number; token: string } } | { type: 'input'; f: InputFrame };
 
 export type HostMessage =
-  | { type: 'welcome'; slot: number; players: LobbyPlayer[] }
+  | { type: 'welcome'; slot: number; players: LobbyPlayer[]; token?: string }
   | { type: 'reject'; reason: string }
   | { type: 'lobby'; players: LobbyPlayer[] }
   | { type: 'start'; info: StartInfo }

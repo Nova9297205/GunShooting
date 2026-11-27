@@ -17,6 +17,7 @@ import {
   MAP_W,
   PLAYER,
   PLAYER_COLORS,
+  SAFEHOUSE,
   T_BRIDGE,
   T_ROAD,
   T_SHALLOW,
@@ -257,12 +258,36 @@ export class Renderer {
     };
   }
 
+  /** HUD の縮小率（スマホなど小さい画面では 1 未満） */
+  uiScale = 1;
+
+  /** HUD の要素を縮小して描く（仮想的な画面の大きさで配置される） */
+  private withUiScale(fn: () => void): void {
+    const s = this.uiScale;
+    if (s >= 0.999) return fn();
+    const { ctx } = this;
+    const w = this.w;
+    const h = this.h;
+    ctx.save();
+    ctx.scale(s, s);
+    this.w = w / s;
+    this.h = h / s;
+    try {
+      fn();
+    } finally {
+      this.w = w;
+      this.h = h;
+      ctx.restore();
+    }
+  }
+
   resize(): void {
     this.baseDpr = Math.min(window.devicePixelRatio || 1, 2);
     // ゲーム画面は最大1.5倍（高解像度ディスプレイで描くピクセル数を抑える）。HUD は baseDpr のままくっきり
     this.dpr = Math.min(this.baseDpr, 1.5) * this.renderScale;
     this.w = window.innerWidth;
     this.h = window.innerHeight;
+    this.uiScale = clamp(Math.min(this.w / 1280, this.h / 760), 0.55, 1);
     this.canvas.width = Math.floor(this.w * this.dpr);
     this.canvas.height = Math.floor(this.h * this.dpr);
     this.hudCanvas.width = Math.floor(this.w * this.baseDpr);
@@ -409,6 +434,7 @@ export class Renderer {
     this.drawWaterShimmer(vx0, vy0, vx1, vy1);
 
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
+    if (view.base.garden >= 1) this.drawGarden(view.base.garden);
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
     // （地図の端は柵で塞がず、外側の遠景と汚染の霞につなげる）
@@ -539,6 +565,34 @@ export class Renderer {
       });
     }
     this.vision.update(this.world, viewers);
+  }
+
+  /** 拠点の菜園：畝と作物（レベルが上がると畝が増え、作物が育つ） */
+  private drawGarden(lv: number): void {
+    const { ctx } = this;
+    const x0 = (SAFEHOUSE.x + 11) * TILE;
+    const y0 = (SAFEHOUSE.y + 2) * TILE;
+    const rows = lv >= 2 ? 4 : 2;
+    for (let r = 0; r < rows; r++) {
+      const y = y0 + r * 34;
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(x0 + 3, y + 5, 200, 20);
+      ctx.fillStyle = '#4a3a28';
+      ctx.fillRect(x0, y, 200, 20);
+      ctx.fillStyle = 'rgba(120,95,60,0.6)';
+      ctx.fillRect(x0, y, 200, 3);
+      for (let k = 0; k < 10; k++) {
+        const px = x0 + 10 + k * 19;
+        const py = y + 10;
+        const s = lv >= 2 ? 8 : 5;
+        ctx.fillStyle = k % 3 === 0 ? '#7a9a48' : '#5e8a3a';
+        for (const a of [-0.9, 0, 0.9]) {
+          ctx.beginPath();
+          ctx.ellipse(px + Math.sin(a) * s * 0.6, py - Math.cos(a) * s * 0.4, s * 0.45, s * 0.9, a, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
   }
 
   /** 水面の揺らぎ：映っている水のタイルに、ゆっくり流れる光の筋（毎フレーム・軽量） */
@@ -1561,7 +1615,7 @@ export class Renderer {
     this.setOv('tox', 'opacity', tx2 > 10 ? Math.min(0.75, (tx2 - 10) / 90).toFixed(2) : '0');
 
     this.updateExplored(o.dt);
-    if (!o.panelOpen) this.drawCompass(view, me, o.localId);
+    if (!o.panelOpen) this.withUiScale(() => this.drawCompass(view, me, o.localId));
     // パネルを開いている間は入場通知を出さない（閉じたあとに古い通知が出ないよう捨てる）
     if (o.panelOpen) this.locToast = null;
     // 補給物資などの通知は、入場通知と同じ上部の細い帯で（入場通知が出ていなければすぐ）
@@ -1570,11 +1624,11 @@ export class Renderer {
       fx.notice = null;
     }
     this.toastDim = horde ? 0.4 : 1;
-    this.drawLocationToast(me, o.dt, !!fx.banner);
+    this.withUiScale(() => this.drawLocationToast(me, o.dt, !!fx.banner));
     if (!o.panelOpen) {
       this.drawAllyIndicators(view, o.localId, o.effects);
       this.drawDropIndicator(view, me);
-      this.drawFeed(fx, view.players.length);
+      this.withUiScale(() => this.drawFeed(fx, view.players.length));
     }
     this.drawHudLayer(view, o, me);
     this.autoQuality(o.dt);
@@ -1782,6 +1836,13 @@ export class Renderer {
     ctx.setTransform(this.baseDpr, 0, 0, this.baseDpr, 0, 0);
     this.ctx = ctx;
     panelLog = [];
+    // 小さい画面では HUD 全体を縮小して描く（仮想的な大きさ w/s × h/s で配置）
+    const us = this.uiScale;
+    ctx.scale(us, us);
+    const realW = this.w;
+    const realH = this.h;
+    this.w = realW / us;
+    this.h = realH / us;
     try {
       this.drawClock(view, me);
       this.drawTeam(view, o.localId);
@@ -1802,10 +1863,12 @@ export class Renderer {
       );
     } finally {
       this.ctx = main;
-      // 上部中央のコンパスも避ける領域に含める
+      // 上部中央のコンパスも避ける領域に含める（縮小した分を実際の画面の座標に戻す）
       const cw = Math.max(260, Math.min(460, this.w - 640));
-      this.hudRects = [...(panelLog ?? []), { x: this.w / 2 - cw / 2, y: 0, w: cw, h: 48 }];
+      this.hudRects = [...(panelLog ?? []), { x: this.w / 2 - cw / 2, y: 0, w: cw, h: 48 }].map((r) => ({ x: r.x * us, y: r.y * us, w: r.w * us, h: r.h * us }));
       panelLog = null;
+      this.w = realW;
+      this.h = realH;
     }
   }
 
@@ -2052,6 +2115,7 @@ export class Renderer {
       ctx.textAlign = 'left';
       bx -= 4;
     };
+    if (view.horde) badge('大群', '#e0583e', Math.sin(this.time * 6) > 0);
     if (view.wx > 0.3 && view.weather !== 'clear') badge({ fog: '霧', rain: '雨', storm: '嵐', clear: '' }[view.weather], '#9fb4c8');
     badge(night ? '☾ 夜' : '☀ 昼', night ? '#9fb4c8' : '#e0a33a', !night);
 
@@ -2088,7 +2152,11 @@ export class Renderer {
       const d = Math.hypot(tx - BASE_TX, ty - BASE_TY);
       const tier = loc && loc.kind !== 'base' ? loc.tier : tierAtDistance(d);
       const edge = edgeDistance(tx, ty) < EDGE_BAND;
-      if (loc?.kind === 'base') {
+      if (loc?.kind === 'base' && view.horde) {
+        sub = '拠点 — 大群が侵入してくる';
+        col = '#e0583e';
+        tag = 'DANGER';
+      } else if (loc?.kind === 'base') {
         sub = '拠点 — 安全地帯';
         col = '#93b77c';
         tag = 'SAFE';
@@ -2175,7 +2243,12 @@ export class Renderer {
       ctx.fillStyle = '#8c8872';
       ctx.fillText(stat, x + pw - 12, y + 9);
       const bw = pw - 30;
-      if (p.status === 'alive') {
+      if (p.away) {
+        ctx.textAlign = 'left';
+        ctx.font = `bold 10px ${UI}`;
+        ctx.fillStyle = '#c9a050';
+        ctx.fillText(`通信切断中 — 再接続を待っています${'.'.repeat(1 + (Math.floor(this.time * 2) % 3))}`, x + 15, y + 22);
+      } else if (p.status === 'alive') {
         segBar(ctx, x + 15, y + 18, bw, 5, p.hp / p.maxHp, p.hp / p.maxHp > 0.3 ? color : '#d0583e', 20);
         ctx.fillStyle = 'rgba(255,255,255,0.08)';
         ctx.fillRect(x + 15, y + 26, bw, 2);

@@ -32,6 +32,14 @@
             <input id="input-name" maxlength="10" placeholder="未入力なら P1〜P3" autocomplete="off" spellcheck="false" />
           </label>
 
+          <div id="continue-box" class="continue-box hidden">
+            <div class="cb-head"><span>// SAVE</span><b id="continue-desc">—</b></div>
+            <div class="cb-btns">
+              <button id="btn-cont-solo" class="btn primary">ソロで続ける</button>
+              <button id="btn-cont-host" class="btn">部屋を作って続ける</button>
+              <button id="btn-cont-del" class="btn ghost small" title="セーブを消す">消す</button>
+            </div>
+          </div>
           <div class="mode-grid">
             <button id="btn-solo" class="btn mode">
               <b>ソロ出撃</b>
@@ -64,6 +72,7 @@
               <div><kbd>F</kbd><span>ドア・探索・倉庫 / <kbd>Tab</kbd> 持ち物 / <kbd>C</kbd> 作業台</span></div>
               <div><kbd>Q</kbd><kbd>H</kbd><span>食事・回復 / <kbd>E</kbd> 長押しで蘇生 / <kbd>G</kbd> ピン / <kbd>M</kbd> ミュート</span></div>
               <div><kbd>B</kbd><span>地図 / 上部のコンパスで拠点・仲間・目印の方角と距離が分かる</span></div>
+              <div><kbd>📱</kbd><span>スマホ：左手で移動、右手で照準（外側まで倒すと射撃）・持ち物は長押しで使う/装備</span></div>
               <div><kbd>F3</kbd><kbd>P</kbd><span>パフォーマンス表示（FPS・処理の内訳）</span></div>
             </div>
           </details>
@@ -95,6 +104,7 @@
         <div class="panel-head"><span class="ph-code">// AFTER ACTION REPORT</span><span>作戦結果</span></div>
         <h2 class="gameover">K.I.A.</h2>
         <p class="wave-reached">生存日数 <strong id="result-day">1</strong> 日</p>
+        <p id="result-record" class="result-record"></p>
         <table class="result-table">
           <thead><tr><th>オペレーター</th><th>撃破</th><th>持ち帰った価値</th></tr></thead>
           <tbody id="result-body"></tbody>
@@ -109,6 +119,7 @@
       <button id="btn-inv" class="hud-btn" title="バックパック [Tab]"><span>持ち物</span><kbd>Tab</kbd></button>
       <button id="btn-map" class="hud-btn" title="地図 [B]"><span>地図</span><kbd>B</kbd></button>
       <button id="btn-mute" class="hud-btn icon" title="ミュート [M]">🔊</button>
+      <button id="btn-quit" class="hud-btn icon" title="保存してタイトルへ">⏏</button>
     </div>
 
     <!-- 作業台：武器改造・クラフト・拠点強化 -->
@@ -139,6 +150,15 @@
     </div>
 
     <div id="toast" class="toast hidden"></div>
+    <div id="rotate-hint">📱 画面を横向きにしてください<br /><small>左手で移動、右手で照準（外側まで倒すと射撃）</small></div>
+    <!-- ゲスト：通信が切れたときの再接続 -->
+    <div id="reconnect" class="reconnect hidden">
+      <div class="panel tac">
+        <div class="panel-head"><span class="ph-code">// LINK LOST</span><span>再接続</span></div>
+        <p id="reconnect-msg">ホストとの接続が切れました。再接続しています…</p>
+        <button id="reconnect-cancel" class="btn ghost">あきらめてタイトルへ</button>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

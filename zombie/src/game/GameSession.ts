@@ -5,6 +5,8 @@
 //   guest : 入力を送りつつ自機の移動・照準・射撃エフェクトをクライアント側予測で即時反映、
 //           他プレイヤー・ゾンビ・弾はスナップショット間を線形補間して描画
 // ============================================================
+import { isTouchDevice, TouchControls } from '../ui/TouchControls';
+import { clearSave, writeSave } from './save';
 import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
   BulletSnap,
@@ -12,6 +14,7 @@ import type {
   GameMode,
   GameResult,
   InputFrame,
+  LobbyPlayer,
   MoveBody,
   PlayerSnap,
   Snapshot,
@@ -100,6 +103,8 @@ export class GameSession {
   private lastPrim = '';
   private lastSave = 0;
   private mapOpen = false;
+  /** スマホ・タブレットのタッチ操作（タッチ端末だけ） */
+  private touch: TouchControls | null = null;
   /** F3 / P：パフォーマンス表示 */
   private perf = new PerfOverlay();
   private lastSec = '';
@@ -124,9 +129,11 @@ export class GameSession {
       this.world.vec = gen.vec;
       for (const ob of gen.objs) this.world.setObj({ ...ob });
       for (const ob of o.info.objs) this.world.setObj({ ...ob });
+      for (const id of o.info.removed ?? []) this.world.removeObj(id);
     }
     this.renderer = new Renderer(o.canvas, this.world);
     this.input = new InputController(o.canvas);
+    if (isTouchDevice()) this.touch = new TouchControls(this.input);
     // 効果音：射撃・斧・リロードは描画側のカウンタ検出から鳴らす
     this.renderer.hooks = {
       shot: (p, w) => audio.shot(p.x, p.y, p.id === o.localId, w),
@@ -172,6 +179,7 @@ export class GameSession {
   start(): void {
     this.running = true;
     this.input.attach();
+    this.touch?.show(true);
     window.addEventListener('resize', this.onResize);
     this.lastFrame = performance.now();
     this.lastPump = performance.now();
@@ -191,6 +199,8 @@ export class GameSession {
   }
 
   stop(): void {
+    // 抜けるときに保存（全滅で終わったときは保存しない）
+    if (this.sim && !this.sim.gameOver) writeSave(this.sim.toSave());
     this.renderer.destroy();
     this.perf.destroy();
     this.hudButtons.classList.add('hidden');
@@ -200,6 +210,7 @@ export class GameSession {
     cancelAnimationFrame(this.rafId);
     clearInterval(this.pumpTimer);
     this.input.detach();
+    this.touch?.destroy();
     window.removeEventListener('resize', this.onResize);
     audio.setMood(null);
   }
@@ -219,6 +230,17 @@ export class GameSession {
 
   removePlayer(playerId: number): void {
     this.sim?.removePlayer(playerId);
+  }
+
+  /** ホスト：通信が切れた仲間をその場で待たせる／戻ってきた */
+  setAway(playerId: number, away: boolean): void {
+    this.sim?.setAway(playerId, away);
+  }
+
+  /** ホスト：再接続したゲストに送る開始情報（今のワールドの変化をすべて含む） */
+  rejoinInfo(players: LobbyPlayer[]): StartInfo | null {
+    if (!this.sim) return null;
+    return { players, seed: this.sim.seed, ...this.sim.fullWorldDiff() };
   }
 
   receiveSnapshot(s: Snapshot): void {
@@ -248,9 +270,17 @@ export class GameSession {
 
   // ---------------- ホスト計算 ----------------
 
+  private saveT = 30;
+
   private pump = (): void => {
     const sim = this.sim;
     if (!sim || !this.running) return;
+    // 30秒ごとに自動保存（ソロ・ホスト）
+    this.saveT -= Math.min(0.25, (performance.now() - this.lastPump) / 1000);
+    if (this.saveT <= 0 && !sim.gameOver) {
+      this.saveT = 30;
+      writeSave(sim.toSave());
+    }
     const now = performance.now();
     this.acc += Math.min(0.25, (now - this.lastPump) / 1000);
     this.lastPump = now;
@@ -280,6 +310,8 @@ export class GameSession {
         this.gameOverHandled = true;
         const result = sim.result;
         this.o.net?.sendGameOver(result);
+        // 全滅：セーブは消える（やり直し）
+        clearSave();
         setTimeout(() => this.o.onGameOver(result), 1800);
         break;
       }
@@ -593,6 +625,8 @@ export class GameSession {
 
     // 地図を開いている間は右下のボタンを隠す（地図の枠に重ならないように）
     this.hudButtons.style.visibility = this.mapOpen ? 'hidden' : '';
+    // パネル・地図を開いている間は、タッチのスティックを止めてパネルを触れるようにする
+    this.touch?.show(!this.mapOpen && !this.craftMenu.open && !this.invPanel.open);
     this.renderer.render(view, {
       localId,
       mode: this.o.mode,

@@ -80,7 +80,32 @@ export class InventoryPanel {
     this.title = panel.querySelector('#inv-title') as HTMLElement;
     panel.querySelector('#inv-close')?.addEventListener('click', () => this.toggle(false));
     panel.addEventListener('contextmenu', (e) => e.preventDefault());
-    panel.addEventListener('mousedown', (e) => this.onClick(e));
+    // タッチ：長押しで右クリックと同じ操作（使う・装備）。直後に届く「タップのクリック」は無視する
+    let lpTimer = 0;
+    let lpFired = false;
+    let suppressUntil = 0;
+    panel.addEventListener('mousedown', (e) => {
+      if (performance.now() < suppressUntil) return;
+      this.onClick(e);
+    });
+    panel.addEventListener('touchstart', (e) => {
+      const t = e.target as HTMLElement;
+      lpFired = false;
+      clearTimeout(lpTimer);
+      lpTimer = window.setTimeout(() => {
+        lpFired = true;
+        suppressUntil = performance.now() + 700;
+        this.onClick({ target: t, button: 2, shiftKey: false, preventDefault: () => {} } as unknown as MouseEvent);
+      }, 450);
+    });
+    const lpEnd = (e: TouchEvent) => {
+      clearTimeout(lpTimer);
+      // 長押しが成立したら、続けて来るクリック（左クリック扱い）は出さない
+      if (lpFired) e.preventDefault();
+    };
+    panel.addEventListener('touchend', lpEnd);
+    panel.addEventListener('touchmove', () => clearTimeout(lpTimer));
+    panel.addEventListener('touchcancel', lpEnd);
     panel.addEventListener('mouseover', (e) => {
       const el = (e.target as HTMLElement).closest('[data-act]') as HTMLElement | null;
       if (!el || !this.ctx) return;

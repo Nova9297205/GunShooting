@@ -528,6 +528,8 @@ export function generateWorld(seed: number): GeneratedWorld {
       const py = (1 - s2) * (1 - s2) * ay + 2 * (1 - s2) * s2 * cy + s2 * s2 * by;
       for (let yy = Math.floor(py) - 3; yy <= Math.floor(py) + 3 && ok; yy++)
         for (let xx = Math.floor(px) - 3; xx <= Math.floor(px) + 3; xx++) if (isWater(xx, yy) || !inMap(xx, yy)) ok = false;
+      // 拠点の敷地（フェンス）を横切らない（あとで敷地のフェンスが道の上に建ってしまう）
+      if (px > sh.x - 6 && px < sh.x + sh.w + 6 && py > sh.y - 6 && py < sh.y + sh.h + 6) ok = false;
       pts.push([px, py]);
     }
     if (!ok) continue;
@@ -1079,6 +1081,8 @@ export function generateWorld(seed: number): GeneratedWorld {
     for (let x = 1; x < MAP_W - 1; x++) {
       if (terrain[idx(x, y)] !== T_ROAD) continue;
       if (x >= sh.x - 2 && x <= sh.x + sh.w + 1 && y >= sh.y - 2 && y <= sh.y + sh.h + 1) continue;
+      // 橋の上と、橋の前後（渡れる場所が限られるので車でふさがない）
+      if (features.bridges.some((bb) => !bb.broken && x >= bb.x - 4 && x <= bb.x + bb.w + 3 && y >= bb.y - 1 && y <= bb.y + bb.h)) continue;
       // 国道は乗り捨てられた車の列が多い
       const onHwy = features.highways.some((h) => (h.horiz ? y >= h.at && y < h.at + h.w : x >= h.at && x < h.at + h.w));
       const p = (0.012 + tierAtDistance(distOf(x, y)) * 0.006) * (onHwy ? 1.8 : 1);

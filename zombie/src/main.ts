@@ -6,9 +6,11 @@ import { MAX_PLAYERS, PLAYER_COLORS } from './game/constants';
 import { audio } from './game/Audio';
 import { HostSimulation } from './game/Engine';
 import { GameSession } from './game/GameSession';
-import { NetworkManager, sanitizeName } from './network/NetworkManager';
-import { levelOf, loadProfile, type Profile, saveProfile, SKILLS } from './game/progression';
+import { loadRejoin, NetworkManager, sanitizeName } from './network/NetworkManager';
+import { addRecord, levelOf, loadProfile, loadRecords, type Profile, saveProfile, SKILLS } from './game/progression';
 import { TitleBackdrop } from './ui/TitleBackdrop';
+import { clearSave, describeSave, loadSave } from './game/save';
+import type { SaveData } from './game/Engine';
 import type { GameMode, ObjKind, GameResult, LobbyPlayer, StartInfo } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -67,16 +69,40 @@ const backdrop = new TitleBackdrop($<HTMLCanvasElement>('title-bg'));
 function show(name: keyof typeof screens | null): void {
   for (const [k, el] of Object.entries(screens)) el.classList.toggle('hidden', k !== name);
   backdrop.show(name !== null);
-  if (name === 'title') renderProfile();
+  if (name === 'title') {
+    renderProfile();
+    renderContinue();
+  }
 }
+
+/** タイトル：セーブがあれば「続きから」を出す */
+function renderContinue(): void {
+  const d = loadSave();
+  $('continue-box').classList.toggle('hidden', !d);
+  if (d) $('continue-desc').textContent = describeSave(d);
+}
+
+/** 新しく始めるときは、セーブが上書きされることを確認する */
+function confirmOverwrite(): boolean {
+  return !loadSave() || window.confirm('新しく始めると、今のセーブ（' + describeSave(loadSave()!) + '）は上書きされます。よろしいですか？');
+}
+
+/** 部屋を作って「続きから」を選んだとき、ロビーの開始でセーブを使う */
+let continueSave: SaveData | null = null;
 
 /** タイトル：このブラウザに保存されたスキルと記録 */
 function renderProfile(): void {
   const prof = loadProfile();
   const box = $('profile-box');
+  const recs = loadRecords().slice(0, 3);
+  const recHtml = recs.length
+    ? `<div class="pb-recs"><span>戦績 TOP3</span>${recs
+        .map((r, i) => `<div class="pb-rec"><i>${i + 1}</i>DAY ${r.day}・撃破 ${r.kills}・価値 ${r.value}<small>${r.mode === 'solo' ? 'ソロ' : `${r.players}人`}・${new Date(r.at).toLocaleDateString()}</small></div>`)
+        .join('')}</div>`
+    : '';
   box.innerHTML = `<div class="pb-title"><span>保存済みの記録</span><span>最長生存 <b>${prof.bestDay}</b> 日 ・ 持ち帰り総額 <b>${prof.banked}</b></span></div>${SKILLS.map(
     (sk, i) => `<div class="pb-skill">${sk.name}<b>Lv${levelOf(prof.xp[i] ?? 0)}</b></div>`,
-  ).join('')}`;
+  ).join('')}${recHtml}`;
 }
 
 /** ロビーのカード用：スキルのレベル表示 */
@@ -137,14 +163,14 @@ function startSession(m: GameMode, info: StartInfo, localId: number, sim?: HostS
     },
   });
   session.start();
-  if (import.meta.env.DEV) Object.assign(window, { __session: session });
+  if (import.meta.env.DEV) Object.assign(window, { __session: session, __net: net });
 }
 
 /** ソロ/ホスト：シミュレーションを作って開始 */
-function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[]): void {
-  const seed = (Math.random() * 0x7fffffff) | 0;
-  const sim = new HostSimulation(players, seed);
-  const info: StartInfo = { players, seed, objs: sim.initialObjs() };
+function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[], save: SaveData | null = null): void {
+  const sim = save ? HostSimulation.fromSave(players, save) : new HostSimulation(players, (Math.random() * 0x7fffffff) | 0);
+  // 続きからのときは、生成直後からの変化をすべてゲストに渡す
+  const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, objs: sim.initialObjs() };
   if (m === 'host') net?.startGame(info);
   // 開発時のみ：コンソールから時間を進めるなどのデバッグ用
   if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio, __place: (k: ObjKind, x: number, y: number) => sim.debugPlace(k, x, y) });
@@ -166,7 +192,10 @@ function showResult(r: GameResult): void {
     prof.bestDay = Math.max(prof.bestDay, r.day);
     prof.banked += mine.value;
     saveProfile(prof);
-  }
+    // 戦績（上位10件）に追加
+    const { rank, best } = addRecord({ at: Date.now(), name: mine.name, day: r.day, kills: mine.kills, value: mine.value, mode, players: r.players.length });
+    $('result-record').textContent = best ? '★ 自己ベスト更新！' : rank <= 10 ? `戦績 ${rank} 位` : '';
+  } else $('result-record').textContent = '';
   $('result-day').textContent = String(r.day);
   const body = $('result-body');
   body.innerHTML = '';
@@ -213,7 +242,7 @@ function renderLobby(players: LobbyPlayer[]): void {
   setStatus(
     'lobby-status',
     net?.role === 'host'
-      ? `参加者 ${players.length}/${MAX_PLAYERS}　準備ができたら開始してください`
+      ? `参加者 ${players.length}/${MAX_PLAYERS}　準備ができたら開始してください${continueSave ? `（続きから：${describeSave(continueSave)}）` : ''}`
       : `参加者 ${players.length}/${MAX_PLAYERS}　ホストの開始を待っています…`,
   );
 }
@@ -229,12 +258,39 @@ function showLobby(): void {
 // ---------------- ボタン ----------------
 
 $('btn-solo').addEventListener('click', () => {
+  if (!confirmOverwrite()) return;
   net?.destroy();
   net = null;
   startAsHost('solo', [{ id: 0, name: sanitizeName(playerName(), 0), prof: loadProfile() }]);
 });
 
-$('btn-host').addEventListener('click', async () => {
+$('btn-host').addEventListener('click', () => {
+  if (!confirmOverwrite()) return;
+  continueSave = null;
+  void openRoom();
+});
+
+$('btn-cont-solo').addEventListener('click', () => {
+  const d = loadSave();
+  if (!d) return renderContinue();
+  net?.destroy();
+  net = null;
+  startAsHost('solo', [{ id: 0, name: sanitizeName(playerName(), 0), prof: loadProfile() }], d);
+});
+
+$('btn-cont-host').addEventListener('click', () => {
+  continueSave = loadSave();
+  if (!continueSave) return renderContinue();
+  void openRoom();
+});
+
+$('btn-cont-del').addEventListener('click', () => {
+  if (!window.confirm('セーブを消しますか？（元に戻せません）')) return;
+  clearSave();
+  renderContinue();
+});
+
+async function openRoom(): Promise<void> {
   setTitleButtonsDisabled(true);
   setStatus('title-status', 'ルームを作成中…（シグナリングサーバーに接続しています）');
   net?.destroy();
@@ -246,8 +302,16 @@ $('btn-host').addEventListener('click', async () => {
     },
     onInput: (id, f) => session?.receiveInput(id, f),
     onPeerLeft: (id) => {
-      session?.removePlayer(id);
-      toast(`P${id + 1} が切断しました`);
+      // ゲーム中なら席を残して再接続を待つ
+      session?.setAway(id, true);
+      toast(`P${id + 1} の通信が切れました（再接続を待っています）`);
+    },
+    onRejoin: (id) => {
+      const info = session?.rejoinInfo(n.players);
+      if (!info) return;
+      n.sendStartTo(id, info);
+      session?.setAway(id, false);
+      toast(`P${id + 1} が再接続しました`);
     },
   });
   try {
@@ -257,7 +321,7 @@ $('btn-host').addEventListener('click', async () => {
   } catch (err) {
     goTitle(`ルーム作成に失敗しました: ${(err as Error).message ?? err}`, true);
   }
-});
+}
 
 async function joinRoom(): Promise<void> {
   const code = $<HTMLInputElement>('input-code').value.trim().toUpperCase();
@@ -267,6 +331,16 @@ async function joinRoom(): Promise<void> {
   }
   setTitleButtonsDisabled(true);
   setStatus('title-status', `ルーム ${code} に接続中…`);
+  try {
+    await connectGuest(code, null);
+    showLobby();
+  } catch (err) {
+    goTitle((err as Error).message ?? String(err), true);
+  }
+}
+
+/** ゲストとして接続（rejoin があれば、通信が切れる前の自分のスロットに戻る） */
+async function connectGuest(code: string, rejoin: ReturnType<typeof loadRejoin>): Promise<void> {
   net?.destroy();
   const n = new NetworkManager();
   net = n;
@@ -274,7 +348,10 @@ async function joinRoom(): Promise<void> {
     onLobby: (players) => {
       if (!session && !screens.lobby.classList.contains('hidden')) renderLobby(players);
     },
-    onStart: (info) => startSession('guest', info, n.localId),
+    onStart: (info) => {
+      hideReconnect();
+      startSession('guest', info, n.localId);
+    },
     onSnapshot: (s) => session?.receiveSnapshot(s),
     onGameOver: (r) => {
       setTimeout(() => {
@@ -283,16 +360,56 @@ async function joinRoom(): Promise<void> {
         showResult(r);
       }, 1800);
     },
-    onHostLost: (reason) => goTitle(reason, true),
+    onHostLost: (reason) => {
+      if (net !== n) return;
+      // ゲーム中に切れたら、自動で再接続を試みる
+      if (session && mode === 'guest') void reconnect(code);
+      else goTitle(reason, true);
+    },
   });
-  try {
-    await n.join(code, playerName());
-    if (net !== n) return;
-    showLobby();
-  } catch (err) {
-    if (net === n) goTitle((err as Error).message ?? String(err), true);
+  await n.join(code, playerName(), rejoin);
+  if (net !== n) throw new Error('接続が取り消されました');
+}
+
+// ---------------- ゲスト：再接続 ----------------
+
+let reconnecting = false;
+function hideReconnect(): void {
+  reconnecting = false;
+  $('reconnect').classList.add('hidden');
+}
+async function reconnect(code: string): Promise<void> {
+  if (reconnecting) return;
+  reconnecting = true;
+  endSession();
+  $('reconnect').classList.remove('hidden');
+  for (let i = 1; i <= 20 && reconnecting; i++) {
+    $('reconnect-msg').textContent = `ホストとの接続が切れました。再接続しています…（${i}/20）`;
+    await new Promise((r) => setTimeout(r, 2500));
+    if (!reconnecting) return;
+    try {
+      await connectGuest(code, loadRejoin());
+      $('reconnect-msg').textContent = 'つながりました。ワールドを受け取っています…';
+      return; // 開始情報（onStart）が届くとゲームに戻る
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      // ホストに断られた（席が空けられた等）ならあきらめる
+      if (msg.includes('進行中') || msg.includes('満員')) {
+        hideReconnect();
+        goTitle(`再接続できませんでした：${msg}`, true);
+        return;
+      }
+    }
+  }
+  if (reconnecting) {
+    hideReconnect();
+    goTitle('再接続できませんでした（ホストが見つかりません）', true);
   }
 }
+$('reconnect-cancel').addEventListener('click', () => {
+  hideReconnect();
+  goTitle();
+});
 
 $('btn-join').addEventListener('click', joinRoom);
 $<HTMLInputElement>('input-code').addEventListener('keydown', (e) => {
@@ -316,10 +433,19 @@ $('btn-copy').addEventListener('click', async () => {
 
 $('btn-start').addEventListener('click', () => {
   if (!net || net.role !== 'host') return;
-  startAsHost('host', net.players);
+  startAsHost('host', net.players, continueSave);
+  continueSave = null;
 });
 
 $('btn-leave').addEventListener('click', () => goTitle());
+
+// ゲーム中の「終了」：ソロ・ホストは保存してタイトルへ（ゲストは退出）
+$('btn-quit').addEventListener('click', () => {
+  const msg = mode === 'guest' ? 'ルームから退出してタイトルに戻りますか？' : mode === 'host' ? '保存してルームを閉じ、タイトルに戻りますか？（仲間も切断されます）' : '保存してタイトルに戻りますか？';
+  if (!window.confirm(msg)) return;
+  hideReconnect();
+  goTitle(mode === 'guest' ? '' : 'セーブしました。「続きから」で再開できます');
+});
 
 $('btn-result-back').addEventListener('click', () => {
   if (mode === 'solo' || !net) {
