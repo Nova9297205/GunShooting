@@ -145,7 +145,7 @@ export class Renderer {
   private bloom = 0;
   private forest: CanvasPattern | null = null;
   private curLoc: string | null = null;
-  private locToast: { text: string; sub: string; sub2?: string; color: string; life: number } | null = null;
+  private locToast: { text: string; sub: string; sub2?: string; color: string; life: number; kicker?: string } | null = null;
 
   // ---- 軽量化 ----
   /** HUD のパネル類（時計・チーム・ステータス・ホットバー・ミニマップ）は別キャンバスに描き、約15Hzで更新 */
@@ -490,7 +490,6 @@ export class Renderer {
     }
     this.drawZombieOverlays(zombiesSeen, dark, me);
     this.drawPingMarkers(fx, me);
-    this.drawReviveRings(view);
     this.drawDropBeacon(view);
     this.drawLandmarks(vx0, vy0, vx1, vy1);
     this.drawPopups(fx);
@@ -1456,6 +1455,9 @@ export class Renderer {
       }
     } else if (p.status === 'down') {
       const r = clamp(p.downTimer / PLAYER.downTime, 0, 1);
+      // 救助中は進み具合の輪だけにする（残り秒数と DOWN の文字は出さない）
+      const reviving = p.reviveProgress > 0;
+      if (!reviving) {
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0,0,0,0.6)';
       ctx.beginPath();
@@ -1471,7 +1473,8 @@ export class Renderer {
       ctx.font = 'bold 11px sans-serif';
       ctx.fillStyle = Math.sin(this.time * 8) > 0 ? '#c0573e' : '#c9a09a';
       ctx.fillText('DOWN', p.x, p.y + 28);
-      if (p.reviveProgress > 0) {
+      }
+      if (reviving) {
         const rp = clamp(p.reviveProgress / PLAYER.reviveTime, 0, 1);
         ctx.lineWidth = 5;
         ctx.strokeStyle = 'rgba(125,255,176,0.25)';
@@ -1561,6 +1564,11 @@ export class Renderer {
     if (!o.panelOpen) this.drawCompass(view, me, o.localId);
     // パネルを開いている間は入場通知を出さない（閉じたあとに古い通知が出ないよう捨てる）
     if (o.panelOpen) this.locToast = null;
+    // 補給物資などの通知は、入場通知と同じ上部の細い帯で（入場通知が出ていなければすぐ）
+    if (fx.notice && !this.locToast && !o.panelOpen) {
+      this.locToast = { text: fx.notice.text, sub: fx.notice.sub, color: fx.notice.color, life: 4, kicker: 'NOTICE' };
+      fx.notice = null;
+    }
     this.toastDim = horde ? 0.4 : 1;
     this.drawLocationToast(me, o.dt, !!fx.banner);
     if (!o.panelOpen) {
@@ -1581,7 +1589,8 @@ export class Renderer {
       centerCard(ctx, w / 2, h * 0.3, 'K.I.A. — 戦闘不能', '仲間が朝（6:00）まで生き延びれば拠点で復帰する', '#8c8872', this.time);
     } else if (!o.panelOpen) {
       let hint: string | null = null;
-      if (o.reviveHint) hint = '[E] 長押しで蘇生';
+      const reviving = !!me && view.players.some((p) => p.status === 'down' && p.reviveProgress > 0 && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange + 20);
+      if (o.reviveHint && !reviving) hint = '[E] 長押しで蘇生';
       else if (o.interactHint) hint = o.interactHint;
       if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
     }
@@ -1849,7 +1858,7 @@ export class Renderer {
     brackets(ctx, w / 2 - bw / 2, y - 22, bw, bh, t.color, 8, 1.5);
     ctx.font = `9px ${MONO}`;
     ctx.fillStyle = 'rgba(189,183,158,0.7)';
-    ctx.fillText('ENTERING AREA', w / 2, y - 12);
+    ctx.fillText(t.kicker ?? 'ENTERING AREA', w / 2, y - 12);
     ctx.font = `bold 18px ${UI}`;
     ctx.fillStyle = t.color;
     ctx.fillText(t.text, w / 2, y + 4);
@@ -1866,25 +1875,6 @@ export class Renderer {
   /** ピンの目印（世界座標） */
   /** ピンを立てた人の名前（id → 名前） */
   private pingNames = new Map<number, string>();
-
-  /** 蘇生中の仲間：まわりに進み具合の輪と「救助中」 */
-  private drawReviveRings(view: ViewState): void {
-    const { ctx } = this;
-    for (const p of view.players) {
-      if (p.status !== 'down' || p.reviveProgress <= 0) continue;
-      const f = clamp(p.reviveProgress / PLAYER.reviveTime, 0, 1);
-      ctx.lineWidth = 5;
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 30, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = '#93d07c';
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 30, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2);
-      ctx.stroke();
-    }
-  }
 
   private drawPingMarkers(fx: Effects, me?: PlayerSnap): void {
     const { ctx } = this;
@@ -1993,6 +1983,8 @@ export class Renderer {
         const sy = p.y - this.cam.y + h / 2 - 84;
         // すぐそばにいるときは画面下の「[E] 長押しで蘇生」と重複するので進捗だけ出す
         if (me && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange && p.reviveProgress <= 0) continue;
+        // 救助中は足元の輪が進み具合を示すので、頭上の文字は出さない（情報を詰め込みすぎない）
+        if (p.reviveProgress > 0) continue;
         const pulse = 0.7 + Math.sin(this.time * 8) * 0.3;
         ctx.font = '900 16px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.textAlign = 'center';

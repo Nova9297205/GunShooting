@@ -91,6 +91,8 @@ export class Effects {
   hurt = 0;
   /** ヒットストップの残り秒（見た目だけ一瞬止める） */
   hitstop = 0;
+  /** 上部の細い帯で知らせる通知（補給物資など。大型バナーは日付の切り替えだけ） */
+  notice: { text: string; sub: string; color: string } | null = null;
   /** 自分の弾が当たった／倒したときの照準の×印（残り時間・撃破か） */
   hitMark = { t: 0, kill: false };
   /** 射撃の反動によるカメラのずれ */
@@ -382,6 +384,11 @@ export class Effects {
         this.popup(ev.x, ev.y, ev.t, ev.c, ev.id === localId ? 15 : 12);
         break;
       case 'banner':
+        // 大きな中央バナーは日付・昼夜の切り替えだけ。それ以外は上部の細い帯に
+        if (!ev.t.startsWith('DAY')) {
+          this.notice = { text: ev.t, sub: ev.s, color: ev.c };
+          break;
+        }
         this.showBanner(ev.t, ev.s, ev.c);
         if (ev.c === '#b03a2e') this.shake(0.5);
         break;
