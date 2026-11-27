@@ -1859,6 +1859,33 @@ export class Renderer {
     const { ctx } = this;
     for (const z of zs) {
       const r = ZOMBIE[z.type].radius;
+      // 巨像の予備動作：突進は向きの矢印、地鳴りは広がる輪（どちらも赤く点滅）
+      if (z.type === 'titan' && z.tele) {
+        const blink = 0.5 + Math.sin(this.time * 22) * 0.35;
+        ctx.save();
+        ctx.strokeStyle = `rgba(240,80,50,${blink})`;
+        ctx.fillStyle = `rgba(240,80,50,${blink * 0.18})`;
+        ctx.lineWidth = 4;
+        if (z.tele === 2) {
+          ctx.beginPath();
+          ctx.arc(z.x, z.y, 160, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          const L = 420;
+          const ca = Math.cos(z.angle);
+          const sa = Math.sin(z.angle);
+          ctx.beginPath();
+          ctx.moveTo(z.x - sa * 30, z.y + ca * 30);
+          ctx.lineTo(z.x - sa * 30 + ca * L, z.y + ca * 30 + sa * L);
+          ctx.lineTo(z.x + sa * 30 + ca * L, z.y - ca * 30 + sa * L);
+          ctx.lineTo(z.x + sa * 30, z.y - ca * 30);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
       // 精鋭：紫の光の輪と名札
       if (z.elite) {
         const pulse = 0.55 + Math.sin(this.time * 5 + z.id) * 0.25;
@@ -1877,7 +1904,7 @@ export class Renderer {
         ctx.fillText('精鋭', z.x, z.y + r + 12);
       }
       if (z.hp < z.maxHp) {
-        const w = z.type === 'brute' ? 40 : 24;
+        const w = z.type === 'titan' ? 0 : z.type === 'brute' ? 40 : 24;
         const y = z.y - r - 10;
         ctx.globalAlpha = dark > 0.5 ? 0.5 : 1;
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
@@ -1933,6 +1960,7 @@ export class Renderer {
 
     this.updateExplored(o.dt);
     if (!o.panelOpen) this.withUiScale(() => this.drawCompass(view, me, o.localId));
+    if (!o.panelOpen) this.withUiScale(() => this.drawBossBar(view));
     // パネルを開いている間は入場通知を出さない（閉じたあとに古い通知が出ないよう捨てる）
     if (o.panelOpen) this.locToast = null;
     // 補給物資などの通知は、入場通知と同じ上部の細い帯で（入場通知が出ていなければすぐ）
@@ -3175,6 +3203,31 @@ export class Renderer {
       ctx.fillText(j.done ? '達成' : ready ? `そろった！ 拠点の無線で報告 ・ ${distTo(j)}m` : `${what(j)} ・ ${distTo(j)}m`, x + 22, ry + 21);
       ctx.globalAlpha = 1;
     });
+  }
+
+  /** ボスの体力（画面上部・コンパスの下） */
+  private drawBossBar(view: ViewState): void {
+    const z = view.zombies.find((q) => q.type === 'titan');
+    if (!z) return;
+    const { ctx } = this;
+    const w = Math.min(420, this.w - 120);
+    const x = this.w / 2 - w / 2;
+    const y = 58;
+    ctx.fillStyle = 'rgba(10,10,8,0.75)';
+    ctx.fillRect(x - 2, y - 2, w + 4, 12);
+    ctx.fillStyle = '#5a1e14';
+    ctx.fillRect(x, y, w, 8);
+    ctx.fillStyle = z.tele ? '#f07a3a' : '#d0402a';
+    ctx.fillRect(x, y, w * clamp(z.hp / z.maxHp, 0, 1), 8);
+    ctx.font = `bold 11px ${UI}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    const t = `巨像 ${z.tele === 1 ? '— 突進の構え！' : z.tele === 2 ? '— 地鳴りの構え！' : ''}`;
+    ctx.strokeText(t, this.w / 2, y + 12);
+    ctx.fillStyle = '#f0c8a0';
+    ctx.fillText(t, this.w / 2, y + 12);
   }
 
   /** ミニマップ：自分の周り（約 96×72 マス）だけを追従表示。地図の外は霞 */

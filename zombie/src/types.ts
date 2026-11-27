@@ -13,7 +13,7 @@ export interface Vec2 {
 
 export type PlayerStatus = 'alive' | 'down' | 'dead';
 /** walker=徘徊型 / runner=俊敏型 / brute=重装型 / soldier=感染兵士 */
-export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier' | 'bloater' | 'screamer';
+export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier' | 'bloater' | 'screamer' | 'titan';
 export type TimePhase = 'day' | 'night';
 export type GameMode = 'solo' | 'host' | 'guest';
 /** 遊び方：30 日目に救助が来る／期限なし（無線を直して自分で呼ぶ） */
@@ -206,6 +206,8 @@ export interface ZombieSnap {
   atk: number;
   /** 精鋭（手強く、良い戦利品を落とす） */
   elite?: boolean;
+  /** ボスの予備動作（1 = 突進の構え・2 = 地鳴りの構え） */
+  tele?: number;
 }
 
 export interface BulletSnap {

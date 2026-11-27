@@ -103,6 +103,8 @@ export const ZOMBIE: Record<ZombieType, ZombieStats> = {
   bloater: { radius: 18, hp: 130, daySpeed: 30, nightSpeed: 56, damage: 9, wallDamage: 20, attackInterval: 1.2, color: '#4e5a3a', skin: '#9aa06a', armor: 0 },
   /** 叫び屋：獲物を見つけると叫び、周りのゾンビを呼び寄せる（商業地区・荒野） */
   screamer: { radius: 12, hp: 45, daySpeed: 52, nightSpeed: 112, damage: 5, wallDamage: 6, attackInterval: 0.8, color: '#5a5450', skin: '#b8b0a0', armor: 0 },
+  /** 巨像（ボス）：ボスの夜にだけ現れる。突進で壁を破り、地鳴りで周りを吹き飛ばす */
+  titan: { radius: 34, hp: 7000, daySpeed: 40, nightSpeed: 58, damage: 30, wallDamage: 160, attackInterval: 1.5, color: '#3a3c34', skin: '#8a7e6a', armor: 0.35 },
 };
 
 export const ZOMBIE_SENSE = {
@@ -247,6 +249,7 @@ export const RECIPES: Recipe[] = [
   { id: 'decoy', name: 'おとり時計', desc: '投げた所で10秒鳴り、ゾンビを引き寄せる', bench: true, cost: { electronics: 1, scrap: 1 }, out: { id: 'decoy', n: 1 } },
   { id: 'pipebomb', name: 'パイプ爆弾', desc: '投げて2秒後に爆発。群れをまとめて倒す', bench: true, lv: 2, cost: { gunpowder: 3, scrap: 2, chem: 1 }, out: { id: 'pipebomb', n: 1 } },
   { id: 'upkit', name: '武器強化キット', desc: '手に持っている武器の品質を1段上げる（希少まで）', bench: true, lv: 2, cost: { parts: 3, scrap: 4, tools: 1 }, out: { id: 'upkit', n: 1 } },
+  { id: 'heartkit', name: '強化キット ×2', desc: '巨像の心臓から武器強化キットを作る', bench: true, lv: 2, cost: { bheart: 1 }, out: { id: 'upkit', n: 2 } },
   { id: 'pack1', name: '学生かばん', desc: '背負うとバッグ +3マス・+6kg', bench: false, cost: { cloth: 5, scrap: 1 }, out: { id: 'pack1', n: 1 } },
   { id: 'pack2', name: '登山リュック', desc: '背負うとバッグ +6マス・+13kg', bench: true, lv: 2, cost: { cloth: 9, scrap: 4, parts: 1 }, out: { id: 'pack2', n: 1 } },
   { id: 'coat', name: '防寒コート', desc: '持っているだけで雨・夜の冷えが半分に', bench: true, cost: { cloth: 6, scrap: 1 }, out: { id: 'coat', n: 1 } },

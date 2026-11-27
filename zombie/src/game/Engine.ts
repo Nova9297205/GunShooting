@@ -131,6 +131,14 @@ interface SimPlayer extends PlayerSnap {
 type ZState = 'idle' | 'investigate' | 'chase' | 'search';
 
 interface SimZombie extends ZombieSnap {
+  /** ボス（巨像）：予備動作の残り秒・突進の残り秒と向き・次の大技まで・よろめき・突進で当てた相手 */
+  teleT?: number;
+  chargeT?: number;
+  cdx?: number;
+  cdy?: number;
+  bossCd?: number;
+  stunT?: number;
+  hitIds?: number[];
   kx: number;
   ky: number;
   attackCd: number;
@@ -227,6 +235,8 @@ const BUILD_RANGE_PX = 6 * TILE + 20;
 export const isHordeDay = (day: number): boolean => day % 4 === 0;
 /** 30 日モードで救助が来る日（その日の朝） */
 export const RESCUE_DAY = 30;
+/** 巨像が地形にぶつかる大きさ（見た目と当たり判定は大きいが、大男が通れる所は通れる） */
+const TITAN_BODY = 20;
 
 /** 拠点の敷地内か（安全地帯） */
 export function inBase(x: number, y: number): boolean {
@@ -971,6 +981,7 @@ export class HostSimulation {
         alert: z.state === 'chase' ? 2 : z.state === 'investigate' || z.state === 'search' ? 1 : 0,
         atk: z.atk,
         ...(z.elite ? { elite: true } : {}),
+        ...(z.tele ? { tele: z.tele } : {}),
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, owner: b.owner, x: r1(b.x), y: r1(b.y), vx: Math.round(b.vx), vy: Math.round(b.vy) })),
     };
@@ -1076,6 +1087,15 @@ export class HostSimulation {
       // 夜：大群が押し寄せるのではなく、闇の中で屋外の感染体が鋭くなる（巡回は少しだけ）
       this.spawnPatrols(1);
       const finalNight = this.rescue.day > 0 && this.day + 1 >= this.rescue.day;
+      // ボスの夜：10 日ごと・無線を直した晩・最後の夜。巨像が群れと一緒に来る
+      this.bossPending = finalNight || this.day % 10 === 0 || this.bossNightDay === this.day;
+      const bossBanner = this.bossPending && !finalNight && !isHordeDay(this.day);
+      if (bossBanner) {
+        this.hordeNight = true;
+        this.hordeWaves = 2;
+        this.hordeT = 0;
+        this.events.push({ k: 'banner', t: `DAY ${this.day} - 巨像の夜`, s: '地響きが近づいてくる。巨大な感染体が群れを率いて来る — 突進は横に避け、壁にぶつけろ', c: '#e07a3a', snd: 'horde' });
+      } else if (this.bossPending) this.events.push({ k: 'feed', cat: 'danger', t: '今夜は巨像も来る！ 突進は横に避け、壁にぶつけてよろめいた所を狙え', c: '#e07a3a', snd: 'alarm' });
       if (finalNight) {
         // 救助の前の晩：最後の防衛。いつもの大群より多く、長い
         this.hordeNight = true;
@@ -1088,7 +1108,7 @@ export class HostSimulation {
         this.hordeWaves = 3;
         this.hordeT = 0;
         this.events.push({ k: 'banner', t: `DAY ${this.day} - 大群の夜`, s: '大群が押し寄せる。今夜は拠点の柵も破られる — 朝まで持ちこたえろ', c: '#e0583e', snd: 'horde' });
-      } else this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: '闇が濃くなった。懐中電灯の光はゾンビにも見えている', c: '#aab4c8', snd: 'night' });
+      } else if (!bossBanner) this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: '闇が濃くなった。懐中電灯の光はゾンビにも見えている', c: '#aab4c8', snd: 'night' });
     } else {
       if (this.hordeNight) {
         // 大群の夜を越えた：生き残った人に経験値、拠点の収納箱に特別な補給
@@ -2212,6 +2232,10 @@ export class HostSimulation {
           v.hp -= heavy;
           v.spd *= z.type === 'brute' ? 0.55 : 0.88;
           this.events.push({ k: 'crash', x: z.x, y: z.y, hard: 0.3 });
+        } else if (z.type === 'titan' && d > 0.01) {
+          // 巨像は車を押しのける（動かせなければ乗り越える）。押すたびに車も傷む
+          moveCircle(v, (-dx / d) * (r - d), (-dy / d) * (r - d), VEHICLE.radius, this.world);
+          v.hp = Math.max(0, v.hp - 6 * dt);
         } else if (d > 0.01) {
           z.x = v.x + (dx / d) * r;
           z.y = v.y + (dy / d) * r;
@@ -2441,6 +2465,8 @@ export class HostSimulation {
       }
       this.payCost(p, need);
       r.stage = 2;
+      // 無線が直った晩は、電波に引かれて巨像が来る
+      this.bossNightDay = this.phase === 'night' ? this.day + 1 : this.day;
       this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が救助無線を直した！ もう一度 無線で [F] — 救助を呼べる`, c: '#f0d070', snd: 'clear' });
       return true;
     }
@@ -3283,6 +3309,154 @@ export class HostSimulation {
     return 'walker';
   }
 
+  // ======================== ボス（巨像） ========================
+  private bossPending = false;
+  /** 無線を直した晩（ボスの夜） */
+  private bossNightDay = 0;
+
+  /** 巨像を群れの外側に出す。体力は人数に合わせる（1 人でも罠と壁で倒せるように） */
+  spawnTitan(alive: SimPlayer[]): SimZombie | null {
+    const p = alive[Math.floor(Math.random() * alive.length)];
+    for (let t = 0; t < 30; t++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = 700 + Math.random() * 250;
+      const x = p.x + Math.cos(a) * d;
+      const y = p.y + Math.sin(a) * d;
+      if (this.world.solid(Math.floor(x / TILE), Math.floor(y / TILE)) || inBase(x, y)) continue;
+      const z = this.spawnZombie('titan', x, y);
+      const scale = [0.55, 0.8, 1][Math.min(3, this.players.filter((q) => !q.away).length) - 1] ?? 1;
+      z.hp = z.maxHp = ZOMBIE.titan.hp * scale * this.hpMul();
+      z.elite = false;
+      z.keep = true;
+      z.state = 'chase';
+      z.stateT = 999;
+      z.bossCd = 3;
+      this.events.push({ k: 'feed', cat: 'danger', t: `巨像が現れた！（${directionName(x / TILE, y / TILE)}）`, c: '#e07a3a', snd: 'alarm' });
+      return z;
+    }
+    return null;
+  }
+
+  /** 巨像の行動：突進（構え 0.9 秒 → 一直線に走り、壁を壊す）と地鳴り（構え 0.8 秒 → 周りを吹き飛ばす）。処理したら true */
+  private updateTitan(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): boolean {
+    z.state = 'chase';
+    z.stateT = 999;
+    if (near) {
+      z.targetX = near.p.x;
+      z.targetY = near.p.y;
+    }
+    z.bossCd = (z.bossCd ?? 3) - dt;
+    // 釘の罠：巨体の下にある罠すべてが深く刺さる（ボスは罠で削れる）
+    const tx0 = Math.floor(z.x / TILE);
+    const ty0 = Math.floor(z.y / TILE);
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        const o = this.world.objAt(tx0 + dx, ty0 + dy);
+        if (!o || o.kind !== 'spike' || this.distToTile(z, o.tx, o.ty) > ZOMBIE.titan.radius * 0.7) continue;
+        o.hp -= 12 * dt;
+        if (Math.random() < dt * 4) this.changed.add(o.id);
+        this.damageZombie(z, 110 * dt, -1, 0, 0, 0, true);
+        if (o.hp <= 0) this.destroyObj(o);
+      }
+    if (z.dead) return true;
+    // よろめき（突進で壁にぶつかった）：動けない
+    if ((z.stunT ?? 0) > 0) {
+      z.stunT! -= dt;
+      z.tele = 0;
+      return true;
+    }
+    // 予備動作
+    if ((z.teleT ?? 0) > 0) {
+      z.teleT! -= dt;
+      if (z.tele === 1 && near) z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+      if (z.teleT! > 0) return true;
+      if (z.tele === 1) {
+        z.chargeT = 1.1;
+        z.cdx = Math.cos(z.angle);
+        z.cdy = Math.sin(z.angle);
+        z.hitIds = [];
+      } else this.titanSlam(z);
+      z.tele = 0;
+      return true;
+    }
+    // 突進中
+    if ((z.chargeT ?? 0) > 0) {
+      z.chargeT! -= dt;
+      const sp = 560;
+      const collided: { tx: number; ty: number }[] = [];
+      const px = z.x;
+      const py = z.y;
+      moveCircle(z, z.cdx! * sp * dt, z.cdy! * sp * dt, TITAN_BODY, this.world, collided);
+      // 建てた物・壊せる物は突き破る（地形の壁にぶつかったら、よろめく）
+      for (const c of collided) {
+        const o = this.world.objAt(c.tx, c.ty);
+        if (o && BREAKABLE_KINDS.has(o.kind)) {
+          o.hp -= 420;
+          this.changed.add(o.id);
+          this.events.push({ k: 'smash', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });
+          if (o.hp <= 0) this.destroyObj(o);
+        }
+      }
+      for (const q of this.players) {
+        if (q.status !== 'alive' || q.away || z.hitIds!.includes(q.id)) continue;
+        if (Math.hypot(q.x - z.x, q.y - z.y) < ZOMBIE.titan.radius + PLAYER.radius + 4) {
+          z.hitIds!.push(q.id);
+          this.damagePlayer(q, 38);
+          this.injure(q, 0.5, 0.3);
+          moveCircle(q, z.cdx! * 90, z.cdy! * 90, PLAYER.radius, this.world);
+        }
+      }
+      const moved = Math.hypot(z.x - px, z.y - py);
+      if (moved < sp * dt * 0.3) {
+        // 止められた：よろめいて隙ができる
+        z.chargeT = 0;
+        z.stunT = 2.2;
+        z.bossCd = 4;
+        this.events.push({ k: 'crash', x: z.x, y: z.y, hard: 1 });
+        this.events.push({ k: 'feed', cat: 'info', t: '巨像がよろめいた！ 今が攻撃のチャンス', c: '#e0c060' });
+      } else if (z.chargeT! <= 0) z.bossCd = 3.5;
+      return true;
+    }
+    // 次の大技
+    if (near && z.bossCd <= 0 && this.zActive(z)) {
+      if (near.d < 135) {
+        z.tele = 2;
+        z.teleT = 0.8;
+        return true;
+      }
+      if (near.d < 560 && this.world.lineWalkable(z.x, z.y, near.p.x, near.p.y)) {
+        z.tele = 1;
+        z.teleT = 0.9;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 地鳴り：周りの人を吹き飛ばし、建てた物にも響く */
+  private titanSlam(z: SimZombie): void {
+    this.events.push({ k: 'crash', x: z.x, y: z.y, hard: 1 });
+    for (const q of this.players) {
+      if (q.status !== 'alive' || q.away) continue;
+      const d = Math.hypot(q.x - z.x, q.y - z.y);
+      if (d > 160) continue;
+      this.damagePlayer(q, 34 * (1 - d / 240));
+      const k = (160 - d) * 0.9;
+      moveCircle(q, ((q.x - z.x) / (d || 1)) * k, ((q.y - z.y) / (d || 1)) * k, PLAYER.radius, this.world);
+    }
+    const tx0 = Math.floor(z.x / TILE);
+    const ty0 = Math.floor(z.y / TILE);
+    for (let dy = -3; dy <= 3; dy++)
+      for (let dx = -3; dx <= 3; dx++) {
+        const o = this.world.objAt(tx0 + dx, ty0 + dy);
+        if (!o || !BUILD_KINDS.has(o.kind) || Math.hypot(dx, dy) > 3.2) continue;
+        o.hp -= 90;
+        this.changed.add(o.id);
+        if (o.hp <= 0) this.destroyObj(o);
+      }
+    z.bossCd = 3.2;
+  }
+
   // ======================== 脅威の段階（日数と救助の進み具合で難しくなる） ========================
   /** 0 = 1〜10 日・1 = 11〜20 日・2 = 21 日〜。救助を呼ぶと +1（無線の電波に寄ってくる） */
   threat(): number {
@@ -3616,6 +3790,10 @@ export class HostSimulation {
   private spawnHordeWave(): void {
     const alive = this.players.filter((p) => p.status === 'alive' && !p.away);
     if (!alive.length) return;
+    if (this.bossPending) {
+      this.bossPending = false;
+      this.spawnTitan(alive);
+    }
     const total = Math.min(56, 10 + Math.min(19, this.day) * 2 + this.threat() * 4);
     for (const p of alive) {
       const n = Math.ceil(total / alive.length);
@@ -3688,6 +3866,7 @@ export class HostSimulation {
     }
 
     const near = this.nearestAlive(z.x, z.y);
+    if (z.type === 'titan' && this.updateTitan(z, dt, near)) return;
     let speed = (night ? st.nightSpeed : st.daySpeed) * z.speedMul * this.world.speedAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE));
     let dx = 0;
     let dy = 0;
@@ -3764,11 +3943,11 @@ export class HostSimulation {
       speed *= 0.4;
       trap.hp -= 9 * dt;
       if (Math.random() < dt * 4) this.changed.add(trap.id);
-      this.damageZombie(z, 60 * dt, -1, 0, 0, 0, true);
+      if (z.type !== 'titan') this.damageZombie(z, 60 * dt, -1, 0, 0, 0, true);
       if (trap.hp <= 0) this.destroyObj(trap);
       if (z.dead) return;
     }
-    moveCircle(z, (dx * speed + z.kx) * dt, (dy * speed + z.ky) * dt, st.radius, this.world, collided);
+    moveCircle(z, (dx * speed + z.kx) * dt, (dy * speed + z.ky) * dt, z.type === 'titan' ? TITAN_BODY : st.radius, this.world, collided);
     // 拠点（安全地帯）には入れない（大群の夜は除く）
     if (this.safeIn(z.x, z.y)) {
       z.x = px;
@@ -3888,6 +4067,10 @@ export class HostSimulation {
 
   private damageZombie(z: SimZombie, dmg: number, owner: number, dirX: number, dirY: number, knock: number, ap = true): void {
     if (z.dead) return;
+    // 巨像はよろめいている間、大きく傷つく（壁にぶつけさせる意味）
+    if (z.type === 'titan' && (z.stunT ?? 0) > 0) dmg *= 1.5;
+    // 巨像は弾で押し戻されない（撃ち続けるだけで近寄らせない、を防ぐ）
+    if (z.type === 'titan') knock *= 0.1;
     // 装甲：通常弾は軽減される（徹甲弾・近接は無視）
     const armor = ZOMBIE[z.type].armor;
     if (!ap && armor > 0) {
@@ -3932,8 +4115,21 @@ export class HostSimulation {
       }
       for (const o of this.zombies) if (!o.dead && o !== z && Math.hypot(o.x - z.x, o.y - z.y) < 120) this.damageZombie(o, 25, -1, o.x - z.x, o.y - z.y, 120, true);
     }
-    // 精鋭：良い武器・アタッチメント・リュックを必ず落とす
-    if (z.elite) {
+    // 巨像：伝説の武器・強化キット・巨像の心臓を必ず落とす。全員に経験値
+    if (z.type === 'titan') {
+      const bag = this.groundBag(z.x, z.y);
+      if (bag) {
+        const c = this.contents.get(bag.id)!;
+        const pool: WeaponId[] = ['rifle', 'dmr', 'shotgun', 'hunting'];
+        const wid = pool[Math.floor(Math.random() * pool.length)];
+        addItem(c, wid, 1, { mag: 0, ...rollQuality(4) });
+        addItem(c, ammoOf(wid), 30);
+        addItem(c, 'upkit', 2);
+        addItem(c, 'bheart', 1);
+      }
+      for (const q of this.players) if (q.status === 'alive') this.gainXp(q, 2, 60);
+      this.events.push({ k: 'banner', t: '巨像を倒した！', s: '伝説の武器と「巨像の心臓」が落ちた', c: '#f0c040', snd: 'clear' });
+    } else if (z.elite) {
       const bag = this.groundBag(z.x, z.y);
       if (bag) {
         const c = this.contents.get(bag.id)!;
