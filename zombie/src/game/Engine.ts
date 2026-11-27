@@ -64,7 +64,7 @@ import {
   WORLD_W,
   ZOMBIE,
 } from './constants';
-import { seatPos, stepVehicle, trunkPos, VEHICLE } from './vehicles';
+import { lastCollided, seatPos, stepVehicle, trunkPos, VEHICLE } from './vehicles';
 import { jobReward, makeJobs, radioLevel, rewardMul } from './jobs';
 import { buildDef, buildSpotError, canAfford } from './build';
 import {
@@ -90,6 +90,8 @@ import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND
 
 interface SimPlayer extends PlayerSnap {
   queue: InputFrame[];
+  /** 骨折が治るまでの秒数 */
+  fracT?: number;
   fire: boolean;
   revive: boolean;
   tx: number;
@@ -188,10 +190,22 @@ export function cycleToMinute(cycleT: number): number {
   return (1200 + ((cycleT - DAY_SECONDS) * 600) / NIGHT_SECONDS) % 1440;
 }
 
+// ---- 体調 ----
+/** 疲労：起きている間に 1 秒あたり増える量（丸 1 日強で 60） */
+const FATIGUE_RATE = 60 / (CYCLE_SECONDS * 1.1);
+/** 疲労がこれを超えると狙いがぶれ、足が遅くなる */
+const FATIGUE_BAD = 60;
+/** 冷えがこれを超えるとスタミナの回復が落ちる・さらに上は HP が減る */
+const COLD_SLOW = 50;
+const COLD_HURT = 85;
+const WARM_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['campfire', 'torch', 'stove']);
+
 /** ホスト側の車：運転手の最後の入力と、エンジン音の間隔 */
 type SimVehicle = VehicleSnap & { inp: { mx: number; my: number } | null; noiseT: number };
 const trunkId = (v: VehicleSnap) => VEHICLE.trunkBase + v.id;
 
+/** 車の体当たりで壊せる物 */
+const RAMMABLE: ReadonlySet<ObjKind> = new Set<ObjKind>(['car', 'tree', 'barrel', 'crate', 'rubble']);
 const STOVE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stove']);
 const BUILD_RANGE_PX = 6 * TILE + 20;
 
@@ -288,6 +302,7 @@ export interface SaveData {
     tool: number;
     kills: number;
     xp: number[];
+    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number };
   }[];
   extra?: Record<string, unknown>;
 }
@@ -516,7 +531,7 @@ export class HostSimulation {
   private applySkills(p: SimPlayer): void {
     const m = skillMods(p.xp);
     p.stmMax = m.staminaMax;
-    p.stmRegen = m.staminaRegenMul * (p.stimT > 0 ? 1.8 : 1) * ((p.rested ?? 0) > 0 ? 1.35 : 1);
+    p.stmRegen = m.staminaRegenMul * (p.stimT > 0 ? 1.8 : 1) * ((p.rested ?? 0) > 0 ? 1.35 : 1) * ((p.cold ?? 0) >= COLD_SLOW ? 0.6 : 1);
   }
 
   /** スキル経験値を加える（レベルが上がったら知らせる） */
@@ -630,6 +645,7 @@ export class HostSimulation {
         tool: p.tool,
         kills: p.kills,
         xp: p.xp,
+        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0 },
       })),
       extra: this.saveExtra(),
     };
@@ -677,6 +693,7 @@ export class HostSimulation {
       if (!s) continue;
       Object.assign(p, { x: s.x, y: s.y, hp: s.hp, maxHp: s.maxHp, hunger: s.hunger, tox: s.tox, bag: s.bag, prim: s.prim, sec: s.sec, tool: s.tool, kills: s.kills });
       p.xp = p.xp.map((v, i) => Math.max(v, s.xp[i] ?? 0));
+      if (s.body) Object.assign(p, s.body);
       p.lv = p.xp.map(levelOf);
       sim.applySkills(p);
       // ダウン・戦闘不能のまま保存されていたら、拠点で起き上がった状態から
@@ -715,6 +732,7 @@ export class HostSimulation {
     const m = this.minute();
     if (!(m >= 20 * 60 || m < 5 * 60)) return this.pop(p, '眠れるのは夜（20:00〜05:00）だけ', '#cccccc');
     if (this.hordeNight) return this.pop(p, '大群の夜は眠れない！', '#e0583e');
+    if (p.bleed) return this.pop(p, '出血を止めてから眠ろう（包帯）', '#e0583e');
     if (this.zombies.some((z) => !z.dead && z.state === 'chase' && Math.hypot(z.x - p.x, z.y - p.y) < 700)) return this.pop(p, '近くに敵がいて眠れない', '#e0583e');
     p.sleeping = true;
     p.search = null;
@@ -747,6 +765,9 @@ export class HostSimulation {
       p.hp = p.maxHp;
       p.tox = Math.max(0, p.tox - 40);
       p.rested = 480;
+      p.fatigue = 0;
+      p.cold = 0;
+      if (p.frac === 2) p.frac = 0;
       p.sleeping = false;
       this.applySkills(p);
       p.stamina = p.stmMax ?? PLAYER.maxStamina;
@@ -859,6 +880,12 @@ export class HostSimulation {
         staminaDelay: r2(p.staminaDelay),
         stmMax: p.stmMax,
         stmRegen: r2(p.stmRegen ?? 1),
+        spdMul: p.spdMul ?? 1,
+        ...(p.noDash ? { noDash: true } : {}),
+        fatigue: Math.round(p.fatigue ?? 0),
+        cold: Math.round(p.cold ?? 0),
+        ...(p.bleed ? { bleed: true } : {}),
+        ...(p.frac ? { frac: p.frac } : {}),
         xp: p.xp.map(Math.floor),
         heat: r2(p.heat),
         tox: r1(p.tox),
@@ -1000,6 +1027,9 @@ export class HostSimulation {
         p.status = 'alive';
         p.hp = p.maxHp * 0.6;
         p.hunger = Math.max(p.hunger, 60);
+        p.bleed = false;
+        p.frac = 0;
+        p.cold = 0;
         p.x = cx - 50;
         p.y = cy - 30;
         this.giveStarterKit(p);
@@ -1124,6 +1154,8 @@ export class HostSimulation {
     if (resting && p.hp < p.maxHp) p.hp = Math.min(p.maxHp, p.hp + MED_REGEN[this.base.med] * dt);
     this.updateTox(p, dt);
     if (p.status !== 'alive') return;
+    this.updateBody(p, dt);
+    if (p.status !== 'alive') return;
 
     // 探索の進行（動いたり攻撃を受けたら中断）
     if (p.search) {
@@ -1245,7 +1277,7 @@ export class HostSimulation {
     }
     const sk = skillMods(p.xp);
     while (p.fireCd <= 0 && slot.w.mag > 0) {
-      const spread = w.spread + p.heat;
+      const spread = w.spread + p.heat + Math.max(0, (p.fatigue ?? 0) - FATIGUE_BAD) / (100 - FATIGUE_BAD) * 0.07;
       for (let i = 0; i < w.pellets; i++) {
         const a = p.aim + (Math.random() - 0.5) * 2 * spread;
         const sp = w.bulletSpeed * (w.pellets > 1 ? 0.85 + Math.random() * 0.3 : 1);
@@ -1340,7 +1372,19 @@ export class HostSimulation {
   }
 
   private heal(p: SimPlayer, id: ItemId): void {
+    if (id === 'splint') {
+      removeItem(p.bag, id, 1);
+      p.frac = 2;
+      p.fracT = 150;
+      this.updateMoveMods(p);
+      this.pop(p, '添え木を当てた：約2分半で治る', '#8fbf8a', 'heal');
+      return;
+    }
     removeItem(p.bag, id, 1);
+    if ((id === 'bandage' || id === 'medkit') && p.bleed) {
+      p.bleed = false;
+      this.pop(p, '止血した', '#8fbf8a');
+    }
     const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : id === 'antitox' ? 10 : id === 'herbs' ? 12 : 25) * skillMods(p.xp).healMul);
     p.hp = Math.min(p.maxHp, p.hp + v);
     if (id === 'medkit') p.tox = Math.max(0, p.tox - 25);
@@ -1372,6 +1416,15 @@ export class HostSimulation {
   }
 
   private useMeds(p: SimPlayer, explicit: boolean): boolean {
+    // 出血・骨折の手当てを先に
+    if (p.bleed && (countItem(p.bag, 'bandage') > 0 || countItem(p.bag, 'medkit') > 0)) {
+      this.heal(p, countItem(p.bag, 'bandage') > 0 ? 'bandage' : 'medkit');
+      return true;
+    }
+    if (p.frac === 1 && countItem(p.bag, 'splint') > 0) {
+      this.heal(p, 'splint');
+      return true;
+    }
     // 汚染が重いときは解毒剤を優先
     if (p.tox >= 45 && countItem(p.bag, 'antitox') > 0) {
       this.heal(p, 'antitox');
@@ -1456,7 +1509,9 @@ export class HostSimulation {
           this.eat(p, s.id);
         } else if (cat === 'med') {
           const cleans = s.id === 'antitox' || s.id === 'herbs' || s.id === 'medkit' || s.id === 'stim';
-          if (p.hp >= p.maxHp && !(cleans && p.tox > 0)) return this.pop(p, 'HPは満タン', '#cccccc');
+          const treats = (p.bleed && (s.id === 'bandage' || s.id === 'medkit')) || (s.id === 'splint' && p.frac === 1);
+          if (s.id === 'splint' && p.frac !== 1) return this.pop(p, '骨折していない', '#cccccc');
+          if (p.hp >= p.maxHp && !(cleans && p.tox > 0) && !treats) return this.pop(p, 'HPは満タン', '#cccccc');
           this.heal(p, s.id);
         } else if (isWeapon(s.id)) this.equip(p, n(a));
         break;
@@ -1646,6 +1701,84 @@ export class HostSimulation {
     return null;
   }
 
+  // ======================== 体調（疲労・冷え・ケガ） ========================
+
+  /** ケガ：fracChance で骨折、bleedChance で出血 */
+  private injure(p: SimPlayer, fracChance: number, bleedChance: number): void {
+    if (p.status !== 'alive') return;
+    if (!p.frac && Math.random() < fracChance) {
+      p.frac = 1;
+      p.fracT = 600;
+      this.updateMoveMods(p);
+      this.pop(p, '骨折！ 足が遅くダッシュできない — 添え木（布2・鉄くず1）を [H] で', '#e0583e', 'alarm');
+    } else if (!p.bleed && Math.random() < bleedChance) {
+      p.bleed = true;
+      this.pop(p, '出血！ HP が減り続ける — 包帯で止血 [H]', '#e0583e', 'alarm');
+    }
+  }
+
+  /** 歩く速さの倍率とダッシュ可否（ゲストの予測でも同じ値を使う） */
+  private updateMoveMods(p: SimPlayer): void {
+    const k = Math.max(0, ((p.fatigue ?? 0) - FATIGUE_BAD) / (100 - FATIGUE_BAD));
+    p.spdMul = r2((p.frac === 1 ? 0.7 : p.frac === 2 ? 0.88 : 1) * (1 - 0.18 * k));
+    p.noDash = p.frac === 1;
+  }
+
+  private updateBody(p: SimPlayer, dt: number): void {
+    // 疲労：起きている間に増える（休息済みならゆっくり）
+    const fatBefore = p.fatigue ?? 0;
+    if (!p.sleeping) p.fatigue = Math.min(100, fatBefore + FATIGUE_RATE * dt * ((p.rested ?? 0) > 0 ? 0.6 : 1));
+    if (fatBefore < FATIGUE_BAD && (p.fatigue ?? 0) >= FATIGUE_BAD) this.pop(p, '疲れ切っている：狙いがぶれ、足が遅い — 夜に拠点のベッドで眠ろう', '#e0a33a');
+    // 冷え：雨・嵐・夜の屋外で冷える。焚き火・たいまつ・かまどのそば、屋内、車の中で温まる。コートで半分
+    const tx = Math.floor(p.x / TILE);
+    const ty = Math.floor(p.y / TILE);
+    let warm = false;
+    for (let y = ty - 4; y <= ty + 4 && !warm; y++)
+      for (let x = tx - 4; x <= tx + 4; x++) {
+        const o = this.world.objAt(x, y);
+        if (o && WARM_KINDS.has(o.kind) && Math.hypot((x + 0.5) * TILE - p.x, (y + 0.5) * TILE - p.y) < (o.kind === 'campfire' ? 180 : 130)) {
+          warm = true;
+          break;
+        }
+      }
+    const indoor = INDOOR_FLOORS.has(this.world.terrainAt(tx, ty));
+    let gain = 0;
+    if (!indoor && !p.veh) {
+      if (this.weather === 'storm') gain += 0.38 * this.wx;
+      else if (this.weather === 'rain') gain += 0.26 * this.wx;
+      if (this.phase === 'night') gain += 0.1;
+    }
+    if (countItem(p.bag, 'coat') > 0) gain *= 0.5;
+    const coldBefore = p.cold ?? 0;
+    let c = coldBefore;
+    if (warm) c -= 5 * dt;
+    else if (gain > 0) c += gain * dt;
+    else c -= (indoor || p.veh ? 0.8 : 0.35) * dt;
+    p.cold = Math.max(0, Math.min(100, c));
+    if ((coldBefore >= COLD_SLOW) !== (p.cold >= COLD_SLOW)) {
+      this.applySkills(p);
+      if (p.cold >= COLD_SLOW) this.pop(p, '体が冷えている：スタミナの回復が遅い — 焚き火・屋内で温まろう', '#8ac0e0');
+    }
+    if (p.cold >= COLD_HURT) {
+      p.hp -= 0.35 * dt;
+      if (p.hp <= 0) return this.downPlayer(p);
+    }
+    // 出血：止血するまで HP が減る
+    if (p.bleed) {
+      p.hp -= 0.7 * dt;
+      if (p.hp <= 0) return this.downPlayer(p);
+    }
+    // 骨折：添え木を当てると早く治る（当てないと 10 分）
+    if (p.frac) {
+      p.fracT = (p.fracT ?? 600) - dt;
+      if (p.fracT <= 0) {
+        p.frac = 0;
+        this.pop(p, '骨折が治った', '#8fbf8a');
+      }
+    }
+    this.updateMoveMods(p);
+  }
+
   // ======================== 車両 ========================
 
   /** 道路の上に車を置く：拠点の近くに1台（最初の目標）、遠くに数台 */
@@ -1780,11 +1913,33 @@ export class HostSimulation {
         }
       }
       const driver = v.seats[0] >= 0 ? this.players.find((q) => q.id === v.seats[0]) : undefined;
+      const pushing = !!driver && !!v.inp && Math.hypot(v.inp.mx, v.inp.my) > 0.15;
+      const spdBefore = v.spd;
       const hit = stepVehicle(v, driver ? v.inp : null, dt, this.world);
+      // 体当たり：道の残骸・木・ドラム缶・木箱は、ぶつかると壊れる（速いほど一撃。押し続けても少しずつ）
+      if (pushing)
+        for (const c of lastCollided) {
+          const o = this.world.objAt(c.tx, c.ty);
+          if (!o || !RAMMABLE.has(o.kind) || !objIsSolid(o)) continue;
+          o.hp -= hit > 0 ? hit * 0.6 : 45 * dt;
+          if (Math.random() < 0.2 || hit > 0) this.changed.add(o.id);
+          if (hit > 0) this.events.push({ k: 'smash', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });
+          if (o.hp <= 0) {
+            // 木は倒れ、残骸は脇へ押しのけられる（通れるようになる）。勢いがあればそのまま突き抜ける
+            this.destroyObj(o);
+            v.spd = hit > 0 ? spdBefore * 0.7 : v.spd * 0.75;
+          }
+        }
       if (hit > 180) {
         v.hp -= (hit - 180) * 0.12;
         this.events.push({ k: 'crash', x: v.x + Math.cos(v.a) * 26, y: v.y + Math.sin(v.a) * 26, hard: Math.min(1, hit / VEHICLE.maxSpeed) });
-        if (hit > 400) for (const id of v.seats) if (id >= 0) this.damagePlayer(this.players.find((q) => q.id === id)!, 6);
+        if (hit > 400)
+          for (const id of v.seats) {
+            if (id < 0) continue;
+            const q = this.players.find((r) => r.id === id)!;
+            this.damagePlayer(q, 6);
+            this.injure(q, 0.25, 0.15);
+          }
       }
       const speed = Math.abs(v.spd);
       // ゾンビを轢く：速ければ大ダメージ。車も傷んで少し遅くなる
@@ -3100,6 +3255,7 @@ export class HostSimulation {
     if (z.attackCd > 0) return;
     if (near && near.d < st.radius + PLAYER.radius + 6) {
       this.damagePlayer(near.p, st.damage);
+      this.injure(near.p, z.type === 'brute' ? 0.35 : 0, st.damage >= 10 ? 0.2 : 0.08);
       z.attackCd = st.attackInterval;
       z.atk++;
       this.startChase(z);

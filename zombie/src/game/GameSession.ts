@@ -354,6 +354,8 @@ export class GameSession {
       staminaDelay: me.staminaDelay,
       stmMax: me.stmMax,
       stmRegen: me.stmRegen,
+      spdMul: me.spdMul,
+      noDash: me.noDash,
     };
     // 車に乗っている間は歩きの予測をしない（位置はホストの車に従う）
     if (!me.veh) for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
@@ -931,7 +933,7 @@ export class GameSession {
   private interactHint(me: PlayerSnap): string | null {
     if (me.searchId) return null;
     // 車：乗っている間は降りる案内。近くにあれば、位置と状態で何ができるか
-    if (me.veh !== undefined) return me.seat === 0 ? '[F] 降りる ・ 移動キーの方向へ走る（真後ろでバック）' : '[F] 降りる ・ 窓から撃てる';
+    if (me.veh !== undefined) return me.seat === 0 ? '[F] 降りる ・ 移動キーの方向へ走る（後ろへ倒すと U ターン・ぶつかると自動で切り返し）' : '[F] 降りる ・ 窓から撃てる';
     let nv: VehicleSnap | null = null;
     let nd = 62;
     for (const v of this.prevView?.vehicles ?? []) {

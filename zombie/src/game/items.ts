@@ -40,7 +40,9 @@ export type ItemId =
   | 'water'
   | 'stew'
   | 'tea'
-  | 'fuel';
+  | 'fuel'
+  | 'splint'
+  | 'coat';
 
 export type ItemCat = 'ammo' | 'med' | 'food' | 'mat' | 'att' | 'weapon' | 'misc';
 /** レア度（0=ありふれた 1=普通 2=レア 3=非常にレア）。UIの枠色に使う */
@@ -110,6 +112,8 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   valuables: D('valuables', '貴重品', 10, 'misc', 25, 1, '時計や貴金属。持ち帰ると評価が上がる'),
   antitox: D('antitox', '解毒剤', 3, 'med', 35, 2, '汚染度 -60・HP +10（市街中心部の病院で見つかる）'),
   herbs: D('herbs', '薬草', 8, 'med', 4, 0, 'HP +12・汚染度 -10（森林で採れる）'),
+  splint: D('splint', '添え木', 3, 'med', 6, 0, '骨折の手当て。足の遅さが軽くなり、約2分半で治る（布2・鉄くず1で作れる）'),
+  coat: D('coat', '防寒コート', 1, 'misc', 20, 1, 'バックパックに入れておくと着ている扱い。雨・夜の冷えが半分になる'),
   fuel: D('fuel', 'ガソリン缶', 3, 'mat', 8, 1, '車の燃料 +35。車の残骸・倉庫・ガソリンスタンドで見つかる'),
   water: D('water', 'きれいな水', 6, 'mat', 2, 0, '雨水タンクに貯まる。かまどで料理に使う'),
   stew: D('stew', '温かいシチュー', 3, 'food', 14, 1, '空腹 +60・HP +20・6分間「休息済み」（かまどで作る）'),

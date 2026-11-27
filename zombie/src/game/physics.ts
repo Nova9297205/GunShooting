@@ -128,7 +128,7 @@ export function stepMovement(
     my /= len;
   }
 
-  if (f.dash && status === 'alive' && b.dashCd <= 0 && b.stamina >= PLAYER.dashStamina) {
+  if (f.dash && status === 'alive' && !b.noDash && b.dashCd <= 0 && b.stamina >= PLAYER.dashStamina) {
     let dx = Math.cos(f.aim);
     let dy = Math.sin(f.aim);
     if (len > 0.01) {
@@ -154,7 +154,7 @@ export function stepMovement(
   } else {
     b.dashTime = 0;
     // 浅瀬では足が遅い（ホストとゲストの予測で同じ計算）
-    const sp = (status === 'alive' ? PLAYER.speed : PLAYER.downSpeed) * world.speedAt(Math.floor(b.x / TILE), Math.floor(b.y / TILE));
+    const sp = (status === 'alive' ? PLAYER.speed * (b.spdMul ?? 1) : PLAYER.downSpeed) * world.speedAt(Math.floor(b.x / TILE), Math.floor(b.y / TILE));
     vx = mx * sp;
     vy = my * sp;
   }

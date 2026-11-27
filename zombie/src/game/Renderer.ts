@@ -692,6 +692,7 @@ export class Renderer {
     this.drawSearch(view, me);
     this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
+    this.touchUI = !!o.touch;
     this.vehLights = (view.vehicles ?? []).filter((v) => v.seats[0] >= 0 && !v.broken).map((v) => ({ x: v.x + Math.cos(v.a) * 90, y: v.y + Math.sin(v.a) * 90 }));
     for (const v of view.vehicles ?? []) if (v.x > vx0 - 60 && v.y > vy0 - 60 && v.x < vx1 + 60 && v.y < vy1 + 60) this.drawVehicle(v, view);
     for (const p of view.players) if (p.veh === undefined) this.drawPlayerMarker(p, p.id === o.localId);
@@ -1329,6 +1330,8 @@ export class Renderer {
   }
 
   private vehLights: { x: number; y: number }[] = [];
+  /** タッチ操作の端末（ボタン名で案内する） */
+  private touchUI = false;
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
     const out: { x: number; y: number; r: number; warm: number }[] = [];
     for (const l of this.vehLights) out.push({ x: l.x, y: l.y, r: 230, warm: 0.15 });
@@ -2535,12 +2538,53 @@ export class Renderer {
     });
   }
 
+  /** 体調の札：何が悪いのかと、何を使えば治るのか（体の状態パネルの上に積む） */
+  private drawConditions(me: PlayerSnap, x: number, bottom: number): void {
+    const { ctx } = this;
+    const items: { t: string; fix: string; c: string; bad: boolean }[] = [];
+    const has = (id: ItemId) => countItem(me.bag, id) > 0;
+    const H = this.touchUI ? '[回復]' : '[H]';
+    if (me.bleed) items.push({ t: '出血', fix: has('bandage') || has('medkit') ? `${H} 包帯で止血` : '包帯がない！ 布2で作れる', c: '#e0583e', bad: true });
+    if (me.frac === 1) items.push({ t: '骨折', fix: has('splint') ? `${H} 添え木を当てる` : '添え木（布2・鉄くず1）を作る', c: '#e0583e', bad: true });
+    else if (me.frac === 2) items.push({ t: '骨折（手当て済み）', fix: '少し足が遅い・じきに治る', c: '#c9a050', bad: false });
+    const f = me.fatigue ?? 0;
+    if (f >= 40) items.push({ t: `疲労 ${f}%`, fix: f >= 60 ? '狙いがぶれる・足が遅い → 夜に拠点のベッドで眠る' : '夜は拠点のベッドで眠ろう', c: f >= 60 ? '#e0a33a' : '#9c967c', bad: f >= 60 });
+    const c = me.cold ?? 0;
+    if (c >= 25) items.push({ t: `冷え ${c}%`, fix: c >= 50 ? 'スタミナ回復↓ → 焚き火・屋内・車・コート' : '雨と夜は冷える：焚き火・屋内', c: c >= 85 ? '#e0583e' : c >= 50 ? '#8ac0e0' : '#7f9aaa', bad: c >= 50 });
+    if (!items.length) return;
+    ctx.save();
+    ctx.textBaseline = 'middle';
+    let y = bottom;
+    for (const it of items) {
+      y -= 22;
+      ctx.font = `bold 11px ${UI}`;
+      const tw = ctx.measureText(it.t).width;
+      ctx.font = `10px ${UI}`;
+      const fw = ctx.measureText(it.fix).width;
+      const w = tw + fw + 26;
+      ctx.fillStyle = 'rgba(14,15,11,0.82)';
+      ctx.fillRect(x, y, w, 19);
+      ctx.fillStyle = it.c;
+      ctx.fillRect(x, y, 3, 19);
+      const blink = it.bad && Math.sin(this.time * 6) > 0.3;
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = blink ? '#ffffff' : it.c;
+      ctx.textAlign = 'left';
+      ctx.fillText(it.t, x + 9, y + 10);
+      ctx.font = `10px ${UI}`;
+      ctx.fillStyle = '#d8d2b8';
+      ctx.fillText(it.fix, x + 17 + tw, y + 10);
+    }
+    ctx.restore();
+  }
+
   private drawSelfPanel(view: ViewState, me: PlayerSnap): void {
     const { ctx, h } = this;
     const x = 12;
     const pw = 262;
     const ph = 166;
     const y = h - ph - 30;
+    this.drawConditions(me, x, y - 4);
     const low = me.hp / me.maxHp < 0.3;
     const hungry = me.hunger < 25;
     const tired = me.stamina < PLAYER.dashStamina;

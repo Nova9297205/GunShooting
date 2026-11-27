@@ -109,6 +109,10 @@ export interface MoveBody {
   stmMax?: number;
   /** スタミナ回復倍率（持久力スキル・興奮剤） */
   stmRegen?: number;
+  /** 歩く速さの倍率（骨折・疲労） */
+  spdMul?: number;
+  /** ダッシュできない（骨折） */
+  noDash?: boolean;
 }
 
 export interface PlayerSnap extends MoveBody {
@@ -118,6 +122,11 @@ export interface PlayerSnap extends MoveBody {
   away?: boolean;
   /** 拠点のベッドで眠っている */
   sleeping?: boolean;
+  /** 体調：疲労 0..100（眠ると 0）・冷え 0..100・出血・骨折（1 = 未処置、2 = 添え木で治りかけ） */
+  fatigue?: number;
+  cold?: number;
+  bleed?: boolean;
+  frac?: number;
   /** 乗っている車の ID と座席（0 = 運転席） */
   veh?: number;
   seat?: number;
@@ -293,6 +302,9 @@ export interface VehicleSnap {
   broken: boolean;
   /** 座席ごとのプレイヤー ID（-1 = 空席）。0 番が運転席 */
   seats: number[];
+  /** ホストだけが使う：切り返しの残り時間・ふさがっている時間 */
+  revT?: number;
+  blockT?: number;
 }
 
 /** 無線の依頼 */

@@ -1,7 +1,7 @@
 // ============================================================
 // 車両：直して燃料を入れると運転できる。運転手 1 人＋同乗者 2 人
 //   操作は「行きたい方向にスティック（WASD）を倒す」だけ：車はその方向へハンドルを切って加速する。
-//   真後ろ寄りに倒すとバック。止まっている間もゆっくり向きを変えられる。
+//   後ろ向きに倒すと U ターン。前がふさがると自動で少しバックして切り返す。
 //   壁・車・木にぶつかると止まり、速いほど車が傷む。川（深い所・浅瀬とも）は橋でしか渡れない。
 // ============================================================
 
@@ -13,10 +13,10 @@ import type { TileWorld } from './world';
 export const VEHICLE = {
   /** 当たり判定の半径（車体は細長いが、円で近似） */
   radius: 22,
-  /** 前進の最高速（px/秒）：歩き 200 の約 2.8 倍 */
-  maxSpeed: 560,
+  /** 前進の最高速（px/秒）：歩き 200 の約 3.2 倍（曲がり角・体当たりで実際は 2.5 倍前後） */
+  maxSpeed: 650,
   reverseSpeed: 170,
-  accel: 380,
+  accel: 440,
   brake: 900,
   /** 走行中の旋回の速さ（rad/秒） */
   turn: 2.4,
@@ -41,6 +41,9 @@ export const SEATS: [number, number][] = [
   [-14, 0], // 荷台・後部座席
 ];
 
+/** 直前のステップで車がぶつかったマス（体当たりで壊す物の判定に使う） */
+export const lastCollided: { tx: number; ty: number }[] = [];
+
 export interface VehicleInput {
   mx: number;
   my: number;
@@ -58,14 +61,18 @@ export function stepVehicle(v: VehicleSnap, inp: VehicleInput | null, dt: number
   const canDrive = !v.broken && v.fuel > 0 && inp !== null;
   if (canDrive && mag > 0.15) {
     const target = Math.atan2(inp!.my, inp!.mx);
-    let d = angleDiff(target, v.a);
-    let throttle = mag;
-    // 真後ろ寄り（約 115°以上）ならバック：車の後ろを目標に向ける
-    if (Math.abs(d) > 2.0) {
-      d = angleDiff(target + Math.PI, v.a);
-      throttle = -mag;
-    } else throttle = mag * Math.max(0.25, Math.cos(d));
-    const turnRate = Math.abs(v.spd) > 30 ? VEHICLE.turn * Math.min(1, Math.abs(v.spd) / 160) : VEHICLE.pivot;
+    const d = angleDiff(target, v.a);
+    let throttle: number;
+    // 前がふさがって切り返し中：ハンドルを切りながら少しバック
+    if ((v.revT ?? 0) > 0) {
+      v.revT = (v.revT ?? 0) - dt;
+      throttle = -mag * 0.8;
+    } else {
+      // 後ろ向きに倒したら、その場で U ターン（前進しながら大きく曲がる）
+      throttle = mag * Math.max(0.3, Math.cos(d));
+    }
+    // 低速でも小回りが利く（狭い路地・切り返し）
+    const turnRate = Math.abs(v.spd) > 30 ? VEHICLE.turn * Math.min(1, Math.max(0.55, Math.abs(v.spd) / 160)) : VEHICLE.pivot;
     v.a += Math.max(-turnRate * dt, Math.min(turnRate * dt, d));
     if (throttle > 0) {
       if (v.spd < 0) v.spd = Math.min(0, v.spd + VEHICLE.brake * dt);
@@ -82,12 +89,23 @@ export function stepVehicle(v: VehicleSnap, inp: VehicleInput | null, dt: number
     if (Math.abs(v.spd) < 4) v.spd = 0;
   }
   v.a = Math.atan2(Math.sin(v.a), Math.cos(v.a));
-  if (v.spd === 0) return 0;
+  if (v.spd === 0) {
+    // 押し付けたまま動けない（壁に密着）も、切り返しの合図にする
+    if (canDrive && mag > 0.15) {
+      v.blockT = (v.blockT ?? 0) + dt;
+      if (v.blockT > 0.3) {
+        v.blockT = 0;
+        v.revT = (v.revT ?? 0) > 0 ? 0 : 0.7;
+      }
+    }
+    return 0;
+  }
   const px = v.x;
   const py = v.y;
   const want = v.spd * dt;
   const body = { x: v.x, y: v.y };
-  moveCircle(body, Math.cos(v.a) * want, Math.sin(v.a) * want, VEHICLE.radius, world);
+  lastCollided.length = 0;
+  moveCircle(body, Math.cos(v.a) * want, Math.sin(v.a) * want, VEHICLE.radius, world, lastCollided);
   // 川（深い所・浅瀬）には入れない：前の位置に戻す
   const tt = world.terrainAt(Math.floor(body.x / TILE), Math.floor(body.y / TILE));
   const fx = world.terrainAt(Math.floor((body.x + Math.cos(v.a) * 18 * Math.sign(v.spd)) / TILE), Math.floor((body.y + Math.sin(v.a) * 18 * Math.sign(v.spd)) / TILE));
@@ -98,11 +116,26 @@ export function stepVehicle(v: VehicleSnap, inp: VehicleInput | null, dt: number
   v.x = body.x;
   v.y = body.y;
   const moved = Math.hypot(v.x - px, v.y - py);
-  // 思った距離の半分も進めなければ「ぶつかった」
-  if (moved < Math.abs(want) * 0.5) {
+  const ratio = moved / Math.max(0.001, Math.abs(want));
+  // 進もうとして進めない状態が続いたら、自動で切り返す（前進中→バック、バック中→前進）
+  if (inp && ratio < 0.2) {
+    v.blockT = (v.blockT ?? 0) + dt;
+    if (v.blockT > 0.3) {
+      v.blockT = 0;
+      v.revT = (v.revT ?? 0) > 0 ? 0 : 0.7;
+    }
+  } else v.blockT = 0;
+  // ほとんど進めない＝正面からぶつかった：止まって、速さに応じて傷む
+  if (ratio < 0.2) {
     const hit = Math.abs(v.spd);
     v.spd = 0;
     return hit;
+  }
+  // 壁や障害物に沿ってこすれた：進めた分だけ速さを残し、車体を進んだ向きにそろえる（狭い道で詰まらない）
+  if (ratio < 0.9) {
+    v.spd *= Math.max(0.5, ratio);
+    const ma = Math.atan2(v.y - py, v.x - px) + (v.spd < 0 ? Math.PI : 0);
+    v.a += angleDiff(ma, v.a) * 0.25;
   }
   return 0;
 }
