@@ -38,6 +38,7 @@ import { locationAt, type TileWorld } from './world';
 import { roofCanvas } from './RoofArt';
 import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
+import { skillMods } from './progression';
 import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -305,10 +306,19 @@ export class Renderer {
     a.flashSeed = Math.random();
     if (this.fx && x !== undefined && y !== undefined && aim !== undefined) {
       this.fx.casing(x, y, aim, w);
+      // 銃口の火花と煙（重い銃ほど大きい）
+      const heavy = w === 'shotgun' || w === 'hunting' || w === 'dmr';
+      const mx = x + Math.cos(aim) * 28;
+      const my = y + Math.sin(aim) * 28;
+      this.fx.burst(mx, my, '#ffd890', heavy ? 6 : 3, heavy ? 420 : 320, 0.09, 1.6, 'spark', true, aim, 0.5);
+      this.fx.burst(mx, my, '#8a8880', heavy ? 4 : 2, 50, heavy ? 0.9 : 0.6, heavy ? 7 : 5, 'smoke', false, aim, 0.9);
       if (id === this.localId) {
         this.fx.kick(aim, WEAPONS[w].kick);
-        this.bloom = Math.min(1, this.bloom + (w === 'shotgun' ? 0.8 : 0.28));
-        if (w === 'shotgun') this.fx.shake(0.18);
+        // 照準の広がり：連射武器は小さく何度も、単発の重い銃は大きく一度
+        const bloom: Record<WeaponId, number> = { pistol: 0.3, smg: 0.16, rifle: 0.24, shotgun: 0.8, hunting: 0.9, dmr: 0.5 };
+        this.bloom = Math.min(1, this.bloom + bloom[w]);
+        const shake: Partial<Record<WeaponId, number>> = { shotgun: 0.18, hunting: 0.14, dmr: 0.08, rifle: 0.03 };
+        if (shake[w]) this.fx.shake(shake[w]!);
       }
     }
   }
@@ -340,6 +350,7 @@ export class Renderer {
 
     this.fx = fx;
     this.localId = o.localId;
+    for (const p of view.players) this.pingNames.set(p.id, p.name);
     // ヒットストップ中は世界の動き（アニメ・パーティクル）をほぼ止める
     const wdt = fx.hitstop > 0 ? dt * 0.06 : dt;
     fx.hitstop = Math.max(0, fx.hitstop - dt);
@@ -464,9 +475,22 @@ export class Renderer {
     ctx.translate(ox, oy);
     this.drawParticles(fx, true);
     this.drawGlows(view, dark);
-    for (const p of view.players) this.drawPlayerOverlay(p, p.id === o.localId);
+    // 仲間と隣り合うと名前が重なるので、重なる分だけ上にずらして積む
+    {
+      ctx.font = 'bold 12px "Noto Sans JP", "Segoe UI", sans-serif';
+      const placed: { x: number; y: number; w: number }[] = [];
+      for (const p of [...view.players].sort((a, b) => b.y - a.y)) {
+        const label = p.id === o.localId ? `${p.name} (YOU)` : p.name;
+        const lw = ctx.measureText(label).width;
+        let off = p.status === 'down' ? 16 : 0;
+        while (placed.some((q) => Math.abs(q.x - p.x) < (q.w + lw) / 2 + 4 && Math.abs(q.y - (p.y - off)) < 15) && off < 60) off += 15;
+        placed.push({ x: p.x, y: p.y - off, w: lw });
+        this.drawPlayerOverlay(p, p.id === o.localId, p.status === 'down' ? off - 16 : off);
+      }
+    }
     this.drawZombieOverlays(zombiesSeen, dark, me);
-    this.drawPingMarkers(fx);
+    this.drawPingMarkers(fx, me);
+    this.drawReviveRings(view);
     this.drawDropBeacon(view);
     this.drawLandmarks(vx0, vy0, vx1, vy1);
     this.drawPopups(fx);
@@ -1400,7 +1424,7 @@ export class Renderer {
 
   // ---------------- オーバーレイ ----------------
 
-  private drawPlayerOverlay(p: PlayerSnap, isLocal: boolean): void {
+  private drawPlayerOverlay(p: PlayerSnap, isLocal: boolean, nameOff = 0): void {
     const { ctx } = this;
     const color = PLAYER_COLORS[p.id] ?? '#fff';
     const y = p.y - 32;
@@ -1410,9 +1434,11 @@ export class Renderer {
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.8)';
     const label = isLocal ? `${p.name} (YOU)` : p.name;
-    ctx.strokeText(label, p.x, y - 10);
+    // ダウン中は残り時間の丸い表示があるので、名前はその上に出す
+    if (p.status === 'down') nameOff += 16;
+    ctx.strokeText(label, p.x, y - 10 - nameOff);
     ctx.fillStyle = color;
-    ctx.fillText(label, p.x, y - 10);
+    ctx.fillText(label, p.x, y - 10 - nameOff);
 
     if (p.status === 'alive') {
       const w = 32;
@@ -1549,7 +1575,8 @@ export class Renderer {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     if (me && me.status === 'down') {
-      centerCard(ctx, w / 2, h * 0.3, 'DOWN — ダウン中', `味方の救助を待て　残り ${Math.ceil(me.downTimer)} 秒`, '#d0583e', this.time);
+      const rp = me.reviveProgress > 0 ? Math.round((me.reviveProgress / PLAYER.reviveTime) * 100) : 0;
+      centerCard(ctx, w / 2, h * 0.3, 'DOWN — ダウン中', rp > 0 ? `仲間が救助中… ${rp}%　そのまま待て` : `味方の救助を待て　残り ${Math.ceil(me.downTimer)} 秒`, rp > 0 ? '#93d07c' : '#d0583e', this.time);
     } else if (me && me.status === 'dead') {
       centerCard(ctx, w / 2, h * 0.3, 'K.I.A. — 戦闘不能', '仲間が朝（6:00）まで生き延びれば拠点で復帰する', '#8c8872', this.time);
     } else if (!o.panelOpen) {
@@ -1656,6 +1683,48 @@ export class Renderer {
     drawCross();
     ctx.fillStyle = '#fff';
     ctx.fillRect(cx - 1, cy - 1, 2, 2);
+    // 命中・撃破の×印
+    const hm = o.effects.hitMark;
+    if (hm.t > 0) {
+      const k = hm.kill ? hm.t / 0.32 : hm.t / 0.14;
+      const r0 = hm.kill ? 7 : 6;
+      const r1 = r0 + (hm.kill ? 9 : 6) * (0.6 + 0.4 * k);
+      ctx.globalAlpha = Math.min(1, k * 1.6);
+      for (const [col, lw] of [
+        ['rgba(0,0,0,0.6)', 4],
+        [hm.kill ? '#ff5a3c' : '#ffffff', 2],
+      ] as [string, number][]) {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = lw;
+        ctx.beginPath();
+        for (const [sx, sy] of [
+          [1, 1],
+          [1, -1],
+          [-1, 1],
+          [-1, -1],
+        ]) {
+          ctx.moveTo(cx + sx * r0, cy + sy * r0);
+          ctx.lineTo(cx + sx * r1, cy + sy * r1);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // リロードの進み具合（照準のまわりの輪）
+    if (me && held && alive && me.reloadT > 0) {
+      const total = effectiveStats(held.id, held.w).reloadTime * skillMods(me.xp).reloadMul;
+      const f = clamp(1 - me.reloadT / Math.max(0.01, total), 0, 1);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = '#e0a33a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 20, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2);
+      ctx.stroke();
+    }
     if (me && held && alive) {
       ctx.font = `12px ${MONO}`;
       ctx.textAlign = 'left';
@@ -1663,7 +1732,8 @@ export class Renderer {
       const st = effectiveStats(held.id, held.w);
       const mag = held.w.mag;
       const res = countItem(me.bag, st.ammo);
-      ctx.fillStyle = mag === 0 ? '#c06050' : '#e6ebf5';
+      // 残りわずかは黄色、空は赤
+      ctx.fillStyle = mag === 0 ? '#e06050' : mag <= Math.ceil(st.magSize * 0.25) ? '#e0b040' : '#e6ebf5';
       const txt = me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}${held.w.ap ? ' AP' : ''}`;
       // HUD パネルや画面の端に重ならない位置を選ぶ（右下→左下→右上→左上）。どこも重なるなら出さない
       const tw = ctx.measureText(txt).width;
@@ -1794,7 +1864,29 @@ export class Renderer {
   }
 
   /** ピンの目印（世界座標） */
-  private drawPingMarkers(fx: Effects): void {
+  /** ピンを立てた人の名前（id → 名前） */
+  private pingNames = new Map<number, string>();
+
+  /** 蘇生中の仲間：まわりに進み具合の輪と「救助中」 */
+  private drawReviveRings(view: ViewState): void {
+    const { ctx } = this;
+    for (const p of view.players) {
+      if (p.status !== 'down' || p.reviveProgress <= 0) continue;
+      const f = clamp(p.reviveProgress / PLAYER.reviveTime, 0, 1);
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 30, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#93d07c';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 30, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  private drawPingMarkers(fx: Effects, me?: PlayerSnap): void {
     const { ctx } = this;
     for (const p of fx.pings) {
       const col = p.t === 'enemy' ? '#c0573e' : p.t === 'loot' ? '#c9a85a' : (PLAYER_COLORS[p.id] ?? '#fff');
@@ -1819,6 +1911,16 @@ export class Renderer {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(p.t === 'enemy' ? '!' : p.t === 'loot' ? '$' : '▼', p.x, py);
+      // 何のピンか・誰が立てたか・どれくらい離れているか
+      const who = this.pingNames.get(p.id) ?? '';
+      const dist = me ? `${Math.round(Math.hypot(p.x - me.x, p.y - me.y) / TILE)}m` : '';
+      const label = `${p.t === 'enemy' ? '敵！' : p.t === 'loot' ? '物資' : 'ここへ'}${who ? `（${who}）` : ''} ${dist}`;
+      ctx.font = `bold 11px ${UI}`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+      ctx.strokeText(label, p.x, py - 18);
+      ctx.fillStyle = col;
+      ctx.fillText(label, p.x, py - 18);
       ctx.globalAlpha = 1;
     }
   }
@@ -2137,6 +2239,8 @@ export class Renderer {
     if (hungry) warn('空腹', '#e0a33a');
     if (tired) warn('息切れ', '#7fa2bf');
     if ((me.tox ?? 0) > 50) warn('汚染', '#c8d050');
+    // バッグがほぼ満杯：これ以上は拾えない＝帰還の合図
+    if (me.bag.filter((s) => s).length >= me.bag.length - 1) warn('バッグ満杯', '#93b77c');
 
     // 数値の列は幅を固定して右揃え（バーの長さはどの行も同じ）
     const VAL_W = 46;

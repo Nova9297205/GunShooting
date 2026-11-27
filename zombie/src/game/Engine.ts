@@ -72,6 +72,7 @@ import {
   removeItem,
   WEAPON_STATS,
   type WeaponId,
+  heldWeapon,
 } from './items';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
 import { type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
@@ -186,13 +187,14 @@ export function inBase(x: number, y: number): boolean {
 // ---------------- 物資テーブル [アイテム, 重み, 最小, 最大] ----------------
 type LootRow = [ItemId | 'weapon' | 'attach', number, number, number];
 const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
-  shelf: [['can', 5, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1, 1, 1], ['ammo9', 1.2, 4, 10], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
-  fridge: [['can', 6, 1, 3], ['mre', 1, 1, 1]],
+  // 序盤の詰まりを減らす：棚・机・木箱・車からも少し弾と包帯が出る。食料は出すぎないように控えめ
+  shelf: [['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
+  fridge: [['can', 4.5, 1, 2], ['mre', 1, 1, 1]],
   cabinet: [['bandage', 5, 1, 2], ['chem', 4, 1, 2], ['medkit', 1.2, 1, 1], ['cloth', 2, 1, 2], ['stim', 0.35, 1, 1]],
   locker: [['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
-  desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2, 3, 8], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1]],
-  crate: [['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 1, 1, 1], ['tools', 0.35, 1, 1]],
-  car: [['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 1, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1]],
+  desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
+  crate: [['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
+  car: [['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
   wcase: [['ammo762', 4, 8, 20], ['ammo9', 3, 10, 20], ['shells', 3, 4, 8], ['weapon', 2, 1, 1], ['attach', 1.5, 1, 1], ['parts', 2, 1, 2], ['ammo762ap', 1, 5, 12], ['slug', 0.8, 3, 6]],
   mcrate: [['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
   box: [['can', 3, 1, 2], ['bandage', 2, 1, 1], ['ammo9', 2, 6, 10], ['cloth', 1, 1, 2]],
@@ -226,6 +228,13 @@ const BASE_ZOMBIE_WEIGHTS: Record<number, Partial<Record<ZombieType, number>>> =
   3: { walker: 12, runner: 20, brute: 18, soldier: 50 },
   4: { walker: 8, runner: 22, brute: 25, soldier: 45 },
 };
+
+/** 仲間に手渡しできる距離(px) */
+export const GIVE_RANGE = 220;
+
+/** 反動（ばらつき）の戻る速さ／溜まる上限：武器の個性 */
+const HEAT_RECOVER: Record<WeaponId, number> = { pistol: 7, smg: 6.5, rifle: 3.6, shotgun: 4, hunting: 3, dmr: 4.2 };
+const HEAT_MAX: Record<WeaponId, number> = { pistol: 0.2, smg: 0.24, rifle: 0.34, shotgun: 0.3, hunting: 0.3, dmr: 0.26 };
 
 // ---------------- 小さな二分ヒープ（Dijkstra 用） ----------------
 class MinHeap {
@@ -449,7 +458,7 @@ export class HostSimulation {
     p.sec = { id: 'pistol', n: 1, w: { mag: WEAPON_STATS.pistol.magSize } };
     p.prim = null;
     p.bag = emptyBag();
-    addItem(p.bag, 'ammo9', 24);
+    addItem(p.bag, 'ammo9', 30);
     addItem(p.bag, 'bandage', 2);
     addItem(p.bag, 'can', 1);
     p.tool = Tool.Secondary;
@@ -490,6 +499,20 @@ export class HostSimulation {
 
   minute(): number {
     return cycleToMinute(this.cycleT);
+  }
+
+  private duskWarnedDay = 0;
+  /** 夕方（18:30）に、拠点の外にいる人へ帰還の判断材料を知らせる */
+  private updateReturnAdvice(): void {
+    const m = this.minute();
+    if (m < 18.5 * 60 || m > 20 * 60 || this.duskWarnedDay === this.day) return;
+    this.duskWarnedDay = this.day;
+    for (const p of this.players) {
+      if (p.status !== 'alive' || inBase(p.x, p.y)) continue;
+      const d = Math.round(Math.hypot(p.x / TILE - BASE_TX, p.y / TILE - BASE_TY));
+      const secs = Math.round((d * TILE) / PLAYER.speed);
+      this.events.push({ k: 'feed', cat: 'danger', t: `日没まで約1時間：拠点まで ${d}m（走って約${secs}秒）。夜は感染体が速く、多くなる`, c: '#e0a33a', id: p.id, snd: 'alarm' });
+    }
   }
 
   /** 開始時に送るオブジェクト：ゲストはシードから同じ世界を再生成するので、生成直後から変化したものだけ（通常は空） */
@@ -598,6 +621,7 @@ export class HostSimulation {
     this.time += dt;
     this.tick++;
     this.updateClock(dt);
+    this.updateReturnAdvice();
     for (const p of this.players) this.updatePlayer(p, dt);
     this.updateRevive(dt);
     this.flowTimer -= dt;
@@ -716,8 +740,12 @@ export class HostSimulation {
     }
     p.queue.length = 0;
     p.warnCd = Math.max(0, p.warnCd - dt);
-    // 反動は時間で戻る
-    p.heat = Math.max(0, p.heat - p.heat * 5 * dt - 0.02 * dt);
+    // 反動は時間で戻る（武器ごとに戻り方が違う：ハンドガン・SMGは素早く、ライフルはゆっくり）
+    {
+      const hw = heldWeapon(p);
+      const rec = hw ? HEAT_RECOVER[hw.id as WeaponId] : 5;
+      p.heat = Math.max(0, p.heat - p.heat * rec * dt - 0.02 * dt);
+    }
     if (p.stimT > 0) {
       p.stimT -= dt;
       if (p.stimT <= 0) this.applySkills(p);
@@ -895,7 +923,7 @@ export class HostSimulation {
         });
       }
       // 反動：連射するほどばらつきが増える（グリップ・スキルで軽減）
-      p.heat = Math.min(0.35, p.heat + w.recoil * sk.recoilMul);
+      p.heat = Math.min(HEAT_MAX[slot.id as WeaponId] ?? 0.35, p.heat + w.recoil * sk.recoilMul);
       slot.w.mag--;
       p.shots++;
       p.fireCd += w.fireInterval;
@@ -1144,7 +1172,7 @@ export class HostSimulation {
       }
       case 'give': {
         // 近くの仲間に直接渡す：give:<相手のID>:<バッグの位置>
-        const to = this.players.find((q) => q.id === n(a) && q !== p && q.status === 'alive' && Math.hypot(q.x - p.x, q.y - p.y) < 160);
+        const to = this.players.find((q) => q.id === n(a) && q !== p && q.status === 'alive' && Math.hypot(q.x - p.x, q.y - p.y) < GIVE_RANGE);
         const s = p.bag[n(b)];
         if (!to || !s) return this.pop(p, '仲間が近くにいない', '#c87a6a');
         const left = addItem(to.bag, s.id, s.n, s.w);

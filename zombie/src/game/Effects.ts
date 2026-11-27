@@ -91,6 +91,8 @@ export class Effects {
   hurt = 0;
   /** ヒットストップの残り秒（見た目だけ一瞬止める） */
   hitstop = 0;
+  /** 自分の弾が当たった／倒したときの照準の×印（残り時間・撃破か） */
+  hitMark = { t: 0, kill: false };
   /** 射撃の反動によるカメラのずれ */
   kickX = 0;
   kickY = 0;
@@ -237,6 +239,8 @@ export class Effects {
   }
 
   update(dt: number): void {
+    this.hitMark.t = Math.max(0, this.hitMark.t - dt);
+    if (this.hitMark.t <= 0) this.hitMark.kill = false;
     this.trauma = Math.max(0, this.trauma - dt * 1.8);
     this.hurt = Math.max(0, this.hurt - dt * 2.5);
     for (const p of this.particles) {
@@ -289,6 +293,7 @@ export class Effects {
     switch (ev.k) {
       case 'hit':
         this.bloodSpray(ev.x, ev.y, ev.a, ev.m ? 1.8 : 1);
+        if (ev.o === localId && !this.hitMark.kill) this.hitMark = { t: 0.14, kill: false };
         if (ev.m) {
           this.burst(ev.x, ev.y, '#ffffff', 4, 200, 0.15, 2);
           if (ev.o === localId) {
@@ -325,7 +330,10 @@ export class Effects {
           maxLife: 22,
         });
         if (this.corpses.length > MAX_CORPSES) this.corpses.shift();
-        if (ev.o === localId) this.hitstop = Math.max(this.hitstop, big ? 0.09 : 0.05);
+        if (ev.o === localId) {
+          this.hitstop = Math.max(this.hitstop, big ? 0.09 : 0.05);
+          this.hitMark = { t: 0.32, kill: true };
+        }
         this.shakeAt(ev.x, ev.y, big ? 0.3 : 0.12);
         break;
       }

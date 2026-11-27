@@ -50,7 +50,7 @@ export const PLAYER = {
   interactRange: 62,
   buildRange: 170,
   /** 空腹ゲージが 100→0 になるまでの秒数 */
-  hungerSeconds: 260,
+  hungerSeconds: 300,
   /** 空腹0のときのHP減少/秒 */
   starveDps: 1.5,
   foodValue: 40,

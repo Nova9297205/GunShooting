@@ -24,7 +24,7 @@ import { audio } from './Audio';
 import { CraftMenu } from '../ui/CraftMenu';
 import { InventoryPanel } from '../ui/InventoryPanel';
 import { AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
-import { CONTAINER_KINDS, STORAGE_KINDS } from './Engine';
+import { CONTAINER_KINDS, GIVE_RANGE, STORAGE_KINDS } from './Engine';
 import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon } from './items';
 import { loadProfile, saveProfile } from './progression';
 import { Effects } from './Effects';
@@ -606,7 +606,7 @@ export class GameSession {
       mapOpen: this.mapOpen,
       panelOpen: this.craftMenu.open || this.invPanel.open,
       reviveHint,
-      interactHint: me && me.status === 'alive' ? this.interactHint(me) : null,
+      interactHint: me && me.status === 'alive' ? (this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
       muted: audio.settings.muted,
     });
@@ -728,8 +728,19 @@ export class GameSession {
       cont: me.viewing && view.cont[me.viewing] ? { id: me.viewing, name: CONTAINER_NAMES[ob?.kind ?? 'bag'] ?? '入れ物', slots: view.cont[me.viewing] } : null,
       storage: view.storage ?? this.storage,
       coop: view.players.length > 1,
-      allies: view.players.filter((p) => p.id !== me.id && p.status === 'alive' && Math.hypot(p.x - me.x, p.y - me.y) < 160).map((p) => ({ id: p.id, name: p.name })),
+      allies: view.players.filter((p) => p.id !== me.id && p.status === 'alive' && Math.hypot(p.x - me.x, p.y - me.y) < GIVE_RANGE).map((p) => ({ id: p.id, name: p.name })),
     });
+  }
+
+  private nearAllies = new Set<number>();
+  private giveHintT = 0;
+  /** 仲間がそばに来たら数秒だけ、手渡しの方法を案内する */
+  private giveHint(me: PlayerSnap, view: ViewState, dt: number): string | null {
+    this.giveHintT = Math.max(0, this.giveHintT - dt);
+    const near = new Set(view.players.filter((p) => p.id !== me.id && p.status === 'alive' && Math.hypot(p.x - me.x, p.y - me.y) < GIVE_RANGE).map((p) => p.id));
+    for (const id of near) if (!this.nearAllies.has(id)) this.giveHintT = 4;
+    this.nearAllies = near;
+    return this.giveHintT > 0 && near.size ? '[Tab] 持ち物 → 手渡す相手を選んでアイテムをクリック' : null;
   }
 
   /** F で操作される対象（ホストの interact と同じ選び方） */

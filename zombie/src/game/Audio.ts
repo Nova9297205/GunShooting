@@ -567,12 +567,16 @@ export class AudioManager {
       case 'hit':
         if (ev.m) this.meleeHit(ev.x, ev.y);
         else this.fleshHit(ev.x, ev.y);
+        // 自分の弾が当たった：小さく高い命中音（ヒットマーカー）
+        if (ev.o === localId && !ev.m && this.gate('hitconf', 0.03)) this.tone({ type: 'square', f: 1850, dur: 0.035, g: 0.045, lp: 4000 });
         break;
       case 'wall':
         this.ricochet(ev.x, ev.y);
         break;
       case 'kill':
         this.zombieDie(ev.x, ev.y, ev.r >= ZOMBIE.brute.radius);
+        // 自分が倒した：低く短い「手応え」の音
+        if (ev.o === localId && this.gate('killconf', 0.05)) this.tone({ type: 'triangle', f: 220, f2: 110, dur: 0.12, g: 0.14 });
         break;
       case 'phit':
         if (ev.id === localId) this.hurt();

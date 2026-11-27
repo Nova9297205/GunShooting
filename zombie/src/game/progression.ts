@@ -17,7 +17,8 @@ export const MAX_SKILL_LV = 10;
 
 /** レベル n に必要な累計経験値 */
 export function xpForLevel(n: number): number {
-  return Math.round(40 * n + 12 * n * n);
+  // 序盤は早く上がり（Lv1 は入れ物5〜6個ほど）、終盤ほどじっくり
+  return Math.round(30 * n + 10 * n * n);
 }
 
 export function levelOf(xp: number): number {
