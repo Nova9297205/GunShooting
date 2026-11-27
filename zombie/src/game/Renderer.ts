@@ -44,6 +44,7 @@ import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
 import { type Glyphs, padText } from '../ui/Gamepad';
+import { TUT_ALL, TUT_STEPS } from './tutorial';
 import { ATTACHMENTS, capacityOf, CONTAINER_NAMES, countItem, loadKg, QUALITY, weaponLabel, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -472,7 +473,7 @@ export class Renderer {
     ctx.font = `bold 12px ${UI}`;
     ctx.fillStyle = '#e0a33a';
     ctx.fillText(
-      this.glyphs ? padText('建設モード — {LB}/{RB} 選ぶ・右スティックで場所・{RT} 建てる・{X} 撤去・{A} 修理・{DOWN} 終了', this.glyphs) : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜9,0]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
+      this.glyphs ? padText('建設モード — {LB}/{RB} 選ぶ・右スティックで場所・{RT} 建てる・{@reload} 撤去・{@use} 修理・{@build} 終了', this.glyphs) : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜9,0]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
       this.w / 2,
       y0 - 12,
     );
@@ -534,7 +535,8 @@ export class Renderer {
     this.dpr = Math.min(this.baseDpr, 1.5) * this.renderScale;
     this.w = this.root ? this.root.clientWidth : window.innerWidth;
     this.h = this.root ? this.root.clientHeight : window.innerHeight;
-    this.uiScale = clamp(Math.min(this.w / 1280, this.h / 760), 0.55, 1);
+    // 画面分割の枠は小さいので縮めすぎない（文字が読めなくなる）。入りきらない分は HUD を簡略表示にする
+    this.uiScale = clamp(Math.min(this.w / 1280, this.h / 760), this.root ? 0.8 : 0.55, 1);
     this.canvas.width = Math.floor(this.w * this.dpr);
     this.canvas.height = Math.floor(this.h * this.dpr);
     this.hudCanvas.width = Math.floor(this.w * this.baseDpr);
@@ -2190,7 +2192,11 @@ export class Renderer {
       if (me) this.drawSelfPanel(view, me);
       this.drawHotbar(o, view);
       this.drawMinimap(view, o.localId);
-      if (me && !o.mapOpen) this.drawJobs(view, me, !!o.touch);
+      this.tutH = 0;
+      // 縦が足りない枠（画面分割）では、はじめの一日・依頼を 1 行ずつに
+      const slim = !!o.touch || this.h < 600;
+      if (me && !o.mapOpen) this.drawTutorial(view, me, slim);
+      if (me && !o.mapOpen) this.drawJobs(view, me, slim);
       // モード表示
       ctx.font = `10px ${MONO}`;
       ctx.textAlign = 'left';
@@ -2799,7 +2805,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = `9px ${UI}`;
     ctx.fillStyle = '#6f6c5a';
-    ctx.fillText(this.glyphs ? padText('{A} 調べる ・ {START} 持ち物 ・ {X} 装填 ・ {LEFT} 作業台 ・ {DOWN} 建設 ・ {BACK} 地図', this.glyphs) : 'F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
+    ctx.fillText(this.glyphs ? padText('{@use} 調べる ・ {@inv} 持ち物 ・ {@reload} 装填 ・ {@craft} 作業台 ・ {@build} 建設 ・ {@map} 地図', this.glyphs) : 'F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
     void view;
   }
 
@@ -2811,8 +2817,11 @@ export class Renderer {
     const avail = w - 2 * 292;
     const size = Math.max(38, Math.min(54, Math.floor((avail - gap * (SLOTS.length - 1)) / SLOTS.length)));
     const total = SLOTS.length * size + (SLOTS.length - 1) * gap;
-    const x0 = Math.round(w / 2 - total / 2);
+    // 狭い枠（画面分割）では、左下のステータスと重ならないよう右へ寄せる
+    const x0 = Math.round(Math.max(w / 2 - total / 2, Math.min(286, w - total - 12)));
     const y = h - size - 14;
+    this.hotbarCX = x0 + total / 2;
+    this.hotbarTop = y;
     SLOTS.forEach((t, i) => {
       const x = x0 + i * (size + gap);
       const sel = o.localTool === t.id;
@@ -2978,6 +2987,71 @@ export class Renderer {
   }
 
   /** 無線の依頼の一覧（画面右・ミニマップの下）。タッチ端末では一番近い依頼だけを上部に */
+  /** はじめの一日のパネルの高さ（依頼パネルをその下にずらす） */
+  private tutH = 0;
+  /** 武器欄の中央と上端（狭い枠では 1 行の案内をその上に出す） */
+  private hotbarCX = 0;
+  private hotbarTop = 0;
+  /** 1 行表示の置き場所：スマホは上部中央、画面分割の枠は武器欄の上 */
+  private slimPos(row: number): { cx: number; y: number } {
+    if (this.touchUI || this.h >= 600) return { cx: this.w / 2, y: row === 0 ? 58 : 82 };
+    return { cx: this.hotbarCX, y: this.hotbarTop - 56 - row * 24 };
+  }
+  /** はじめの一日：最初の数日、やることのチェックリスト。今やると良い 1 つに「どうやるか」を添える */
+  private drawTutorial(view: ViewState, me: PlayerSnap, touch: boolean): void {
+    const done = me.tut;
+    if (done === undefined || done === TUT_ALL || view.day > 4) return;
+    const { ctx } = this;
+    const next = TUT_STEPS.find((s) => !(done & s.bit));
+    if (!next) return;
+    const n = TUT_STEPS.filter((s) => done & s.bit).length;
+    if (touch) {
+      const t = `はじめの一日 ${n}/${TUT_STEPS.length}：${next.title} — ${this.touchUI ? next.touch : this.kw(next.how)}`;
+      ctx.font = `bold 11px ${UI}`;
+      const tw = ctx.measureText(t).width + 16;
+      const { cx, y } = this.slimPos(1);
+      const x = cx - tw / 2;
+      panel(ctx, x, y, tw, 20);
+      ctx.fillStyle = '#e0c060';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(t, cx, y + 10.5);
+      return;
+    }
+    const pw = 236;
+    const x = this.w - pw - 12;
+    const y = this.miniBottom + 10;
+    const rowH = 16;
+    const ph = 22 + TUT_STEPS.length * rowH + 18;
+    panel(ctx, x, y, pw, ph);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#e0c060';
+    ctx.fillText('// はじめの一日', x + 10, y + 11);
+    ctx.textAlign = 'right';
+    ctx.font = `bold 10px ${UI}`;
+    ctx.fillStyle = '#bdb79e';
+    ctx.fillText(`${n}/${TUT_STEPS.length}`, x + pw - 10, y + 11);
+    TUT_STEPS.forEach((s, i) => {
+      const ry = y + 22 + i * rowH + 6;
+      const ok = !!(done & s.bit);
+      const cur = s === next;
+      ctx.textAlign = 'left';
+      ctx.font = `${cur ? 'bold ' : ''}11px ${UI}`;
+      ctx.fillStyle = ok ? '#93b77c' : cur ? '#f0e6c0' : '#9c967c';
+      ctx.globalAlpha = ok ? 0.6 : 1;
+      ctx.fillText(`${ok ? '✓' : cur ? '▶' : '・'} ${s.title}`, x + 10, ry);
+      ctx.globalAlpha = 1;
+    });
+    let how = this.kw(next.how);
+    ctx.font = `10px ${UI}`;
+    while (ctx.measureText(how).width > pw - 20 && how.length > 4) how = how.slice(0, -2) + '…';
+    ctx.fillStyle = '#e0c060';
+    ctx.fillText(how, x + 10, y + 22 + TUT_STEPS.length * rowH + 7);
+    this.tutH = ph + 8;
+  }
+
   private drawJobs(view: ViewState, me: PlayerSnap, touch: boolean): void {
     const jobs = view.jobs ?? [];
     if (!jobs.length) return;
@@ -3000,18 +3074,18 @@ export class Renderer {
       const t = `依頼${i + 1} ${'★'.repeat(j.tier)} ${ready ? '無線で報告' : what(j)} ・ ${distTo(j)}m　（残り${open.length}件）`;
       ctx.font = `bold 11px ${UI}`;
       const tw = ctx.measureText(t).width + 16;
-      const x = this.w / 2 - tw / 2;
-      const y = 58;
+      const { cx, y } = this.slimPos(0);
+      const x = cx - tw / 2;
       panel(ctx, x, y, tw, 20);
       ctx.fillStyle = '#cfe8f6';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(t, this.w / 2, y + 10.5);
+      ctx.fillText(t, cx, y + 10.5);
       return;
     }
     const pw = 236;
     const x = this.w - pw - 12;
-    const y = this.miniBottom + 10;
+    const y = this.miniBottom + 10 + this.tutH;
     const rowH = 30;
     const ph = 22 + jobs.length * rowH + 4;
     panel(ctx, x, y, pw, ph);
@@ -3277,8 +3351,13 @@ export class Renderer {
   private drawCompass(view: ViewState, me: PlayerSnap | undefined, localId: number): void {
     if (!me) return;
     const { ctx, w } = this;
-    const cw = Math.max(260, Math.min(460, w - 640));
-    const x0 = Math.round(w / 2 - cw / 2);
+    let cw = Math.max(260, Math.min(460, w - 640));
+    let x0 = Math.round(w / 2 - cw / 2);
+    // 狭い枠：左上の仲間一覧と右上の時計のあいだに収める
+    if (w < 1000) {
+      x0 = 246;
+      cw = Math.max(180, w - 320 - x0);
+    }
     const y0 = 8;
     const hh = 30;
     const FOV = Math.PI * 0.62; // 片側の表示角

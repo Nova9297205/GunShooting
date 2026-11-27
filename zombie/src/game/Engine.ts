@@ -96,6 +96,7 @@ import {
 } from './items';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
 import { type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
+import { TUT_ALL, TUT_BUILD, TUT_CRAFT, TUT_JOB, TUT_REWARD, TUT_SEARCH, TUT_SLEEP, TUT_STEPS } from './tutorial';
 import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
 
 interface SimPlayer extends PlayerSnap {
@@ -313,7 +314,7 @@ export interface SaveData {
     tool: number;
     kills: number;
     xp: number[];
-    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number; pack?: ItemId; home?: { x: number; y: number } };
+    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number; pack?: ItemId; home?: { x: number; y: number }; tut?: number };
   }[];
   extra?: Record<string, unknown>;
 }
@@ -478,6 +479,7 @@ export class HostSimulation {
         hp: PLAYER.maxHp,
         maxHp: PLAYER.maxHp,
         hunger: 100,
+        tut: 0,
         status: 'alive',
         downTimer: 0,
         reviveProgress: 0,
@@ -534,6 +536,9 @@ export class HostSimulation {
     this.newJobs(true);
     this.spawnVehicles();
     this.setupBase(lobby.length);
+    // 最初の夜にすぐ何か建てられるよう、倉庫に少しだけ材料（焚き火・たいまつ・釘の罠が 1 つずつ作れる程度）
+    addItem(this.storage.shared, 'scrap', 8);
+    addItem(this.storage.shared, 'cloth', 4);
     this.newSites(true);
     this.dayTip();
     // 初日の天候はランダム（霧で始まることもある）
@@ -659,7 +664,7 @@ export class HostSimulation {
         tool: p.tool,
         kills: p.kills,
         xp: p.xp,
-        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0, pack: p.pack, home: p.home },
+        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0, pack: p.pack, home: p.home, tut: p.tut ?? 0 },
       })),
       extra: this.saveExtra(),
     };
@@ -711,7 +716,8 @@ export class HostSimulation {
       if (!s) continue;
       Object.assign(p, { x: s.x, y: s.y, hp: s.hp, maxHp: s.maxHp, hunger: s.hunger, tox: s.tox, bag: s.bag, prim: s.prim, sec: s.sec, tool: s.tool, kills: s.kills });
       p.xp = p.xp.map((v, i) => Math.max(v, s.xp[i] ?? 0));
-      if (s.body) Object.assign(p, s.body);
+      p.tut = TUT_ALL;
+      if (s.body) Object.assign(p, { tut: TUT_ALL, ...s.body });
       p.lv = p.xp.map(levelOf);
       sim.applySkills(p);
       // ダウン・戦闘不能のまま保存されていたら、拠点で起き上がった状態から
@@ -753,6 +759,7 @@ export class HostSimulation {
     if (p.bleed) return this.pop(p, '出血を止めてから眠ろう（包帯）', '#e0583e');
     if (this.zombies.some((z) => !z.dead && z.state === 'chase' && Math.hypot(z.x - p.x, z.y - p.y) < 700)) return this.pop(p, '近くに敵がいて眠れない', '#e0583e');
     p.sleeping = true;
+    this.tutMark(p, TUT_SLEEP);
     // 眠った寝床が、戦闘不能から朝に戻る場所
     if (bed) {
       const free = [[0, 1], [1, 0], [-1, 0], [0, -1]].find(([dx, dy]) => !this.world.solid(bed.tx + dx, bed.ty + dy));
@@ -811,7 +818,7 @@ export class HostSimulation {
     const car = this.vehicles[0];
     const carDir = car ? `${directionName(car.x / TILE, car.y / TILE)} ${Math.round(Math.hypot(car.x / TILE - BASE_TX, car.y / TILE - BASE_TY))}m の所` : '近く';
     const tips: Record<number, string> = {
-      1: '今日の目標：無線の依頼を1つ達成して、日が暮れる前に拠点へ。夜は拠点で [V] 建設・かまどで料理・ベッドで眠る',
+      1: '右上の「はじめの一日」を順にこなそう。日が暮れる前（18:00ごろ）には拠点へ戻ること',
       2: `拠点の${carDir}に壊れたピックアップがある。鉄くず6・武器パーツ2で直すと、遠くの依頼も楽になる`,
       3: '作業台を Lv2 にすると鉄板バリケードが建てられる。明日の夜は大群が来る — 門を塞いで備えよう',
       4: '今夜は大群の夜。門（4か所）をバリケードで塞ぎ、釘の罠を内側に。攻撃された所は [F] で修理',
@@ -890,6 +897,7 @@ export class HostSimulation {
         ...(p.sleeping ? { sleeping: true } : {}),
         ...(p.veh !== undefined ? { veh: p.veh, seat: p.seat } : {}),
         ...(p.pack ? { pack: p.pack } : {}),
+        ...((p.tut ?? 0) !== TUT_ALL ? { tut: p.tut ?? 0 } : {}),
         ...((p.rested ?? 0) > 0 ? { rested: Math.ceil(p.rested ?? 0) } : {}),
         x: r1(p.x),
         y: r1(p.y),
@@ -1311,6 +1319,23 @@ export class HostSimulation {
         this.makeNoise(p.x, p.y, 420, false);
         this.pop(p, 'ゴホッ…', '#c0d060');
       }
+    }
+  }
+
+  /** はじめの一日：ステップを達成（初めての時だけ知らせる。全部そろったら、ごほうび） */
+  private tutMark(p: SimPlayer, bit: number): void {
+    const cur = p.tut ?? 0;
+    if (cur & bit) return;
+    p.tut = cur | bit;
+    const step = TUT_STEPS.find((x) => x.bit === bit);
+    const left = TUT_STEPS.filter((x) => !(p.tut! & x.bit)).length;
+    if (step) this.events.push({ k: 'feed', cat: 'up', t: `✓ はじめの一日：${step.title}${left ? `（あと ${left}）` : ''}`, c: '#c9e08a', id: p.id });
+    if (p.tut === TUT_ALL) {
+      for (const [id, n] of TUT_REWARD) {
+        const rest = addItem(p.bag, id as ItemId, n);
+        if (rest > 0) addItem(this.storage.shared, id as ItemId, rest);
+      }
+      this.events.push({ k: 'feed', cat: 'up', t: `はじめの一日を達成！ ごほうび：包帯×2・9mm弾×24・缶詰×2。ここからは自由に生き延びよう`, c: '#e0c060', id: p.id, snd: 'day' });
     }
   }
 
@@ -2342,6 +2367,7 @@ export class HostSimulation {
 
   private completeJob(j: Job, by: SimPlayer): void {
     j.done = true;
+    this.tutMark(by, TUT_JOB);
     const lvBefore = radioLevel(this.radioDone);
     this.radioDone++;
     const lv = radioLevel(this.radioDone);
@@ -2395,6 +2421,7 @@ export class HostSimulation {
     this.changed.add(o.id);
     this.flowTimer = Math.min(this.flowTimer, 0.1);
     this.events.push({ k: 'built', x: (tx + 0.5) * TILE, y: (ty + 0.5) * TILE, kind: def.kind, id: p.id });
+    this.tutMark(p, TUT_BUILD);
     this.gainXp(p, 2, 2);
     this.makeNoise((tx + 0.5) * TILE, (ty + 0.5) * TILE, 120, false);
   }
@@ -2490,6 +2517,7 @@ export class HostSimulation {
       if (bag) addItem(this.contents.get(bag.id)!, r.out.id, left);
     }
     this.pop(p, `${r.name} を作成`, '#c9a85a', 'craft');
+    this.tutMark(p, TUT_CRAFT);
     this.gainXp(p, 2, 1);
   }
 
@@ -2639,6 +2667,7 @@ export class HostSimulation {
       o.regrowT = CYCLE_SECONDS * (2 + Math.random());
       this.changed.add(o.id);
       this.events.push({ k: 'search', id: p.id, x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, done: true });
+      this.tutMark(p, TUT_SEARCH);
     }
     p.viewing = o.id;
   }
@@ -2654,6 +2683,8 @@ export class HostSimulation {
   private rollQ(tier: number, bonus = 0): number {
     const r = Math.random();
     const t = Math.min(4, tier + bonus);
+    // 最も危険な地区（と補給物資）だけ、ごくまれに伝説
+    if (t >= 4 && r < 0.008) return 4;
     if (r < 0.01 + t * 0.012) return 4 <= t + 1 ? 3 : 2;
     if (r < 0.05 + t * 0.04) return 2;
     if (r < 0.25 + t * 0.06) return 1;

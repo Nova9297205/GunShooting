@@ -47,12 +47,44 @@ function shortName(id: string): string {
   return s || id || 'コントローラー';
 }
 
-/** 設定：デッドゾーン（0.05〜0.35）とエイム補助の強さ（0=オフ〜3=強） */
-export const padPrefs = { dead: DEAD, assist: 2 };
+/** ボタン番号 → 表記の名前（Glyphs のキー） */
+export const BTN_NAME = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'BACK', 'START', 'L3', 'R3', 'UP', 'DOWN', 'LEFT', 'RIGHT'] as const;
+/** 割り当てを変えられるボタン（トリガー・LB/RB はメニューのタブ切り替えや射撃に使うので固定） */
+export const REMAPPABLE: number[] = [PAD.A, PAD.B, PAD.X, PAD.Y, PAD.BACK, PAD.START, PAD.L3, PAD.R3, PAD.UP, PAD.DOWN, PAD.LEFT, PAD.RIGHT];
+
+/** ゲーム中の操作（ボタンの割り当てを変えられる）。key は案内文のキー表記 [F] など */
+export const PAD_ACTIONS = [
+  { id: 'use', label: '調べる・乗る・眠る', key: 'F', def: PAD.A },
+  { id: 'dash', label: 'ダッシュ', key: '', def: PAD.B },
+  { id: 'reload', label: 'リロード（建設中は撤去）', key: 'R', def: PAD.X },
+  { id: 'next', label: '次の武器', key: '', def: PAD.Y },
+  { id: 'inv', label: '持ち物', key: 'Tab', def: PAD.START },
+  { id: 'map', label: '地図', key: 'B', def: PAD.BACK },
+  { id: 'eat', label: '食事', key: 'Q', def: PAD.L3 },
+  { id: 'heal', label: '回復', key: 'H', def: PAD.R3 },
+  { id: 'ping', label: 'ピン', key: 'G', def: PAD.UP },
+  { id: 'build', label: '建設モード', key: 'V', def: PAD.DOWN },
+  { id: 'craft', label: '作業台', key: 'C', def: PAD.LEFT },
+  { id: 'ammo', label: '弾種の切り替え', key: 'T', def: PAD.RIGHT },
+] as const;
+export type PadAction = (typeof PAD_ACTIONS)[number]['id'];
+
+/**
+ * 設定：デッドゾーン（0.05〜0.35）・エイム補助の強さ（0=オフ〜3=強）・
+ * ボタンの割り当て（変えた物だけ）・長押し操作を「押すたびに切り替え」にするか
+ */
+export const padPrefs = { dead: DEAD, assist: 2, map: {} as Partial<Record<PadAction, number>>, toggle: false };
 try {
   const v = JSON.parse(localStorage.getItem('dn2d.padprefs') || '{}');
   if (typeof v.dead === 'number') padPrefs.dead = Math.max(0.05, Math.min(0.35, v.dead));
   if (typeof v.assist === 'number') padPrefs.assist = Math.max(0, Math.min(3, Math.round(v.assist)));
+  if (typeof v.toggle === 'boolean') padPrefs.toggle = v.toggle;
+  if (v.map && typeof v.map === 'object') {
+    for (const a of PAD_ACTIONS) {
+      const b = v.map[a.id];
+      if (typeof b === 'number' && REMAPPABLE.includes(b)) padPrefs.map[a.id] = b;
+    }
+  }
 } catch {
   /* 既定値 */
 }
@@ -62,6 +94,22 @@ export function savePadPrefs(): void {
   } catch {
     /* 無視 */
   }
+}
+
+/** その操作に割り当てたボタン番号 */
+export function padBtn(id: PadAction): number {
+  return padPrefs.map[id] ?? PAD_ACTIONS.find((a) => a.id === id)!.def;
+}
+
+/** 割り当てを変える。すでにそのボタンを使っている操作とは入れ替える */
+export function remapPad(id: PadAction, btn: number): void {
+  if (!REMAPPABLE.includes(btn)) return;
+  const old = padBtn(id);
+  const other = PAD_ACTIONS.find((a) => a.id !== id && padBtn(a.id) === btn);
+  padPrefs.map[id] = btn;
+  if (other) padPrefs.map[other.id] = old;
+  for (const a of PAD_ACTIONS) if (padPrefs.map[a.id] === a.def) delete padPrefs.map[a.id];
+  savePadPrefs();
 }
 
 /**
@@ -84,18 +132,12 @@ export function glyphsFor(id: string | undefined): Glyphs {
   return id && /054c|dualsense|dualshock|playstation|ps4|ps5/i.test(id) ? PS : XBOX;
 }
 /** キーボード・マウスの案内文を、コントローラーのボタン名に置き換える */
-const KB2PAD: [RegExp, string][] = [
-  [/\[F\]/g, '{A}'],
-  [/\[H\]/g, '{R3}'],
-  [/\[Q\]/g, '{L3}'],
-  [/\[E\] ?長押し/g, '{LT} 長押し'],
-  [/\[V\]/g, '{DOWN}'],
-  [/\[C\]/g, '{LEFT}'],
-  [/\[B\]/g, '{BACK}'],
-  [/\[G\]/g, '{UP}'],
-  [/\[T\]/g, '{RIGHT}'],
-  [/\[R\]/g, '{X}'],
-  [/\[Tab\]/g, '{START}'],
+/** キー表記 → ボタン（ゲーム中の操作は、いまの割り当てに合わせる） */
+function kb2pad(): [RegExp, string][] {
+  const act = (id: PadAction): string => `{${BTN_NAME[padBtn(id)]}}`;
+  return [
+  ...PAD_ACTIONS.filter((a) => a.key).map((a): [RegExp, string] => [new RegExp(`\\[${a.key}\\]`, 'g'), act(a.id)]),
+  [/\[E\] ?長押し/g, padPrefs.toggle ? '{LT} で切り替え' : '{LT} 長押し'],
   [/\[Esc\]/g, '{B}'],
   [/\[1〜6\]\/ホイール/g, '{LB}/{RB}'],
   [/移動キー/g, '左スティック'],
@@ -103,10 +145,13 @@ const KB2PAD: [RegExp, string][] = [
   [/右クリック/g, '{X}'],
   [/左クリック/g, '{A}'],
   [/クリック/g, '{A}'],
-];
+  ];
+}
 export function padText(t: string, g: Glyphs): string {
   let s = t;
-  for (const [re, to] of KB2PAD) s = s.replace(re, to);
+  for (const [re, to] of kb2pad()) s = s.replace(re, to);
+  // {@use} などは、その操作に割り当てたボタン
+  s = s.replace(/\{@(\w+)\}/g, (_, id: PadAction) => (PAD_ACTIONS.some((a) => a.id === id) ? `{${BTN_NAME[padBtn(id)]}}` : ''));
   // 置き換えたボタン名には見えない印（U+2060）を付け、もう一度通しても変わらないようにする（[B] ボタン ≠ キーボードの [B]）
   return s.replace(/\{(\w+)\}/g, (_, k: keyof Glyphs) => `[\u2060${g[k] ?? k}]`);
 }
@@ -379,6 +424,11 @@ export class PadReader {
     const o = { bubbles: true, cancelable: true, clientX: x, clientY: y, button, buttons: button === 0 ? 1 : 2, shiftKey: shift, view: window };
     el.dispatchEvent(new MouseEvent('mousedown', o));
     el.dispatchEvent(new MouseEvent('mouseup', o));
+    // 文字の入力欄：コントローラーでは画面上のキーボードを出す
+    if (button === 0 && el instanceof HTMLInputElement && (el.type === 'text' || el.type === '')) {
+      osk().open(el, this.color);
+      return;
+    }
     if (button === 0) {
       el.dispatchEvent(new MouseEvent('click', o));
       if (el instanceof HTMLInputElement) el.focus();
@@ -588,6 +638,19 @@ export class GamepadSettings {
       if (t === this.el || t.closest('[data-close]')) this.toggle(false);
       const pick = t.closest('[data-pick]') as HTMLElement | null;
       if (pick) gamepad.setChoice(pick.dataset.pick!);
+      const rm = t.closest('[data-remap]') as HTMLElement | null;
+      if (rm) this.startCapture(rm.dataset.remap as PadAction);
+      if (t.closest('[data-remapreset]')) {
+        padPrefs.map = {};
+        savePadPrefs();
+        this.render();
+      }
+      const tg = t.closest('[data-toggle]') as HTMLElement | null;
+      if (tg) {
+        padPrefs.toggle = tg.dataset.toggle === '1';
+        savePadPrefs();
+        this.render();
+      }
       const as = t.closest('[data-assist]') as HTMLElement | null;
       const de = t.closest('[data-dead]') as HTMLElement | null;
       if (as || de) {
@@ -598,18 +661,65 @@ export class GamepadSettings {
       }
     });
     window.addEventListener('keydown', (e) => {
-      if (this.open && e.code === 'Escape') this.toggle(false);
+      if (!this.open || e.code !== 'Escape') return;
+      if (this.capture) this.endCapture();
+      else this.toggle(false);
     });
     gamepad.onChange(() => this.render());
   }
 
+  /** ボタンの割り当て：次に押されたボタンを、この操作に割り当てる */
+  private capture: { id: PadAction; pad: number; base: Set<number>; t: number; wasSuspended: boolean } | null = null;
+  private startCapture(id: PadAction): void {
+    const g = gamepad.current();
+    if (!g) {
+      gamepad.toast('割り当てを変えるには、先にコントローラーを選んでください');
+      return;
+    }
+    // 割り当て中はメニュー操作を止める（B で閉じたりしないように）
+    const base = new Set(g.buttons.map((b, i) => (b.pressed || b.value > 0.5 ? i : -1)).filter((i) => i >= 0));
+    this.capture = { id, pad: g.index, base, t: performance.now(), wasSuspended: gamepad.suspended };
+    gamepad.suspended = true;
+    this.render();
+  }
+  private endCapture(): void {
+    if (!this.capture) return;
+    gamepad.suspended = this.capture.wasSuspended;
+    // 割り当てに使ったボタンが、閉じた直後にメニューで反応しないように
+    gamepad.prime();
+    this.capture = null;
+    this.render();
+  }
+  private pollCapture(): void {
+    const c = this.capture;
+    if (!c) return;
+    if (performance.now() - c.t > 6000) return this.endCapture();
+    const g = (navigator.getGamepads ? navigator.getGamepads() : [])[c.pad];
+    if (!g) return this.endCapture();
+    for (let i = 0; i < Math.min(16, g.buttons.length); i++) {
+      const on = g.buttons[i].pressed || g.buttons[i].value > 0.5;
+      if (!on) {
+        c.base.delete(i);
+        continue;
+      }
+      if (c.base.has(i)) continue;
+      if (REMAPPABLE.includes(i)) {
+        remapPad(c.id, i);
+        this.endCapture();
+      }
+      return;
+    }
+  }
+
   toggle(force?: boolean): void {
+    if (this.capture && force === false) this.endCapture();
     this.open = force ?? !this.open;
     this.el.classList.toggle('hidden', !this.open);
     cancelAnimationFrame(this.raf);
     if (this.open) {
       this.render();
       const tick = () => {
+        this.pollCapture();
         this.renderTest();
         this.raf = requestAnimationFrame(tick);
       };
@@ -634,20 +744,22 @@ export class GamepadSettings {
     this.list.innerHTML = html;
     // ボタン表は、使っているコントローラーの表記で
     const g = glyphsFor(cur?.id);
-    const rows: [string, string, string, string][] = [
+    const fixed: [string, string, string, string][] = [
       ['左スティック', '移動', '右スティック', '照準（エイム補助つき）'],
-      [`${g.RT}`, '射撃・建てる', `${g.LT}（長押し）`, '蘇生'],
-      [`${g.A}`, '調べる・乗る・眠る', `${g.B}`, 'ダッシュ／閉じる'],
-      [`${g.X}`, 'リロード（建設中は撤去）', `${g.Y} / ${g.RB} / ${g.LB}`, '武器・建てる物の切り替え'],
-      [`${g.START}`, '持ち物', `${g.BACK}`, '地図'],
-      ['十字 ↑', 'ピン', '十字 ↓', '建設モード'],
-      ['十字 ←', '作業台', '十字 →', '弾種の切り替え'],
-      [`${g.L3}`, '食事', `${g.R3}`, '回復'],
+      [`${g.RT}`, '射撃・建てる', `${g.LT}`, padPrefs.toggle ? '蘇生（押すたびに切り替え）' : '蘇生（長押し）'],
+      [`${g.LB} / ${g.RB}`, '武器・建てる物の切り替え', '', ''],
     ];
-    (this.el.querySelector('.pad-map') as HTMLElement).innerHTML = rows.map((r) => `<tr><th>${r[0]}</th><td>${r[1]}</td><th>${r[2]}</th><td>${r[3]}</td></tr>`).join('');
+    const cap = this.capture;
+    const cell = (a: (typeof PAD_ACTIONS)[number]) =>
+      `<td>${a.label}</td><th><button class="btn small ${cap?.id === a.id ? 'primary' : 'ghost'} pad-remap" data-remap="${a.id}">${cap?.id === a.id ? 'ボタンを押す…' : g[BTN_NAME[padBtn(a.id)]]}${padPrefs.map[a.id] !== undefined ? ' *' : ''}</button></th>`;
+    let map = fixed.map((r) => `<tr><th>${r[0]}</th><td>${r[1]}</td><th>${r[2]}</th><td>${r[3]}</td></tr>`).join('');
+    for (let i = 0; i < PAD_ACTIONS.length; i += 2) map += `<tr>${cell(PAD_ACTIONS[i])}${PAD_ACTIONS[i + 1] ? cell(PAD_ACTIONS[i + 1]) : ''}</tr>`;
+    map += `<tr><td colspan="4" class="pad-remap-note">${cap ? '割り当てたいボタンを押してください（6 秒で取り消し）' : 'ボタンを選んで A → 割り当てたいボタンを押す（使っている操作とは入れ替え）'} <button class="btn small ghost" data-remapreset>元に戻す</button></td></tr>`;
+    (this.el.querySelector('.pad-map') as HTMLElement).innerHTML = map;
     const lv = ['オフ', '弱', '中', '強'];
     (this.el.querySelector('.pad-prefs') as HTMLElement).innerHTML = `
       <div class="pad-pref"><span>エイム補助</span>${lv.map((n, i) => `<button class="btn small ${padPrefs.assist === i ? 'primary' : 'ghost'}" data-assist="${i}">${n}</button>`).join('')}</div>
+      <div class="pad-pref"><span>長押し操作（蘇生）</span><button class="btn small ${padPrefs.toggle ? 'ghost' : 'primary'}" data-toggle="0">長押し</button><button class="btn small ${padPrefs.toggle ? 'primary' : 'ghost'}" data-toggle="1">押すたびに切り替え</button></div>
       <div class="pad-pref"><span>スティックの遊び</span>${[0.08, 0.14, 0.2, 0.28].map((d) => `<button class="btn small ${Math.abs(padPrefs.dead - d) < 0.01 ? 'primary' : 'ghost'}" data-dead="${d}">${d === 0.08 ? '小' : d === 0.14 ? 'やや小' : d === 0.2 ? '標準' : '大'}</button>`).join('')}</div>`;
   }
 
@@ -694,7 +806,7 @@ function focusables(scope: HTMLElement): HTMLElement[] {
 /** 描き直しても同じ物を指す鍵 */
 function keyOf(el: HTMLElement): string {
   const d = el.dataset;
-  return [d.act, d.i, d.slot, d.tab, d.id, d.build, d.upg, d.mod, d.pick, el.id, el.tagName === 'INPUT' ? 'in' : '', (el.textContent ?? '').trim().slice(0, 24)].join('|');
+  return [d.act, d.i, d.slot, d.tab, d.id, d.build, d.upg, d.mod, d.pick, d.remap, d.toggle, d.assist, d.dead, el.id, el.tagName === 'INPUT' ? 'in' : '', (el.textContent ?? '').trim().slice(0, 24)].join('|');
 }
 
 /** その方向で、いちばん近い要素（向きのずれは重く数える） */
@@ -728,9 +840,96 @@ function nearestIn(from: HTMLElement, items: HTMLElement[], dir: string): HTMLEl
 
 /** 画面に出ているメニュー（設定・準備画面・パネル・タイトル） */
 function defaultScope(): HTMLElement | null {
-  for (const sel of ['#pad-modal:not(.hidden) .pad-card', '#local-modal:not(.hidden) .lp-card', 'body > .modal:not(.hidden)', '.screen:not(.hidden)']) {
+  for (const sel of ['#osk:not(.hidden) .osk-card', '#pad-modal:not(.hidden) .pad-card', '#local-modal:not(.hidden) .lp-card', 'body > .modal:not(.hidden)', '.screen:not(.hidden)']) {
     const el = document.querySelector<HTMLElement>(sel);
     if (el && visible(el)) return el;
   }
   return null;
+}
+
+// ---------------- 画面上のキーボード（名前・ルームID をコントローラーで入力） ----------------
+const OSK_PAGES: string[][] = [
+  ['1234567890', 'ABCDEFGHIJ', 'KLMNOPQRST', 'UVWXYZ-_.!'],
+  ['あいうえおかきくけこ', 'さしすせそたちつてと', 'なにぬねのはひふへほ', 'まみむめもやゆよらり', 'るれろわをんーゃゅょ', 'がぎぐげござじずぜぞ', 'だぢづでどばびぶべぼ', 'ぱぴぷぺぽっぁぃぅぇ'],
+];
+class OnScreenKeyboard {
+  private el: HTMLDivElement;
+  private target: HTMLInputElement | null = null;
+  private page = 0;
+  open = false;
+
+  constructor() {
+    this.el = document.createElement('div');
+    this.el.id = 'osk';
+    this.el.className = 'hidden';
+    document.body.appendChild(this.el);
+    this.el.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest('button') as HTMLButtonElement | null;
+      if (!b || !this.target) return;
+      const t = this.target;
+      const k = b.dataset.k;
+      if (k !== undefined) this.set(t.value + k);
+      else if (b.dataset.cmd === 'bs') this.set(t.value.slice(0, -1));
+      else if (b.dataset.cmd === 'sp') this.set(t.value + ' ');
+      else if (b.dataset.cmd === 'page') {
+        this.page = (this.page + 1) % OSK_PAGES.length;
+        this.render();
+      } else if (b.dataset.cmd === 'ok') this.close();
+    });
+    // Esc（コントローラーの B）で閉じる。ほかの画面の Esc より先に受け取る
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (!this.open || e.code !== 'Escape') return;
+        e.stopImmediatePropagation();
+        this.close();
+      },
+      true,
+    );
+  }
+
+  private set(v: string): void {
+    const t = this.target!;
+    const max = t.maxLength > 0 ? t.maxLength : 32;
+    // ルームID のような英数字だけの欄は大文字に
+    if (t.classList.contains('code-input')) v = v.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    t.value = v.slice(0, max);
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+    (this.el.querySelector('.osk-val') as HTMLElement).textContent = t.value || ' ';
+    (this.el.querySelector('.osk-head small') as HTMLElement).textContent = `${t.value.length}/${max}`;
+  }
+
+  openFor(t: HTMLInputElement, color: string): void {
+    this.target = t;
+    this.open = true;
+    if (t.classList.contains('code-input')) this.page = 0;
+    this.el.style.setProperty('--pad-c', color);
+    this.el.classList.remove('hidden');
+    this.render();
+  }
+
+  private render(): void {
+    const t = this.target;
+    if (!t) return;
+    const code = t.classList.contains('code-input');
+    const rows = OSK_PAGES[code ? 0 : this.page];
+    const keys = rows.map((r) => `<div class="osk-row">${[...r].map((c) => `<button class="osk-k" data-k="${c}">${c}</button>`).join('')}</div>`).join('');
+    this.el.innerHTML = `<div class="osk-card">
+      <div class="osk-head"><span>${t.placeholder || '入力'}</span><b class="osk-val">${t.value || ' '}</b><small>${t.value.length}/${t.maxLength > 0 ? t.maxLength : 32}</small></div>
+      ${keys}
+      <div class="osk-row osk-cmd">${code ? '' : `<button data-cmd="page">${this.page === 0 ? 'かな' : '英数'}</button><button data-cmd="sp">空白</button>`}<button data-cmd="bs">⌫ 1文字消す</button><button data-cmd="ok" class="primary">決定</button></div>
+    </div>`;
+  }
+
+  close(): void {
+    this.open = false;
+    this.el.classList.add('hidden');
+    this.target = null;
+  }
+}
+let oskInstance: OnScreenKeyboard | null = null;
+function osk(): { open: (t: HTMLInputElement, color: string) => void } {
+  if (!oskInstance) oskInstance = new OnScreenKeyboard();
+  const k = oskInstance;
+  return { open: (t, c) => k.openFor(t, c) };
 }

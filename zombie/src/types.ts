@@ -134,6 +134,8 @@ export interface PlayerSnap extends MoveBody {
   frac?: number;
   /** 寝床（最後に眠った所。戦闘不能から朝に戻る場所） */
   home?: { x: number; y: number };
+  /** はじめの一日：達成したステップ（ビット） */
+  tut?: number;
   /** 背負っているリュック（バッグのマスと重さが増える） */
   pack?: ItemId;
   /** 乗っている車の ID と座席（0 = 運転席） */
