@@ -111,6 +111,10 @@ export interface PlayerSnap extends MoveBody {
   name: string;
   /** 通信が切れて再接続を待っている（その間はゾンビに狙われない） */
   away?: boolean;
+  /** 拠点のベッドで眠っている */
+  sleeping?: boolean;
+  /** 休息済み（眠った・焚き火で食事した）の残り秒数 */
+  rested?: number;
   aim: number;
   hp: number;
   maxHp: number;
@@ -221,7 +225,9 @@ export type GameEvent =
   /** 叫び屋が叫んだ（周りのゾンビが集まる） */
   | { k: 'scream'; x: number; y: number }
   /** ドラム缶の爆発 */
-  | { k: 'boom'; x: number; y: number };
+  | { k: 'boom'; x: number; y: number }
+  /** 全員が眠って朝まで時間が進んだ（画面を暗転） */
+  | { k: 'sleep' };
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {

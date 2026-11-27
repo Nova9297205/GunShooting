@@ -36,6 +36,7 @@ import {
   CHUNKS_X,
   CHUNKS_Y,
   CAMPFIRE_TILE,
+  INDOOR_FLOORS,
   CYCLE_SECONDS,
   DAY_SECONDS,
   MAP_H,
@@ -177,6 +178,9 @@ export function cycleToMinute(cycleT: number): number {
   if (cycleT < DAY_SECONDS) return 360 + (cycleT * 840) / DAY_SECONDS;
   return (1200 + ((cycleT - DAY_SECONDS) * 600) / NIGHT_SECONDS) % 1440;
 }
+
+/** 大群の夜が来る日（4日ごと） */
+export const isHordeDay = (day: number): boolean => day % 4 === 0;
 
 /** 拠点の敷地内か（安全地帯） */
 export function inBase(x: number, y: number): boolean {
@@ -354,6 +358,8 @@ export class HostSimulation {
   private hordeWaves = 0;
   private hordeT = 0;
   private hordeReward = false;
+  /** 昼の 13:00 に天候が変わることがある（長い昼が単調にならないように） */
+  private noonRolled = false;
   weather: Weather = 'clear';
   /** 天候の強さ（0..1 でなめらかに切り替わる） */
   wx = 0;
@@ -473,7 +479,7 @@ export class HostSimulation {
     });
     this.updateChunks(true);
     this.spawnPatrols(3);
-    this.dropAt = 25 + Math.random() * 40;
+    this.dropAt = DAY_SECONDS * (0.08 + Math.random() * 0.2);
     // 初日の天候はランダム（霧で始まることもある）
     if (Math.random() < 0.3) this.setWeather(Math.random() < 0.5 ? 'fog' : 'rain', true);
     this.events.push({ k: 'banner', t: 'DAY 1', s: '建物を漁って物資を集め、生きて拠点に持ち帰れ', c: '#e0cfa8', snd: 'day' });
@@ -483,7 +489,7 @@ export class HostSimulation {
   private applySkills(p: SimPlayer): void {
     const m = skillMods(p.xp);
     p.stmMax = m.staminaMax;
-    p.stmRegen = m.staminaRegenMul * (p.stimT > 0 ? 1.8 : 1);
+    p.stmRegen = m.staminaRegenMul * (p.stimT > 0 ? 1.8 : 1) * ((p.rested ?? 0) > 0 ? 1.35 : 1);
   }
 
   /** スキル経験値を加える（レベルが上がったら知らせる） */
@@ -664,18 +670,71 @@ export class HostSimulation {
     return cycleToMinute(this.cycleT);
   }
 
+  // ======================== 睡眠（拠点のベッド） ========================
+
+  /** 夜（20:00〜05:00）に拠点のベッドで眠る。全員が眠ると朝 6:00 まで時間が進む */
+  private trySleep(p: SimPlayer): void {
+    if (p.status !== 'alive') return;
+    const m = this.minute();
+    if (!(m >= 20 * 60 || m < 5 * 60)) return this.pop(p, '眠れるのは夜（20:00〜05:00）だけ', '#cccccc');
+    if (this.hordeNight) return this.pop(p, '大群の夜は眠れない！', '#e0583e');
+    if (this.zombies.some((z) => !z.dead && z.state === 'chase' && Math.hypot(z.x - p.x, z.y - p.y) < 700)) return this.pop(p, '近くに敵がいて眠れない', '#e0583e');
+    p.sleeping = true;
+    p.search = null;
+    p.viewing = 0;
+    p.storage = 0;
+    const others = this.players.filter((q) => q.status === 'alive' && !q.away);
+    const n = others.filter((q) => q.sleeping).length;
+    this.pop(p, '眠りについた…（動くと起きる）', '#aab4c8');
+    if (others.length > 1) this.events.push({ k: 'feed', cat: 'ally', t: `${p.name} が眠った（${n}/${others.length}）— 全員が拠点のベッドで眠ると朝になる`, c: '#aab4c8' });
+  }
+
+  private wake(p: SimPlayer, msg: string): void {
+    if (!p.sleeping) return;
+    p.sleeping = false;
+    this.pop(p, msg, '#aab4c8');
+  }
+
+  /** 全員（生きていて通信中の人）が眠っていたら朝まで飛ばす。ダウンした仲間がいるときは飛ばさない */
+  private updateSleep(): void {
+    if (this.phase !== 'night') {
+      for (const p of this.players) if (p.sleeping) p.sleeping = false;
+      return;
+    }
+    const awake = this.players.filter((p) => !p.away && p.status !== 'dead');
+    if (!awake.length || awake.some((p) => p.status !== 'alive' || !p.sleeping)) return;
+    // 朝まで眠った：残りの夜の時間ぶん、空腹は（ゆっくり）進み、体は回復する
+    const skip = Math.max(0, CYCLE_SECONDS - this.cycleT);
+    for (const p of awake) {
+      p.hunger = Math.max(5, p.hunger - (100 / PLAYER.hungerSeconds) * skip * 0.35);
+      p.hp = p.maxHp;
+      p.tox = Math.max(0, p.tox - 40);
+      p.rested = 480;
+      p.sleeping = false;
+      this.applySkills(p);
+      p.stamina = p.stmMax ?? PLAYER.maxStamina;
+    }
+    // 入れ物の補充時間も進める
+    for (const o of this.world.objects.values()) if (o.regrowT > 0) o.regrowT = Math.max(0.01, o.regrowT - skip);
+    // 夜のあいだに拠点の周りをうろついていた雑魚は消える（朝の見張りは静か）
+    for (const z of this.zombies) if (!z.keep && z.state !== 'chase' && Math.hypot(z.x - BASE_TX * TILE, z.y - BASE_TY * TILE) < 1200) z.dead = true;
+    this.cycleT = CYCLE_SECONDS - 0.001;
+    this.events.push({ k: 'sleep' });
+    this.events.push({ k: 'feed', cat: 'up', t: '朝まで眠った — HP全快・汚染が抜け、しばらく「休息済み」（スタミナ回復↑・空腹の減り↓）', c: '#c9e08a', snd: 'day' });
+  }
+
   private duskWarnedDay = 0;
   /** 夕方（18:30）に、拠点の外にいる人へ帰還の判断材料を知らせる */
   private updateReturnAdvice(): void {
     const m = this.minute();
-    if (m < 18.5 * 60 || m > 20 * 60 || this.duskWarnedDay === this.day) return;
+    if (m < 18 * 60 || m > 20 * 60 || this.duskWarnedDay === this.day) return;
     this.duskWarnedDay = this.day;
     for (const p of this.players) {
       if (p.status !== 'alive' || inBase(p.x, p.y)) continue;
       const d = Math.round(Math.hypot(p.x / TILE - BASE_TX, p.y / TILE - BASE_TY));
       const secs = Math.round((d * TILE) / PLAYER.speed);
-      const horde = this.day % 3 === 0;
-      this.events.push({ k: 'feed', cat: 'danger', t: `${horde ? '今夜は大群の夜！ ' : ''}日没まで約1時間：拠点まで ${d}m（走って約${secs}秒）。${horde ? '拠点の柵も破られる。弾と回復を備えて戻れ' : '夜は感染体が速く、多くなる'}`, c: horde ? '#e0583e' : '#e0a33a', id: p.id, snd: 'alarm' });
+      const horde = isHordeDay(this.day);
+      this.events.push({ k: 'feed', cat: 'danger', t: `${horde ? '今夜は大群の夜！ ' : ''}日没まで約2時間：拠点まで ${d}m（走って約${secs}秒）。${horde ? '拠点の柵も破られる。弾と回復を備えて戻れ' : '夜は感染体が速く、多くなる'}`, c: horde ? '#e0583e' : '#e0a33a', id: p.id, snd: 'alarm' });
     }
   }
 
@@ -726,6 +785,8 @@ export class HostSimulation {
         id: p.id,
         name: p.name,
         ...(p.away ? { away: true } : {}),
+        ...(p.sleeping ? { sleeping: true } : {}),
+        ...((p.rested ?? 0) > 0 ? { rested: Math.ceil(p.rested ?? 0) } : {}),
         x: r1(p.x),
         y: r1(p.y),
         bodyAngle: r2(p.bodyAngle),
@@ -792,6 +853,7 @@ export class HostSimulation {
     this.time += dt;
     this.tick++;
     this.updateClock(dt);
+    this.updateSleep();
     this.updateReturnAdvice();
     if (this.hordeNight && this.hordeWaves > 0) {
       this.hordeT -= dt;
@@ -850,11 +912,16 @@ export class HostSimulation {
       this.day++;
     }
     this.phase = this.cycleT >= DAY_SECONDS ? 'night' : 'day';
+    if (this.phase === 'day' && !this.noonRolled && this.minute() >= 13 * 60) {
+      this.noonRolled = true;
+      if (Math.random() < 0.5) this.rollWeather();
+    }
     if (prev === this.phase) return;
     this.rollWeather();
     if (this.phase === 'night') {
-      this.spawnPatrols(1 + Math.floor(Math.random() * 2));
-      if (this.day % 3 === 0) {
+      // 夜：大群が押し寄せるのではなく、闇の中で屋外の感染体が鋭くなる（巡回は少しだけ）
+      this.spawnPatrols(1);
+      if (isHordeDay(this.day)) {
         // 大群の夜：拠点の柵も破られる。3回に分けて押し寄せる
         this.hordeNight = true;
         this.hordeWaves = 3;
@@ -898,7 +965,8 @@ export class HostSimulation {
       }
       this.hordeReward = false;
       // 次の補給物資の投下時刻
-      this.dropAt = 20 + Math.random() * 50;
+      this.dropAt = DAY_SECONDS * (0.12 + Math.random() * 0.45);
+      this.noonRolled = false;
     }
   }
 
@@ -911,6 +979,11 @@ export class HostSimulation {
       return;
     }
     for (const f of p.queue) {
+      // 眠っている人は、動く・撃つ・ダッシュで目を覚ます
+      if (p.sleeping) {
+        if (Math.hypot(f.mx, f.my) > 0.1 || f.fire || f.dash) this.wake(p, '目を覚ました');
+        else continue;
+      }
       const px = p.x;
       const py = p.y;
       const dashing = p.dashTime > 0;
@@ -954,6 +1027,13 @@ export class HostSimulation {
       p.stimT -= dt;
       if (p.stimT <= 0) this.applySkills(p);
     }
+    if ((p.rested ?? 0) > 0) {
+      p.rested = (p.rested ?? 0) - dt;
+      if (p.rested <= 0) {
+        p.rested = 0;
+        this.applySkills(p);
+      }
+    }
 
     if (p.status === 'down') {
       p.search = null;
@@ -974,7 +1054,7 @@ export class HostSimulation {
     const cfx = (CAMPFIRE_TILE.x + 0.5) * TILE;
     const cfy = (CAMPFIRE_TILE.y + 0.5) * TILE;
     const resting = Math.hypot(p.x - cfx, p.y - cfy) < 170;
-    if (!resting) p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt);
+    if (!resting) p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt * ((p.rested ?? 0) > 0 ? 0.75 : 1));
     if (p.hunger <= 0) {
       p.hp -= PLAYER.starveDps * dt;
       if (p.warnCd <= 0) {
@@ -1062,9 +1142,9 @@ export class HostSimulation {
     const ed = edgeDistance(tx, ty);
     const band = ed < EDGE_BAND ? 1 - ed / EDGE_BAND : 0;
     const loc = locationAt(this.world.locations, tx, ty);
-    const deep = tierAtDistance(Math.hypot(tx - BASE_TX, ty - BASE_TY)) >= 4 ? 0.8 : 0;
+    const deep = tierAtDistance(Math.hypot(tx - BASE_TX, ty - BASE_TY)) >= 4 ? 0.5 : 0;
     // 外縁に近づくほど急激に上がる（地図の端の手前で自然に引き返すことになる）
-    const rate = band * band * 34 + band * 4 + deep + (loc?.hot ? 3 : 0);
+    const rate = band * band * 34 + band * 4 + deep + (loc?.hot ? 2.2 : 0);
     if (rate > 0.05) p.tox = Math.min(100, p.tox + rate * dt);
     else p.tox = Math.max(0, p.tox - (inBase(p.x, p.y) ? 14 : 3) * dt);
     // 段階ごとの警告
@@ -1171,6 +1251,16 @@ export class HostSimulation {
     removeItem(p.bag, id, 1);
     p.hunger = Math.min(100, p.hunger + (id === 'mre' ? 70 : 35));
     if (id === 'mre') p.hp = Math.min(p.maxHp, p.hp + 10);
+    // 焚き火のそばで温かい食事：少し回復し、しばらく「休息済み」
+    const cfd = Math.hypot((CAMPFIRE_TILE.x + 0.5) * TILE - p.x, (CAMPFIRE_TILE.y + 0.5) * TILE - p.y);
+    if (cfd < 170) {
+      p.hp = Math.min(p.maxHp, p.hp + 12);
+      const was = (p.rested ?? 0) > 0;
+      p.rested = Math.max(p.rested ?? 0, 180);
+      if (!was) this.applySkills(p);
+      this.pop(p, `焚き火で${ITEMS[id].name}を温めて食べた — 休息済み`, '#e0b25a', 'eat');
+      return;
+    }
     this.pop(p, `${ITEMS[id].name}を食べた`, '#c9a86a', 'eat');
   }
 
@@ -1573,7 +1663,11 @@ export class HostSimulation {
       for (let tx = ptx - 2; tx <= ptx + 2; tx++) {
         const o = this.world.objAt(tx, ty);
         if (!o) continue;
-        const usable = o.kind === 'door' || STORAGE_KINDS.has(o.kind) || (CONTAINER_KINDS.has(o.kind) && (o.kind !== 'car' || o.hp > 0));
+        const usable =
+          o.kind === 'door' ||
+          STORAGE_KINDS.has(o.kind) ||
+          (CONTAINER_KINDS.has(o.kind) && (o.kind !== 'car' || o.hp > 0)) ||
+          (o.kind === 'bed' && inBase((o.tx + 0.5) * TILE, (o.ty + 0.5) * TILE));
         if (!usable) continue;
         const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) - (o.kind === 'door' ? 0 : 6);
         if (d < bd) {
@@ -1581,6 +1675,10 @@ export class HostSimulation {
           best = o;
         }
       }
+    if (best && best.kind === 'bed') {
+      this.trySleep(p);
+      return;
+    }
     if (!best) {
       if (p.hp < p.maxHp - 25 && this.useMeds(p, false)) return;
       if (p.hunger < 70) this.useFood(p, false);
@@ -1609,7 +1707,8 @@ export class HostSimulation {
     }
     if (o.ready && o.kind !== 'bag') {
       o.ready = 0;
-      o.regrowT = 420 + Math.random() * 240;
+      // 探索済みの入れ物は 2〜3日ほどで中身が戻る（長い1日でも同じ所を回るだけにならない）
+      o.regrowT = CYCLE_SECONDS * (2 + Math.random());
       this.changed.add(o.id);
       this.events.push({ k: 'search', id: p.id, x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, done: true });
     }
@@ -1753,6 +1852,7 @@ export class HostSimulation {
 
   private damagePlayer(p: SimPlayer, dmg: number): void {
     if (p.status !== 'alive' || p.away) return;
+    if (p.sleeping) this.wake(p, '襲われて飛び起きた！');
     p.hp -= dmg;
     p.search = null; // 攻撃されたら探索は中断
     this.events.push({ k: 'phit', id: p.id });
@@ -1800,6 +1900,8 @@ export class HostSimulation {
   /** 音を立てる：範囲内のゾンビが音のした場所を調べに来る（近い銃声は即追跡） */
   private makeNoise(x: number, y: number, radius: number, gunshot: boolean): void {
     radius *= this.weatherMul('noise');
+    // 夜の静けさ：屋外の物音は遠くまで響き、感染体も鋭くなる
+    if (this.phase === 'night' && !INDOOR_FLOORS.has(this.world.terrainAt(Math.floor(x / TILE), Math.floor(y / TILE)))) radius *= 1.25;
     if (gunshot && radius >= 300) this.events.push({ k: 'noise', x, y, r: radius });
     for (const z of this.zombies) {
       if (z.state === 'chase') continue;

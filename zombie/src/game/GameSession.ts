@@ -27,7 +27,7 @@ import { audio } from './Audio';
 import { CraftMenu } from '../ui/CraftMenu';
 import { InventoryPanel } from '../ui/InventoryPanel';
 import { AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
-import { CONTAINER_KINDS, GIVE_RANGE, STORAGE_KINDS } from './Engine';
+import { CONTAINER_KINDS, GIVE_RANGE, inBase, STORAGE_KINDS } from './Engine';
 import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon } from './items';
 import { loadProfile, saveProfile } from './progression';
 import { Effects } from './Effects';
@@ -827,6 +827,10 @@ export class GameSession {
         let h: string | null = null;
         if (ob.kind === 'door') h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
         else if (STORAGE_KINDS.has(ob.kind)) h = '[F] 倉庫を開く（個人・共有）';
+        else if (ob.kind === 'bed' && inBase((tx + 0.5) * TILE, (ty + 0.5) * TILE)) {
+          const m = this.latest?.minute ?? 0;
+          h = m >= 20 * 60 || m < 5 * 60 ? (me.sleeping ? null : '[F] ベッドで眠る（全員が眠ると朝 6:00 まで進む）') : '眠れるのは夜 20:00〜05:00';
+        }
         else if (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) {
           const name = CONTAINER_NAMES[ob.kind] ?? '入れ物';
           h = ob.kind === 'bag' ? `[F] ${name}を調べる` : ob.ready ? `[F] ${name}を探索する` : `[F] ${name}（探索済み）`;

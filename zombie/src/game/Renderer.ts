@@ -1639,6 +1639,13 @@ export class Renderer {
     if (me && me.status === 'down') {
       const rp = me.reviveProgress > 0 ? Math.round((me.reviveProgress / PLAYER.reviveTime) * 100) : 0;
       centerCard(ctx, w / 2, h * 0.3, 'DOWN — ダウン中', rp > 0 ? `仲間が救助中… ${rp}%　そのまま待て` : `味方の救助を待て　残り ${Math.ceil(me.downTimer)} 秒`, rp > 0 ? '#93d07c' : '#d0583e', this.time);
+    } else if (me && me.sleeping) {
+      ctx.fillStyle = 'rgba(4,6,12,0.62)';
+      ctx.fillRect(0, 0, w, h);
+      const act = view.players.filter((p) => !p.away && p.status !== 'dead');
+      const n = act.filter((p) => p.sleeping).length;
+      const sub = act.length > 1 ? `全員が眠ると朝になる（${n}/${act.length}人が就寝）　動くと起きる` : '朝まで眠る…　動くと起きる';
+      centerCard(ctx, w / 2, h * 0.3, 'Zzz — 眠っている', sub, '#aab4c8', this.time);
     } else if (me && me.status === 'dead') {
       centerCard(ctx, w / 2, h * 0.3, 'K.I.A. — 戦闘不能', '仲間が朝（6:00）まで生き延びれば拠点で復帰する', '#8c8872', this.time);
     } else if (!o.panelOpen) {
@@ -1649,7 +1656,18 @@ export class Renderer {
       if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
     }
 
-    if (fx.banner && !o.panelOpen) {
+    // 朝まで眠った：暗転してから明ける
+    if (fx.sleepFade > 0) {
+      const t = fx.sleepFade / 2.2;
+      ctx.globalAlpha = clamp(t * 1.6, 0, 1);
+      ctx.fillStyle = '#05060a';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#c9d0de';
+      ctx.font = `bold ${Math.round(22 * this.uiScale)}px ${UI}`;
+      ctx.fillText(`DAY ${view.day} — 6:00　朝まで眠った`, w / 2, h * 0.42);
+      ctx.globalAlpha = 1;
+    }
+    if (fx.banner && !o.panelOpen && !me?.sleeping) {
       const b = fx.banner;
       const t = b.life / b.maxLife;
       const appear = clamp((1 - t) * 8, 0, 1);
@@ -2243,7 +2261,12 @@ export class Renderer {
       ctx.fillStyle = '#8c8872';
       ctx.fillText(stat, x + pw - 12, y + 9);
       const bw = pw - 30;
-      if (p.away) {
+      if (p.sleeping && p.status === 'alive') {
+        ctx.textAlign = 'left';
+        ctx.font = `bold 10px ${UI}`;
+        ctx.fillStyle = '#aab4c8';
+        ctx.fillText('💤 拠点のベッドで就寝中', x + 15, y + 22);
+      } else if (p.away) {
         ctx.textAlign = 'left';
         ctx.font = `bold 10px ${UI}`;
         ctx.fillStyle = '#c9a050';
@@ -2306,6 +2329,19 @@ export class Renderer {
     if ((me.tox ?? 0) > 50) warn('汚染', '#c8d050');
     // バッグがほぼ満杯：これ以上は拾えない＝帰還の合図
     if (me.bag.filter((s) => s).length >= me.bag.length - 1) warn('バッグ満杯', '#93b77c');
+    // 休息済み（良い状態なので点滅させない）
+    if ((me.rested ?? 0) > 0) {
+      const t = `休息済み ${Math.ceil((me.rested ?? 0) / 60)}分`;
+      ctx.font = `bold 9px ${UI}`;
+      const tw = ctx.measureText(t).width + 10;
+      cx -= tw;
+      chipBox(ctx, cx, y + 4, tw, 14, '#aab4c8', false);
+      ctx.fillStyle = '#aab4c8';
+      ctx.textAlign = 'center';
+      ctx.fillText(t, cx + tw / 2, y + 11.5);
+      ctx.textAlign = 'left';
+      cx -= 4;
+    }
 
     // 数値の列は幅を固定して右揃え（バーの長さはどの行も同じ）
     const VAL_W = 46;
