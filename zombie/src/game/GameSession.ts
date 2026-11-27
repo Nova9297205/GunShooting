@@ -8,8 +8,10 @@
 import { isTouchDevice, TouchControls } from '../ui/TouchControls';
 import { clearSave, writeSave } from './save';
 import { buildDef, buildSpotError, canAfford } from './build';
+import { seatPos, trunkPos, VEHICLE } from './vehicles';
 import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
+  VehicleSnap,
   BulletSnap,
   GameEvent,
   GameMode,
@@ -353,8 +355,10 @@ export class GameSession {
       stmMax: me.stmMax,
       stmRegen: me.stmRegen,
     };
-    for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
-    if (before) {
+    // 車に乗っている間は歩きの予測をしない（位置はホストの車に従う）
+    if (!me.veh) for (const f of this.pendingInputs) stepMovement(pred, f, f.dt, me.status, this.world);
+    else this.predErr = { x: 0, y: 0 };
+    if (before && !me.veh) {
       this.predErr.x += before.x - pred.x;
       this.predErr.y += before.y - pred.y;
       if (Math.hypot(this.predErr.x, this.predErr.y) > 120) this.predErr = { x: 0, y: 0 };
@@ -405,6 +409,12 @@ export class GameSession {
       };
     });
 
+    const aV = new Map((a.vehicles ?? []).map((v) => [v.id, v]));
+    const vehicles = (b.vehicles ?? []).map((vb) => {
+      const va = aV.get(vb.id);
+      if (!va) return vb;
+      return { ...vb, x: lerp(va.x, vb.x, t), y: lerp(va.y, vb.y, t), a: angleLerp(va.a, vb.a, t) };
+    });
     const aZ = new Map(a.zombies.map((z) => [z.id, z]));
     const zombies = b.zombies.map((zb) => {
       const za = aZ.get(zb.id);
@@ -425,10 +435,13 @@ export class GameSession {
     const meLatest = this.latest.players.find((p) => p.id === this.o.localId);
     const idx = players.findIndex((p) => p.id === this.o.localId);
     if (meLatest && this.pred) {
+      // 車の中：補間した車の座席の位置（ほかの人の見え方とそろえる）
+      const myVeh = meLatest.veh !== undefined ? vehicles.find((v) => v.id === meLatest.veh) : undefined;
+      const seat = myVeh ? seatPos(myVeh, meLatest.seat ?? 0) : null;
       const me: PlayerSnap = {
         ...meLatest,
-        x: this.pred.x + this.predErr.x,
-        y: this.pred.y + this.predErr.y,
+        x: seat ? seat.x : this.pred.x + this.predErr.x,
+        y: seat ? seat.y : this.pred.y + this.predErr.y,
         bodyAngle: this.pred.bodyAngle,
         dashTime: this.pred.dashTime,
         dashCd: this.pred.dashCd,
@@ -459,6 +472,7 @@ export class GameSession {
       base: L.base,
       drop: L.drop,
       jobs: L.jobs,
+      vehicles,
       radio: L.radio,
       cont: L.cont,
       storage: this.storage ?? undefined,
@@ -663,7 +677,8 @@ export class GameSession {
       this.pump();
       view = this.sim.view();
     } else {
-      if (this.pred && this.latest && myStatus !== 'dead') {
+      const inVeh = this.latest?.players.find((p) => p.id === localId)?.veh !== undefined;
+      if (this.pred && this.latest && myStatus !== 'dead' && !inVeh) {
         stepMovement(this.pred, frame, dt, myStatus, this.world);
         this.pendingInputs.push(frame);
         if (this.pendingInputs.length > 240) this.pendingInputs.shift();
@@ -714,7 +729,7 @@ export class GameSession {
       mapOpen: this.mapOpen,
       panelOpen: this.craftMenu.open || this.invPanel.open,
       reviveHint,
-      interactHint: me && me.status === 'alive' && !this.buildKind ? (this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
+      interactHint: me && me.status === 'alive' && !this.buildKind ? this.touchWords(this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
       build: this.buildKind && this.buildGhost ? { kind: this.buildKind, ...this.buildGhost } : null,
       touch: !!this.touch,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
@@ -836,7 +851,7 @@ export class GameSession {
     const ob = me.viewing ? this.world.objects.get(me.viewing) : undefined;
     this.invPanel.update({
       me,
-      cont: me.viewing && view.cont[me.viewing] ? { id: me.viewing, name: CONTAINER_NAMES[ob?.kind ?? 'bag'] ?? '入れ物', slots: view.cont[me.viewing] } : null,
+      cont: me.viewing && view.cont[me.viewing] ? { id: me.viewing, name: me.viewing >= VEHICLE.trunkBase ? '車のトランク' : (CONTAINER_NAMES[ob?.kind ?? 'bag'] ?? '入れ物'), slots: view.cont[me.viewing] } : null,
       storage: view.storage ?? this.storage,
       coop: view.players.length > 1,
       allies: view.players.filter((p) => p.id !== me.id && p.status === 'alive' && Math.hypot(p.x - me.x, p.y - me.y) < GIVE_RANGE).map((p) => ({ id: p.id, name: p.name })),
@@ -907,8 +922,36 @@ export class GameSession {
     return false;
   }
 
+  /** タッチ端末では、キーの名前をボタンの名前に置き換える */
+  private touchWords(h: string | null): string | null {
+    if (!h || !this.touch) return h;
+    return h.replace(/\[F\]/g, '[調べる]').replace(/\[E\] 長押し/g, '[蘇生] 長押し').replace(/\[Q\]/g, '[食事]').replace(/\[C\]/g, '[作業台]').replace(/移動キー/g, '左スティック');
+  }
+
   private interactHint(me: PlayerSnap): string | null {
     if (me.searchId) return null;
+    // 車：乗っている間は降りる案内。近くにあれば、位置と状態で何ができるか
+    if (me.veh !== undefined) return me.seat === 0 ? '[F] 降りる ・ 移動キーの方向へ走る（真後ろでバック）' : '[F] 降りる ・ 窓から撃てる';
+    let nv: VehicleSnap | null = null;
+    let nd = 62;
+    for (const v of this.prevView?.vehicles ?? []) {
+      const tp = trunkPos(v);
+      const d = Math.min(Math.hypot(v.x - me.x, v.y - me.y), Math.hypot(tp.x - me.x, tp.y - me.y) + 6);
+      if (d < nd) {
+        nd = d;
+        nv = v;
+      }
+    }
+    if (nv) {
+      const tp = trunkPos(nv);
+      const name = nv.kind === 'pickup' ? 'ピックアップ' : 'セダン';
+      if (Math.hypot(tp.x - me.x, tp.y - me.y) < 30 && Math.abs(nv.spd) < 20) return `[F] ${name}のトランクを開ける`;
+      if (nv.broken) return `[F] ${name}を修理（鉄くず${VEHICLE.repairCost.scrap}・武器パーツ${VEHICLE.repairCost.parts}）`;
+      if (nv.fuel < 65 && countItem(me.bag, 'fuel') > 0 && !nv.seats.some((s) => s >= 0)) return `[F] 給油（ガソリン缶 → 燃料 ${Math.round(nv.fuel)}% +${VEHICLE.fuelPerCan}）`;
+      const free = nv.seats.filter((s) => s < 0).length;
+      if (!free) return `${name}：満席`;
+      return nv.seats[0] < 0 ? `[F] ${name}を運転する（燃料 ${Math.round(nv.fuel)}%・後ろに回るとトランク）` : `[F] 同乗する（あと ${free} 人）`;
+    }
     const ptx = Math.floor(me.x / TILE);
     const pty = Math.floor(me.y / TILE);
     let best: string | null = null;

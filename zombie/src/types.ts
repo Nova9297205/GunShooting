@@ -118,6 +118,9 @@ export interface PlayerSnap extends MoveBody {
   away?: boolean;
   /** 拠点のベッドで眠っている */
   sleeping?: boolean;
+  /** 乗っている車の ID と座席（0 = 運転席） */
+  veh?: number;
+  seat?: number;
   /** 休息済み（眠った・焚き火で食事した）の残り秒数 */
   rested?: number;
   aim: number;
@@ -211,6 +214,8 @@ export type GameEvent =
   | { k: 'chop'; x: number; y: number; kind: ObjKind }
   | { k: 'build'; x: number; y: number; kind: ObjKind }
   | { k: 'smash'; x: number; y: number; kind: ObjKind }
+  /** 車：ゾンビを轢いた・ぶつかった */
+  | { k: 'crash'; x: number; y: number; hard: number }
   /** 依頼を達成した */
   | { k: 'job'; t: string; lvUp?: number }
   /** 拠点に建てた・修理した */
@@ -264,8 +269,30 @@ export interface ViewState {
   drop: { x: number; y: number } | null;
   /** 無線の依頼（その日の分） */
   jobs?: Job[];
+  /** 車両 */
+  vehicles?: VehicleSnap[];
   /** 無線の信頼度：達成した依頼の数とレベル */
   radio?: { done: number; lv: number };
+}
+
+/** 車両 */
+export interface VehicleSnap {
+  id: number;
+  kind: 'sedan' | 'pickup';
+  x: number;
+  y: number;
+  /** 向き（rad） */
+  a: number;
+  /** 速さ（px/秒、マイナスはバック） */
+  spd: number;
+  /** 燃料 0..100 */
+  fuel: number;
+  hp: number;
+  maxHp: number;
+  /** 壊れていて動かない（素材で直す） */
+  broken: boolean;
+  /** 座席ごとのプレイヤー ID（-1 = 空席）。0 番が運転席 */
+  seats: number[];
 }
 
 /** 無線の依頼 */

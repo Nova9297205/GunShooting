@@ -2,7 +2,7 @@
 // Renderer: カメラ・マップ・夜の暗闇＆懐中電灯ライティング・建築グリッド・HUD・ミニマップ
 //   見た目（キャラ・オブジェクト）の描画は Art.ts の ArtSet に委譲している
 // ============================================================
-import type { GameMode, ObjSnap, PlayerSnap, ViewState, WeaponId, ZombieSnap } from '../types';
+import type { GameMode, ObjSnap, PlayerSnap, VehicleSnap, ViewState, WeaponId, ZombieSnap } from '../types';
 import { Tool } from '../types';
 import { type ArtSet, type PlayerAnim, type TallQuery, VectorArt, type ZombieAnim } from './Art';
 import {
@@ -269,6 +269,130 @@ export class Renderer {
   uiScale = 1;
 
   /** HUD の要素を縮小して描く（仮想的な画面の大きさで配置される） */
+  /** 車：車体・窓・タイヤ・乗っている人の頭・壊れているときの煙 */
+  private drawVehicle(v: VehicleSnap, view: ViewState): void {
+    const { ctx } = this;
+    const pickup = v.kind === 'pickup';
+    const L = pickup ? 64 : 58;
+    const W = pickup ? 32 : 30;
+    ctx.save();
+    ctx.translate(v.x, v.y);
+    ctx.rotate(v.a);
+    // 影
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-L / 2 + 5, -W / 2 + 6, L, W);
+    // タイヤ
+    ctx.fillStyle = '#151513';
+    for (const [tx, ty] of [[L / 2 - 14, -W / 2 - 2], [L / 2 - 14, W / 2 - 4], [-L / 2 + 8, -W / 2 - 2], [-L / 2 + 8, W / 2 - 4]]) ctx.fillRect(tx, ty, 11, 6);
+    // 車体
+    const body = v.broken ? (pickup ? '#5b4a3a' : '#4a4e56') : pickup ? '#a0522d' : '#3d6e9e';
+    const hi = v.broken ? (pickup ? '#6e5c4a' : '#5a5f68') : pickup ? '#c06a3c' : '#5a8cbc';
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.roundRect(-L / 2, -W / 2, L, W, 6);
+    ctx.fill();
+    ctx.fillStyle = hi;
+    ctx.fillRect(-L / 2 + 3, -W / 2 + 2, L - 6, 3);
+    if (pickup) {
+      // 荷台
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.fillRect(-L / 2 + 3, -W / 2 + 4, L * 0.38, W - 8);
+    }
+    // 窓
+    ctx.fillStyle = v.broken ? '#2a2e30' : '#9cc4d8';
+    const wx = pickup ? 2 : -6;
+    ctx.fillRect(wx + 8, -W / 2 + 4, 8, W - 8);
+    ctx.fillStyle = v.broken ? '#24282a' : '#6c94a8';
+    ctx.fillRect(wx - 14, -W / 2 + 4, 6, W - 8);
+    if (v.broken) {
+      // ひび
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(wx + 9, -6);
+      ctx.lineTo(wx + 14, 2);
+      ctx.lineTo(wx + 10, 8);
+      ctx.stroke();
+    }
+    // ライト
+    const night = darknessAt(view.minute) > 0.3;
+    const driven = v.seats[0] >= 0 && !v.broken;
+    ctx.fillStyle = driven ? '#fff6c0' : '#c8c0a0';
+    ctx.fillRect(L / 2 - 3, -W / 2 + 3, 3, 6);
+    ctx.fillRect(L / 2 - 3, W / 2 - 9, 3, 6);
+    ctx.fillStyle = v.spd < -5 ? '#ff4030' : '#7a2018';
+    ctx.fillRect(-L / 2, -W / 2 + 3, 2, 5);
+    ctx.fillRect(-L / 2, W / 2 - 8, 2, 5);
+    if (driven && night) {
+      const g = ctx.createRadialGradient(L / 2 + 40, 0, 4, L / 2 + 70, 0, 120);
+      g.addColorStop(0, 'rgba(255,245,200,0.28)');
+      g.addColorStop(1, 'rgba(255,245,200,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(L / 2, -8);
+      ctx.lineTo(L / 2 + 170, -70);
+      ctx.lineTo(L / 2 + 170, 70);
+      ctx.lineTo(L / 2, 8);
+      ctx.fill();
+    }
+    // 乗っている人の頭
+    v.seats.forEach((id, i) => {
+      if (id < 0) return;
+      const sp = [[4, -8], [4, 8], [-14, 0]][i];
+      ctx.fillStyle = '#15170f';
+      ctx.beginPath();
+      ctx.arc(sp[0], sp[1], 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = PLAYER_COLORS[id] ?? '#fff';
+      ctx.beginPath();
+      ctx.arc(sp[0], sp[1], 5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.restore();
+    // 傷んでいると煙
+    if (this.fx && (v.broken || v.hp < v.maxHp * 0.4) && Math.random() < 0.25) this.fx.burst(v.x + Math.cos(v.a) * 22, v.y + Math.sin(v.a) * 22, v.broken ? '#3a3a3a' : '#777', 1, 30, 1.6, 7, 'smoke', false, -Math.PI / 2, 1);
+    // 壊れている：直せることを示す
+    if (v.broken && Math.sin(this.time * 3 + v.id) > 0) {
+      ctx.font = `bold 11px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(20,16,10,0.8)';
+      ctx.fillRect(v.x - 30, v.y - 40, 60, 16);
+      ctx.fillStyle = '#e0a33a';
+      ctx.fillText('🔧 修理可', v.x, v.y - 32);
+    }
+  }
+
+  /** 運転中のメーター（速さ・燃料・車体） */
+  private drawVehiclePanel(v: VehicleSnap, driver: boolean): void {
+    const { ctx } = this;
+    const pw = 300;
+    const ph = 44;
+    const x = this.w / 2 - pw / 2;
+    const y = this.h - 150;
+    panel(ctx, x, y, pw, ph);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#8ac0e0';
+    ctx.fillText(`// ${v.kind === 'pickup' ? 'PICKUP' : 'SEDAN'} ${driver ? 'DRIVER' : 'PASSENGER'}`, x + 10, y + 11);
+    ctx.textAlign = 'right';
+    ctx.font = `bold 16px ${MONO}`;
+    ctx.fillStyle = '#e6e1cc';
+    ctx.fillText(`${Math.round(Math.abs(v.spd) * 0.15)}`, x + pw - 40, y + 26);
+    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = '#9c967c';
+    ctx.fillText('km/h', x + pw - 10, y + 27);
+    const bar = (label: string, by: number, r: number, c: string) => {
+      ctx.textAlign = 'left';
+      ctx.font = `bold 10px ${UI}`;
+      ctx.fillStyle = '#bdb79e';
+      ctx.fillText(label, x + 10, by);
+      segBar(ctx, x + 44, by - 4, 150, 7, clamp(r, 0, 1), c, 15);
+    };
+    bar('燃料', y + 24, v.fuel / 100, v.fuel < 20 ? '#d0583e' : '#e0b862');
+    bar('車体', y + 36, v.hp / v.maxHp, v.hp / v.maxHp < 0.3 ? '#d0583e' : '#93b77c');
+  }
+
   /** 建設モード：拠点の敷地の枠・置く場所の緑/赤の影・建てた物の耐久 */
   private drawBuildGhost(b: NonNullable<RenderOptions['build']>, visible: ObjSnap[]): void {
     const { ctx } = this;
@@ -568,8 +692,10 @@ export class Renderer {
     this.drawSearch(view, me);
     this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
-    for (const p of view.players) this.drawPlayerMarker(p, p.id === o.localId);
-    for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
+    this.vehLights = (view.vehicles ?? []).filter((v) => v.seats[0] >= 0 && !v.broken).map((v) => ({ x: v.x + Math.cos(v.a) * 90, y: v.y + Math.sin(v.a) * 90 }));
+    for (const v of view.vehicles ?? []) if (v.x > vx0 - 60 && v.y > vy0 - 60 && v.x < vx1 + 60 && v.y < vy1 + 60) this.drawVehicle(v, view);
+    for (const p of view.players) if (p.veh === undefined) this.drawPlayerMarker(p, p.id === o.localId);
+    for (const p of view.players) if (p.veh === undefined) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
     if (o.build) this.drawBuildGhost(o.build, visible);
@@ -1202,8 +1328,10 @@ export class Renderer {
     return out;
   }
 
+  private vehLights: { x: number; y: number }[] = [];
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
     const out: { x: number; y: number; r: number; warm: number }[] = [];
+    for (const l of this.vehLights) out.push({ x: l.x, y: l.y, r: 230, warm: 0.15 });
     // 画面の外でも光が届く範囲（約10タイル）までの焚き火・松明
     const [vx0, vy0, vx1, vy1] = this.vrect;
     for (const ob of this.objsIn(Math.floor(vx0 / TILE) - 10, Math.floor(vy0 / TILE) - 10, Math.ceil(vx1 / TILE) + 10, Math.ceil(vy1 / TILE) + 10)) {
@@ -1759,6 +1887,10 @@ export class Renderer {
       if (o.reviveHint && !reviving) hint = '[E] 長押しで蘇生';
       else if (o.interactHint) hint = o.interactHint;
       if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
+    }
+    if (me && me.veh !== undefined && !o.mapOpen) {
+      const mv = (view.vehicles ?? []).find((v) => v.id === me.veh);
+      if (mv) this.withUiScale(() => this.drawVehiclePanel(mv, me.seat === 0));
     }
     if (o.build && me && me.status === 'alive' && !o.mapOpen) {
       const b = o.build;
@@ -2858,6 +2990,15 @@ export class Renderer {
       ctx.arc(X(0) + view.drop.x * k, Y(0) + view.drop.y * k, 3.5, 0, Math.PI * 2);
       ctx.fill();
     }
+    for (const v of view.vehicles ?? []) {
+      if (!this.vision.explored[Math.floor(v.y / TILE) * MAP_W + Math.floor(v.x / TILE)]) continue;
+      ctx.fillStyle = v.broken ? '#8a7a60' : '#8ac0e0';
+      ctx.save();
+      ctx.translate(X(v.x / TILE), Y(v.y / TILE));
+      ctx.rotate(v.a);
+      ctx.fillRect(-4, -2.5, 8, 5);
+      ctx.restore();
+    }
     for (const j of view.jobs ?? []) {
       if (j.done) continue;
       const jx = X(j.tx + 0.5);
@@ -3076,6 +3217,19 @@ export class Renderer {
       if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
     }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
+    if (me.veh === undefined) {
+      let best: VehicleSnap | null = null;
+      let bd = 70 * TILE;
+      for (const v of view.vehicles ?? []) {
+        if (!this.vision.explored[Math.floor(v.y / TILE) * MAP_W + Math.floor(v.x / TILE)]) continue;
+        const d = Math.hypot(v.x - me.x, v.y - me.y);
+        if (d < bd && d > 3 * TILE) {
+          bd = d;
+          best = v;
+        }
+      }
+      if (best) marker(best.x, best.y, best.broken ? '#c0a070' : '#8ac0e0', best.broken ? '車(故障) ' : '車 ', 'dot');
+    }
     (view.jobs ?? []).forEach((j, i) => {
       if (j.done) return;
       // 回収の品がそろったら、行き先は拠点の無線
@@ -3188,6 +3342,18 @@ export class Renderer {
         ctx.fillText('✓', X(loc.x + loc.w / 2), Y(loc.y + loc.h / 2));
       }
     });
+    // 見つけた車
+    for (const v of view.vehicles ?? []) {
+      if (!this.vision.explored[Math.floor(v.y / TILE) * MAP_W + Math.floor(v.x / TILE)]) continue;
+      ctx.save();
+      ctx.translate(X(v.x / TILE), Y(v.y / TILE));
+      ctx.rotate(v.a);
+      ctx.fillStyle = v.broken ? '#a08a60' : '#8ac0e0';
+      ctx.strokeStyle = '#0c0d0a';
+      ctx.fillRect(-6, -3.5, 12, 7);
+      ctx.strokeRect(-6, -3.5, 12, 7);
+      ctx.restore();
+    }
     // 無線の依頼の目的地
     (view.jobs ?? []).forEach((j, i) => {
       const jx = X(j.tx + 0.5);

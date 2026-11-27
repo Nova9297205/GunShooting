@@ -9,6 +9,7 @@
 // ============================================================
 import type {
   Job,
+  VehicleSnap,
   GameEvent,
   GameResult,
   InputFrame,
@@ -41,6 +42,7 @@ import {
   CHUNKS_Y,
   CAMPFIRE_TILE,
   INDOOR_FLOORS,
+  T_ROAD,
   CYCLE_SECONDS,
   DAY_SECONDS,
   MAP_H,
@@ -62,6 +64,7 @@ import {
   WORLD_W,
   ZOMBIE,
 } from './constants';
+import { seatPos, stepVehicle, trunkPos, VEHICLE } from './vehicles';
 import { jobReward, makeJobs, radioLevel, rewardMul } from './jobs';
 import { buildDef, buildSpotError, canAfford } from './build';
 import {
@@ -185,6 +188,10 @@ export function cycleToMinute(cycleT: number): number {
   return (1200 + ((cycleT - DAY_SECONDS) * 600) / NIGHT_SECONDS) % 1440;
 }
 
+/** ホスト側の車：運転手の最後の入力と、エンジン音の間隔 */
+type SimVehicle = VehicleSnap & { inp: { mx: number; my: number } | null; noiseT: number };
+const trunkId = (v: VehicleSnap) => VEHICLE.trunkBase + v.id;
+
 const STOVE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stove']);
 const BUILD_RANGE_PX = 6 * TILE + 20;
 
@@ -207,7 +214,7 @@ const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
   locker: [['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
   desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
   crate: [['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
-  car: [['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
+  car: [['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
   wcase: [['ammo762', 4, 8, 20], ['ammo9', 3, 10, 20], ['shells', 3, 4, 8], ['weapon', 2, 1, 1], ['attach', 1.5, 1, 1], ['parts', 2, 1, 2], ['ammo762ap', 1, 5, 12], ['slug', 0.8, 3, 6]],
   mcrate: [['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
   box: [['can', 3, 1, 2], ['bandage', 2, 1, 1], ['ammo9', 2, 6, 10], ['cloth', 1, 1, 2]],
@@ -375,6 +382,9 @@ export class HostSimulation {
   private jobSeq = 1;
   radioDone = 0;
   private jobCheckT = 0;
+  // ---- 車両 ----
+  vehicles: SimVehicle[] = [];
+  private vehSeq = 1;
   weather: Weather = 'clear';
   /** 天候の強さ（0..1 でなめらかに切り替わる） */
   wx = 0;
@@ -496,6 +506,7 @@ export class HostSimulation {
     this.spawnPatrols(3);
     this.dropAt = DAY_SECONDS * (0.08 + Math.random() * 0.2);
     this.newJobs(true);
+    this.spawnVehicles();
     // 初日の天候はランダム（霧で始まることもある）
     if (Math.random() < 0.3) this.setWeather(Math.random() < 0.5 ? 'fog' : 'rain', true);
     this.events.push({ k: 'banner', t: 'DAY 1', s: '建物を漁って物資を集め、生きて拠点に持ち帰れ', c: '#e0cfa8', snd: 'day' });
@@ -626,7 +637,7 @@ export class HostSimulation {
 
   /** 追加の保存項目（拡張用） */
   protected saveExtra(): Record<string, unknown> {
-    return { jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone };
+    return { jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
   }
 
   /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
@@ -649,7 +660,11 @@ export class HostSimulation {
     sim.storage = data.storage;
     sim.storage.ver = (sim.storage.ver ?? 1) + 1;
     sim.dropAt = data.dropAt;
-    const ex = data.extra as { jobs?: Job[]; jobSeq?: number; radioDone?: number } | undefined;
+    const ex = data.extra as { jobs?: Job[]; jobSeq?: number; radioDone?: number; vehicles?: SimVehicle[]; vehSeq?: number } | undefined;
+    if (ex?.vehicles) {
+      sim.vehicles = ex.vehicles;
+      sim.vehSeq = ex.vehSeq ?? sim.vehSeq;
+    }
     if (ex?.jobs) {
       sim.jobs = ex.jobs;
       sim.jobSeq = ex.jobSeq ?? sim.jobSeq;
@@ -804,12 +819,14 @@ export class HostSimulation {
       base: this.base,
       drop: this.dropPos(),
       jobs: this.jobs,
+      vehicles: this.vehicles.map((v) => ({ id: v.id, kind: v.kind, x: r1(v.x), y: r1(v.y), a: r2(v.a), spd: Math.round(v.spd), fuel: r1(v.fuel), hp: Math.round(v.hp), maxHp: v.maxHp, broken: v.broken, seats: v.seats })),
       radio: { done: this.radioDone, lv: radioLevel(this.radioDone) },
       players: this.players.map((p) => ({
         id: p.id,
         name: p.name,
         ...(p.away ? { away: true } : {}),
         ...(p.sleeping ? { sleeping: true } : {}),
+        ...(p.veh !== undefined ? { veh: p.veh, seat: p.seat } : {}),
         ...((p.rested ?? 0) > 0 ? { rested: Math.ceil(p.rested ?? 0) } : {}),
         x: r1(p.x),
         y: r1(p.y),
@@ -879,6 +896,7 @@ export class HostSimulation {
     this.updateClock(dt);
     this.updateBuilds(dt);
     this.updateJobs(dt);
+    this.updateVehicles(dt);
     this.updateSleep();
     this.updateReturnAdvice();
     if (this.hordeNight && this.hordeWaves > 0) {
@@ -1020,13 +1038,18 @@ export class HostSimulation {
       const px = p.x;
       const py = p.y;
       const dashing = p.dashTime > 0;
-      stepMovement(p, f, f.dt, p.status, this.world);
+      // 車に乗っている間は歩かない（運転手の入力は車へ）
+      const veh = p.veh ? this.vehicles.find((v) => v.id === p.veh) : undefined;
+      if (veh) {
+        if (p.seat === 0) veh.inp = { mx: f.mx, my: f.my };
+      } else stepMovement(p, f, f.dt, p.status, this.world);
       if (!dashing && p.dashTime > 0) this.gainXp(p, 1, 1.5);
       if (p.status === 'alive' && p.dashTime > 0) p.stepNoiseT += f.dt * 3;
       else if (Math.hypot(p.x - px, p.y - py) > 0.5) p.stepNoiseT += f.dt;
       p.ack = f.seq;
       p.aim = f.aim;
-      p.fire = f.fire;
+      // 運転手は撃てない（同乗者は窓から撃てる）
+      p.fire = f.fire && !(veh && p.seat === 0);
       p.revive = f.revive;
       p.tx = f.tx;
       p.ty = f.ty;
@@ -1117,7 +1140,10 @@ export class HostSimulation {
       }
     }
     // 中身を見ている入れ物から離れたら閉じる
-    if (p.viewing) {
+    if (p.viewing >= VEHICLE.trunkBase) {
+      const v = this.vehicles.find((q) => trunkId(q) === p.viewing);
+      if (!v || Math.hypot(v.x - p.x, v.y - p.y) > 110 || Math.abs(v.spd) > 40) p.viewing = 0;
+    } else if (p.viewing) {
       const o = this.world.objects.get(p.viewing);
       if (!o || Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) > 100) p.viewing = 0;
     }
@@ -1620,6 +1646,207 @@ export class HostSimulation {
     return null;
   }
 
+  // ======================== 車両 ========================
+
+  /** 道路の上に車を置く：拠点の近くに1台（最初の目標）、遠くに数台 */
+  private spawnVehicles(): void {
+    const roads: { x: number; y: number; d: number; horiz: boolean }[] = [];
+    for (let y = 4; y < MAP_H - 4; y += 2)
+      for (let x = 4; x < MAP_W - 4; x += 2) {
+        if (this.world.terrainAt(x, y) !== T_ROAD) continue;
+        const horiz = this.world.terrainAt(x - 1, y) === T_ROAD && this.world.terrainAt(x + 1, y) === T_ROAD;
+        const vert = this.world.terrainAt(x, y - 1) === T_ROAD && this.world.terrainAt(x, y + 1) === T_ROAD;
+        if (horiz === vert) continue; // 交差点・端は避ける
+        let clear = true;
+        for (let dy = -1; dy <= 1 && clear; dy++) for (let dx = -1; dx <= 1 && clear; dx++) if (this.world.solid(x + dx, y + dy) || this.world.objAt(x + dx, y + dy)) clear = false;
+        if (!clear) continue;
+        roads.push({ x, y, d: Math.hypot(x - BASE_TX, y - BASE_TY), horiz });
+      }
+    const picked: typeof roads = [];
+    const pick = (lo: number, hi: number) => {
+      const pool = roads.filter((r) => r.d >= lo && r.d < hi && picked.every((q) => Math.hypot(q.x - r.x, q.y - r.y) > 30));
+      if (!pool.length) return null;
+      const r = pool[Math.floor(Math.random() * pool.length)];
+      picked.push(r);
+      return r;
+    };
+    const make = (r: (typeof roads)[number] | null, kind: 'sedan' | 'pickup', fuel: number) => {
+      if (!r) return;
+      const maxHp = kind === 'pickup' ? 360 : 280;
+      this.vehicles.push({ id: this.vehSeq++, kind, x: (r.x + 0.5) * TILE, y: (r.y + 0.5) * TILE, a: r.horiz ? 0 : Math.PI / 2, spd: 0, fuel, hp: maxHp * 0.35, maxHp, broken: true, seats: [-1, -1, -1], inp: null, noiseT: 0 });
+    };
+    make(pick(14, 30), 'pickup', 18);
+    for (const [lo, hi] of [[35, 70], [50, 100], [70, 130], [90, 160], [110, 190]] as [number, number][]) make(pick(lo, hi), Math.random() < 0.4 ? 'pickup' : 'sedan', Math.round(5 + Math.random() * 30));
+  }
+
+  /** 近くの車（車体のまわり 1 マスちょっと） */
+  private nearVehicle(p: SimPlayer): SimVehicle | null {
+    let best: SimVehicle | null = null;
+    let bd = 62;
+    for (const v of this.vehicles) {
+      const d = Math.min(Math.hypot(v.x - p.x, v.y - p.y), Math.hypot(trunkPos(v).x - p.x, trunkPos(v).y - p.y) + 6);
+      if (d < bd) {
+        bd = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  /** [F]：後ろならトランク、壊れていたら修理、燃料が少なければ給油、それ以外は乗る */
+  private useVehicle(p: SimPlayer, v: SimVehicle): void {
+    const tp = trunkPos(v);
+    const name = v.kind === 'pickup' ? 'ピックアップトラック' : 'セダン';
+    if (Math.hypot(tp.x - p.x, tp.y - p.y) < 30 && Math.abs(v.spd) < 20) {
+      const id = trunkId(v);
+      if (!this.contents.has(id)) this.contents.set(id, emptyBag(VEHICLE.trunkSlots));
+      p.viewing = id;
+      this.pop(p, 'トランクを開けた', '#d8c48a', 'loot');
+      return;
+    }
+    if (v.broken) {
+      const cost = VEHICLE.repairCost as Partial<Record<ItemId, number>>;
+      for (const [m, n] of Object.entries(cost) as [ItemId, number][])
+        if (countItem(p.bag, m) + countItem(this.storage.shared, m) < n) return this.pop(p, `${name}は壊れている：直すには 鉄くず${cost.scrap}・武器パーツ${cost.parts}（足りない：${ITEMS[m].name}）`, '#c87a6a', 'error');
+      this.payCost(p, cost);
+      v.broken = false;
+      v.hp = Math.max(v.hp, v.maxHp * 0.7);
+      this.events.push({ k: 'built', x: v.x, y: v.y, kind: 'car', id: p.id, repair: true });
+      this.gainXp(p, 2, 10);
+      this.pop(p, `${name}を修理した！ 燃料 ${Math.round(v.fuel)}% — [F] で乗る`, '#93d07c', 'craft');
+      return;
+    }
+    if (v.fuel < 65 && countItem(p.bag, 'fuel') > 0 && !v.seats.some((s) => s >= 0 && s !== p.id)) {
+      removeItem(p.bag, 'fuel', 1);
+      v.fuel = Math.min(100, v.fuel + VEHICLE.fuelPerCan);
+      this.pop(p, `給油した：燃料 ${Math.round(v.fuel)}%`, '#e0b862', 'craft');
+      return;
+    }
+    if (v.hp < v.maxHp * 0.5 && countItem(p.bag, 'scrap') >= 3) {
+      removeItem(p.bag, 'scrap', 3);
+      v.hp = Math.min(v.maxHp, v.hp + v.maxHp * 0.3);
+      this.pop(p, `${name}を補修した（${Math.round((v.hp / v.maxHp) * 100)}%）`, '#93d07c', 'craft');
+      return;
+    }
+    const seat = v.seats[0] < 0 ? 0 : v.seats.findIndex((s) => s < 0);
+    if (seat < 0) return this.pop(p, '満席', '#c87a6a', 'error');
+    v.seats[seat] = p.id;
+    p.veh = v.id;
+    p.seat = seat;
+    p.search = null;
+    p.dashTime = 0;
+    const sp = seatPos(v, seat);
+    p.x = sp.x;
+    p.y = sp.y;
+    this.pop(p, seat === 0 ? (v.fuel > 0 ? `運転席に乗った — 行きたい方向へ移動キー・[F] で降りる（燃料 ${Math.round(v.fuel)}%）` : '燃料がない！ ガソリン缶を探そう') : '同乗した — 窓から撃てる・[F] で降りる', '#8ac0e0');
+  }
+
+  private exitVehicle(p: SimPlayer, force = false): void {
+    const v = this.vehicles.find((q) => q.id === p.veh);
+    p.veh = undefined;
+    p.seat = undefined;
+    if (!v) return;
+    const i = v.seats.indexOf(p.id);
+    if (i >= 0) v.seats[i] = -1;
+    if (i === 0) v.inp = null;
+    if (!force && Math.abs(v.spd) > 120) v.spd *= 0.5;
+    // 車の横（空いている側）に降りる
+    const c = Math.cos(v.a);
+    const n = Math.sin(v.a);
+    for (const [f, s] of [[0, -40], [0, 40], [-50, 0], [50, 0], [0, -64], [0, 64]]) {
+      const x = v.x + c * f - n * s;
+      const y = v.y + n * f + c * s;
+      if (!this.world.solid(Math.floor(x / TILE), Math.floor(y / TILE))) {
+        p.x = x;
+        p.y = y;
+        break;
+      }
+    }
+  }
+
+  private updateVehicles(dt: number): void {
+    for (const v of this.vehicles) {
+      // 席の確認：降りた・ダウンした・通信が切れた人は席から外す
+      for (let i = 0; i < 3; i++) {
+        const id = v.seats[i];
+        if (id < 0) continue;
+        const p = this.players.find((q) => q.id === id);
+        if (!p || p.veh !== v.id || p.status !== 'alive' || p.away) {
+          v.seats[i] = -1;
+          if (p && p.veh === v.id && (p.status !== 'alive' || p.away)) {
+            p.veh = undefined;
+            p.seat = undefined;
+          }
+        }
+      }
+      const driver = v.seats[0] >= 0 ? this.players.find((q) => q.id === v.seats[0]) : undefined;
+      const hit = stepVehicle(v, driver ? v.inp : null, dt, this.world);
+      if (hit > 180) {
+        v.hp -= (hit - 180) * 0.12;
+        this.events.push({ k: 'crash', x: v.x + Math.cos(v.a) * 26, y: v.y + Math.sin(v.a) * 26, hard: Math.min(1, hit / VEHICLE.maxSpeed) });
+        if (hit > 400) for (const id of v.seats) if (id >= 0) this.damagePlayer(this.players.find((q) => q.id === id)!, 6);
+      }
+      const speed = Math.abs(v.spd);
+      // ゾンビを轢く：速ければ大ダメージ。車も傷んで少し遅くなる
+      for (const z of this.zombies) {
+        if (z.dead) continue;
+        const dx = z.x - v.x;
+        const dy = z.y - v.y;
+        if (Math.abs(dx) > 60 || Math.abs(dy) > 60) continue;
+        const r = VEHICLE.radius + ZOMBIE[z.type].radius;
+        const d = Math.hypot(dx, dy);
+        if (d >= r) continue;
+        if (speed > 110) {
+          const heavy = z.type === 'brute' ? 22 : z.type === 'soldier' || z.type === 'bloater' ? 8 : 3;
+          this.damageZombie(z, speed * 0.42, v.seats[0] >= 0 ? v.seats[0] : -1, Math.cos(v.a), Math.sin(v.a), 260, true);
+          v.hp -= heavy;
+          v.spd *= z.type === 'brute' ? 0.55 : 0.88;
+          this.events.push({ k: 'crash', x: z.x, y: z.y, hard: 0.3 });
+        } else if (d > 0.01) {
+          z.x = v.x + (dx / d) * r;
+          z.y = v.y + (dy / d) * r;
+        }
+      }
+      // 歩いている人は押しのける
+      for (const p of this.players) {
+        if (p.veh || p.status === 'dead') continue;
+        const dx = p.x - v.x;
+        const dy = p.y - v.y;
+        const d = Math.hypot(dx, dy);
+        const r = VEHICLE.radius + PLAYER.radius;
+        if (d < r && d > 0.01) {
+          p.x = v.x + (dx / d) * r;
+          p.y = v.y + (dy / d) * r;
+        }
+      }
+      // エンジン音：走っている間はゾンビが寄ってくる
+      if (speed > 20) {
+        v.noiseT -= dt;
+        if (v.noiseT <= 0) {
+          v.noiseT = 0.6;
+          this.makeNoise(v.x, v.y, 280 + speed * 0.7, false);
+        }
+      }
+      if (v.hp <= 0 && !v.broken) {
+        v.hp = 0;
+        v.broken = true;
+        v.spd = 0;
+        this.events.push({ k: 'break', x: v.x, y: v.y, kind: 'car' });
+        this.events.push({ k: 'feed', cat: 'danger', t: `車が壊れた！ 直すには 鉄くず${VEHICLE.repairCost.scrap}・武器パーツ${VEHICLE.repairCost.parts}`, c: '#e0583e' });
+        for (const id of [...v.seats]) if (id >= 0) this.exitVehicle(this.players.find((q) => q.id === id)!, true);
+      }
+      // 乗っている人を座席の位置へ
+      v.seats.forEach((id, i) => {
+        if (id < 0) return;
+        const p = this.players.find((q) => q.id === id);
+        if (!p) return;
+        const sp = seatPos(v, i);
+        p.x = sp.x;
+        p.y = sp.y;
+      });
+    }
+  }
+
   // ======================== 無線の依頼 ========================
 
   /** その日の依頼を作り直す（物資箱を施設に置く） */
@@ -1911,6 +2138,15 @@ export class HostSimulation {
       p.storage = 0;
       return;
     }
+    if (p.veh) {
+      this.exitVehicle(p);
+      return;
+    }
+    const nv = this.nearVehicle(p);
+    if (nv) {
+      this.useVehicle(p, nv);
+      return;
+    }
     if (p.search) {
       p.search = null;
       return;
@@ -2125,6 +2361,7 @@ export class HostSimulation {
   private damagePlayer(p: SimPlayer, dmg: number): void {
     if (p.status !== 'alive' || p.away) return;
     if (p.sleeping) this.wake(p, '襲われて飛び起きた！');
+    if (p.veh) dmg *= 0.5; // 車の中は守られている
     p.hp -= dmg;
     p.search = null; // 攻撃されたら探索は中断
     this.events.push({ k: 'phit', id: p.id });
@@ -2133,6 +2370,7 @@ export class HostSimulation {
   }
 
   private downPlayer(p: SimPlayer): void {
+    if (p.veh) this.exitVehicle(p, true);
     p.hp = 0;
     p.status = 'down';
     p.downTimer = PLAYER.downTime;

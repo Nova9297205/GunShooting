@@ -369,6 +369,11 @@ export class Effects {
         if (ev.kind === 'car') this.burst(ev.x, ev.y, '#ffe9a8', 5, 260, 0.2, 2);
         break;
       }
+      case 'crash':
+        this.burst(ev.x, ev.y, '#ffd080', Math.round(4 + ev.hard * 14), 260, 0.35, 3, 'spark', true);
+        this.burst(ev.x, ev.y, '#8d97a8', Math.round(3 + ev.hard * 8), 180, 0.6, 4, 'chunk', false);
+        this.shakeAt(ev.x, ev.y, 0.08 + ev.hard * 0.4);
+        break;
       case 'job':
         this.notice = { text: ev.lvUp ? `依頼達成！ 無線の信頼度 Lv${ev.lvUp}` : '依頼達成！', sub: ev.t, color: '#8ac0e0' };
         break;
