@@ -314,6 +314,8 @@ export interface ViewState {
   sites?: SiteSnap[];
   /** 救助の進み具合（モード） */
   rescue?: RescueSnap;
+  /** 冬（雪・足跡） */
+  winter?: boolean;
   /** 無線の信頼度：達成した依頼の数とレベル */
   radio?: { done: number; lv: number };
 }

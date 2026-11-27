@@ -235,6 +235,8 @@ const BUILD_RANGE_PX = 6 * TILE + 20;
 export const isHordeDay = (day: number): boolean => day % 4 === 0;
 /** 30 日モードで救助が来る日（その日の朝） */
 export const RESCUE_DAY = 30;
+/** この日から冬：菜園が育たず、食料が見つかりにくく、外は冷え、雪に足跡が残る */
+export const WINTER_DAY = 21;
 /** 巨像が地形にぶつかる大きさ（見た目と当たり判定は大きいが、大男が通れる所は通れる） */
 const TITAN_BODY = 20;
 
@@ -917,6 +919,7 @@ export class HostSimulation {
       jobs: this.jobs,
       sites: [...this.sites, ...this.rsites].map((x) => ({ id: x.id, kind: x.kind, name: x.name, tx: x.tx, ty: x.ty, crate: x.crate, ...(x.done ? { done: true } : {}) })),
       rescue: this.rescueSnap(),
+      ...(this.winter() ? { winter: true } : {}),
       vehicles: this.vehicles.map((v) => ({ id: v.id, kind: v.kind, x: r1(v.x), y: r1(v.y), a: r2(v.a), spd: Math.round(v.spd), fuel: r1(v.fuel), hp: Math.round(v.hp), maxHp: v.maxHp, broken: v.broken, seats: v.seats })),
       radio: { done: this.radioDone, lv: radioLevel(this.radioDone) },
       players: this.players.map((p) => ({
@@ -1011,6 +1014,7 @@ export class HostSimulation {
     this.updateVehicles(dt);
     this.updateThrowns(dt);
     this.updateSites(dt);
+    if (this.tick % 10 === 0) this.updateTracks();
     this.updateSleep();
     this.updateReturnAdvice();
     if (this.hordeNight && this.hordeWaves > 0) {
@@ -1163,6 +1167,10 @@ export class HostSimulation {
       }
       this.checkRescueParts();
       this.announceThreat();
+      if (this.day === WINTER_DAY - 3)
+        this.events.push({ k: 'feed', cat: 'danger', t: `あと 3 日で冬（DAY ${WINTER_DAY}〜）：菜園が育たず、食べ物が見つかりにくくなり、外は冷える。缶詰・保存食を備蓄し、コートと焚き火の用意を`, c: '#a8d0f0', snd: 'alarm' });
+      if (this.day === WINTER_DAY)
+        this.events.push({ k: 'banner', t: '冬が来た', s: '雪が積もった。外は冷え、食べ物は乏しい。足跡を感染体に追われる', c: '#cfe6ff', snd: 'night' });
       this.newJobs(true);
       this.newSites(true);
       this.dayTip();
@@ -1267,7 +1275,7 @@ export class HostSimulation {
     const cfx = (CAMPFIRE_TILE.x + 0.5) * TILE;
     const cfy = (CAMPFIRE_TILE.y + 0.5) * TILE;
     const resting = Math.hypot(p.x - cfx, p.y - cfy) < 170 || !!this.nearKind(p, FIRE_KINDS, 170);
-    if (!resting) p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt * ((p.rested ?? 0) > 0 ? 0.75 : 1));
+    if (!resting) p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt * ((p.rested ?? 0) > 0 ? 0.75 : 1) * (this.winter() ? 1.3 : 1));
     if (p.hunger <= 0) {
       p.hp -= PLAYER.starveDps * dt;
       if (p.warnCd <= 0) {
@@ -1999,6 +2007,8 @@ export class HostSimulation {
       if (this.weather === 'storm') gain += 0.38 * this.wx;
       else if (this.weather === 'rain') gain += 0.26 * this.wx;
       if (this.phase === 'night') gain += 0.1;
+      // 冬：晴れていても外は冷える（夜はさらに）
+      if (this.winter()) gain += this.phase === 'night' ? 0.22 : 0.13;
     }
     if (countItem(p.bag, 'coat') > 0) gain *= 0.5;
     const coldBefore = p.cold ?? 0;
@@ -2953,6 +2963,14 @@ export class HostSimulation {
       }
     }
     if (o.kind !== 'box' && o.kind !== 'bag') this.rareDrop(out, tier);
+    // 冬：食べ物はほとんど見つからない（7 割は空・残りも半分）。秋のうちに備蓄する
+    if (this.winter() && o.kind !== 'box' && o.kind !== 'drop')
+      for (let i = 0; i < out.length; i++) {
+        const sl = out[i];
+        if (!sl || ITEMS[sl.id].cat !== 'food') continue;
+        if (Math.random() < 0.7) out[i] = null;
+        else sl.n = Math.max(1, Math.floor(sl.n / 2));
+      }
     return out;
   }
 
@@ -3307,6 +3325,49 @@ export class HostSimulation {
     let r = Math.random() * w.reduce((a, [, v]) => a + v, 0);
     for (const [t, v] of w) if ((r -= v) <= 0) return t;
     return 'walker';
+  }
+
+  // ======================== 冬 ========================
+  winter(): boolean {
+    return this.day >= WINTER_DAY;
+  }
+  /** 雪の足跡：外を歩くと残る。うろついている感染体が新しい足跡を見つけると、たどって来る */
+  private tracks: { x: number; y: number; t: number; id: number }[] = [];
+  private updateTracks(): void {
+    if (!this.winter()) {
+      if (this.tracks.length) this.tracks = [];
+      return;
+    }
+    for (const p of this.players) {
+      if (p.status !== 'alive' || p.veh || p.away) continue;
+      if (INDOOR_FLOORS.has(this.world.terrainAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE)))) continue;
+      const last = this.lastTrack.get(p.id);
+      if (last && Math.hypot(last.x - p.x, last.y - p.y) < 60) continue;
+      const tr = { x: p.x, y: p.y, t: this.time, id: p.id };
+      this.tracks.push(tr);
+      this.lastTrack.set(p.id, tr);
+    }
+    while (this.tracks.length && this.time - this.tracks[0].t > 30) this.tracks.shift();
+    if (this.tracks.length > 400) this.tracks.splice(0, this.tracks.length - 400);
+  }
+  private lastTrack = new Map<number, { x: number; y: number }>();
+  /** うろついている感染体が足跡を見つけたら、その先（新しい方）へ向かう */
+  private followTracks(z: SimZombie): void {
+    if (!this.tracks.length || z.state === 'chase' || z.type === 'titan') return;
+    for (let i = this.tracks.length - 1; i >= 0; i--) {
+      const tr = this.tracks[i];
+      if (Math.abs(tr.x - z.x) > 110 || Math.abs(tr.y - z.y) > 110) continue;
+      if (Math.hypot(tr.x - z.x, tr.y - z.y) > 110) continue;
+      // 同じ人の、もっと新しい足跡（数歩先）へ
+      let next = tr;
+      for (let k = i + 1, n = 0; k < this.tracks.length && n < 4; k++) if (this.tracks[k].id === tr.id) ((next = this.tracks[k]), n++);
+      z.state = 'investigate';
+      z.stateT = 6;
+      z.targetX = next.x;
+      z.targetY = next.y;
+      z.alert = 1;
+      return;
+    }
   }
 
   // ======================== ボス（巨像） ========================
@@ -3739,7 +3800,7 @@ export class HostSimulation {
     if (this.base.med >= 1) addItem(c, 'bandage', 2);
     if (this.base.med >= 2) addItem(c, 'medkit', 1);
     // 菜園の収穫
-    if (this.base.garden >= 1) {
+    if (this.base.garden >= 1 && !this.winter()) {
       addItem(c, 'can', this.base.garden >= 2 ? 4 : 2);
       addItem(c, 'herbs', this.base.garden >= 2 ? 2 : 1);
       if (this.base.garden >= 2) addItem(c, 'mre', 1);
@@ -3845,6 +3906,7 @@ export class HostSimulation {
     z.senseT -= dt;
     if (z.senseT <= 0) {
       z.senseT = 0.2;
+      if (this.tracks.length && Math.random() < 0.25) this.followTracks(z);
       for (const p of this.players) {
         if (p.status !== 'alive' || p.away || this.safeIn(p.x, p.y)) continue;
         if (this.canSee(z, p)) {

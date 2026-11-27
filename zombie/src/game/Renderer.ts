@@ -12,6 +12,7 @@ import {
   BASE_TX,
   BASE_TY,
   CYCLE_SECONDS,
+  INDOOR_FLOORS,
   DAY_SECONDS,
   MAP_H,
   MAP_W,
@@ -685,6 +686,7 @@ export class Renderer {
     const vy1 = vy0 + this.h + TILE * 4;
     this.drawTerrainChunks(vx0, vy0, vx1, vy1);
     this.drawWaterShimmer(vx0, vy0, vx1, vy1);
+    if (view.winter) this.drawSnowGround(view, vx0, vy0, vx1, vy1, o.dt);
 
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
     if (view.base.garden >= 1) this.drawGarden(view.base.garden);
@@ -1562,12 +1564,89 @@ export class Renderer {
   // ---------------- 天候 ----------------
 
   private rain: { x: number; y: number; s: number }[] = [];
+  /** 冬：雪の足跡（見えている人の通った跡。新しいほど濃い） */
+  private prints: { x: number; y: number; a: number; t: number; side: number }[] = [];
+  private printLast = new Map<number, { x: number; y: number; side: number }>();
+
+  /** 冬：外の地面に雪を積もらせ、足跡を描く */
+  private drawSnowGround(view: ViewState, vx0: number, vy0: number, vx1: number, vy1: number, dt: number): void {
+    const { ctx } = this;
+    const tx0 = Math.max(0, Math.floor(vx0 / TILE));
+    const ty0 = Math.max(0, Math.floor(vy0 / TILE));
+    const tx1 = Math.min(MAP_W - 1, Math.floor(vx1 / TILE));
+    const ty1 = Math.min(MAP_H - 1, Math.floor(vy1 / TILE));
+    ctx.fillStyle = 'rgba(228,234,242,0.42)';
+    ctx.beginPath();
+    for (let ty = ty0; ty <= ty1; ty++)
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const t = this.world.terrainAt(tx, ty);
+        if (t === T_WATER || t === T_SHALLOW || INDOOR_FLOORS.has(t) || t === T_WALL || t === T_WINDOW) continue;
+        ctx.rect(tx * TILE, ty * TILE, TILE, TILE);
+      }
+    ctx.fill();
+    // 足跡：歩いた人の後ろに左右交互
+    const now = this.time;
+    for (const p of view.players) {
+      if (p.status === 'dead' || p.veh !== undefined) continue;
+      if (INDOOR_FLOORS.has(this.world.terrainAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE)))) continue;
+      const last = this.printLast.get(p.id);
+      if (!last || Math.hypot(last.x - p.x, last.y - p.y) > 16) {
+        const side = last ? -last.side : 1;
+        const a = last ? Math.atan2(p.y - last.y, p.x - last.x) : p.bodyAngle;
+        this.prints.push({ x: p.x - Math.sin(a) * 5 * side, y: p.y + Math.cos(a) * 5 * side, a, t: now, side });
+        this.printLast.set(p.id, { x: p.x, y: p.y, side });
+      }
+    }
+    while (this.prints.length && now - this.prints[0].t > 30) this.prints.shift();
+    if (this.prints.length > 900) this.prints.splice(0, this.prints.length - 900);
+    for (const f of this.prints) {
+      if (f.x < vx0 || f.y < vy0 || f.x > vx1 || f.y > vy1) continue;
+      ctx.fillStyle = `rgba(70,78,90,${0.45 * (1 - (now - f.t) / 30)})`;
+      ctx.beginPath();
+      ctx.ellipse(f.x, f.y, 4.5, 2.6, f.a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    void dt;
+  }
+
+  /** 冬の雪（晴れでも少し、雨・嵐の日は激しく） */
+  private drawSnowfall(view: ViewState, dt: number): void {
+    const { ctx, w, h } = this;
+    const wet = view.weather === 'rain' || view.weather === 'storm' ? view.wx : 0;
+    const want = Math.floor(70 + wet * (view.weather === 'storm' ? 420 : 240));
+    while (this.rain.length < want) this.rain.push({ x: Math.random() * w, y: Math.random() * h, s: 0.5 + Math.random() * 0.9 });
+    if (this.rain.length > want) this.rain.length = want;
+    const vx = view.weather === 'storm' ? -160 : -30;
+    ctx.fillStyle = 'rgba(240,246,255,0.75)';
+    ctx.beginPath();
+    for (const r of this.rain) {
+      r.x += (vx + Math.sin(this.time * 1.3 + r.s * 9) * 18) * r.s * dt;
+      r.y += 70 * r.s * dt;
+      if (r.y > h || r.x < -20) {
+        r.x = Math.random() * (w + 200);
+        r.y = -10;
+      }
+      ctx.moveTo(r.x + 1.6 * r.s, r.y);
+      ctx.arc(r.x, r.y, 1.6 * r.s, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    if (view.weather === 'storm') {
+      ctx.fillStyle = `rgba(220,228,240,${0.12 * view.wx})`;
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
   private lightning = 0;
 
   /** 霧（白いもや）・雨（斜めの雨筋）・嵐（雨＋雷光）を画面に重ねる */
   private drawWeather(view: ViewState, dark: number, dt: number): void {
     const { ctx, w, h } = this;
     const k = view.wx;
+    // 冬：雨の代わりに雪（霧の日は霧も重ねる）
+    if (view.winter && view.weather !== 'fog') {
+      this.lightning = 0;
+      this.drawSnowfall(view, dt);
+      return;
+    }
     if (k <= 0.01) {
       this.lightning = 0;
       return;

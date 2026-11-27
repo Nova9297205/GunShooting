@@ -560,6 +560,7 @@ export class GameSession {
       jobs: L.jobs,
       sites: L.sites,
       rescue: L.rescue,
+      winter: L.winter,
       vehicles,
       radio: L.radio,
       cont: L.cont,
