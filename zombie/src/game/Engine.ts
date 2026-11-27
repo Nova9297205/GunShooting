@@ -99,7 +99,7 @@ import {
   heldWeapon,
 } from './items';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
-import { type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
+import { hasPerk, PERKS, type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
 import { NOTES } from './notes';
 import { TUT_ALL, TUT_BUILD, TUT_CRAFT, TUT_JOB, TUT_REWARD, TUT_SEARCH, TUT_SLEEP, TUT_STEPS } from './tutorial';
 import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
@@ -582,7 +582,8 @@ export class HostSimulation {
   /** スキルを反映（最大スタミナ・回復速度） */
   private applySkills(p: SimPlayer): void {
     const m = skillMods(p.xp);
-    p.stmMax = m.staminaMax;
+    p.stmMax = m.staminaMax + (hasPerk(p.xp, 'wind') ? 15 : 0);
+    if (hasPerk(p.xp, 'tough') && p.maxHp < PLAYER.maxHp + 20) p.maxHp = PLAYER.maxHp + 20;
     p.stmRegen = m.staminaRegenMul * (p.stimT > 0 ? 1.8 : 1) * ((p.rested ?? 0) > 0 ? 1.35 : 1) * ((p.cold ?? 0) >= COLD_SLOW ? 0.6 : 1);
   }
 
@@ -595,6 +596,7 @@ export class HostSimulation {
       this.applySkills(p);
       this.events.push({ k: 'feed', cat: 'up', t: `${p.name}：${SKILLS[i].name} Lv${lv}（${SKILLS[i].desc}）`, c: '#c9e08a', id: p.id, snd: 'level' });
       this.pop(p, `${SKILLS[i].name} Lv${lv}!`, '#c9e08a');
+      for (const pk of PERKS) if (pk.skill === i && pk.lv === lv) this.events.push({ k: 'banner', t: `特典「${pk.name}」を獲得`, s: `${p.name}：${pk.desc}`, c: '#c9e08a', snd: 'level' });
     }
   }
 
@@ -1487,7 +1489,7 @@ export class HostSimulation {
       }
       // 反動：連射するほどばらつきが増える（グリップ・スキルで軽減）
       p.heat = Math.min(HEAT_MAX[slot.id as WeaponId] ?? 0.35, p.heat + w.recoil * sk.recoilMul);
-      slot.w.mag--;
+      if (!(hasPerk(p.xp, 'thrift') && Math.random() < 0.2)) slot.w.mag--;
       p.shots++;
       p.fireCd += w.fireInterval;
       this.makeNoise(p.x, p.y, w.noiseRadius, true);
@@ -1586,7 +1588,7 @@ export class HostSimulation {
       p.bleed = false;
       this.pop(p, '止血した', '#8fbf8a');
     }
-    const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : id === 'antitox' ? 10 : id === 'herbs' ? 12 : 25) * skillMods(p.xp).healMul);
+    const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : id === 'antitox' ? 10 : id === 'herbs' ? 12 : 25) * skillMods(p.xp).healMul) + (hasPerk(p.xp, 'patch') && id !== 'antitox' ? 15 : 0);
     p.hp = Math.min(p.maxHp, p.hp + v);
     if (id === 'medkit') p.tox = Math.max(0, p.tox - 25);
     if (id === 'antitox') p.tox = Math.max(0, p.tox - 60);
@@ -2966,12 +2968,13 @@ export class HostSimulation {
     // 金庫：バールを構えていれば速いがうるさい。工具セットなら遅いが静か。どちらもなければ開かない
     if (best.kind === 'safe' && fresh) {
       const bar = p.mel?.id === 'crowbar' && p.tool === Tool.Melee;
-      if (!bar && countItem(p.bag, 'tools') < 1) {
+      const pick = hasPerk(p.xp, 'pick');
+      if (!bar && countItem(p.bag, 'tools') < 1 && !pick) {
         if (p.mel?.id === 'crowbar') return this.pop(p, '金庫：バールを構えて（近接に持ち替えて）[F]', '#e0c060', 'error');
         return this.pop(p, '金庫：バールでこじ開けるか、工具セットで開ける', '#e0c060', 'error');
       }
       loud = bar;
-      dur = bar ? 3 : 8;
+      dur = bar ? 3 : pick ? (countItem(p.bag, 'tools') > 0 ? 4 : 10) : 8;
       if (bar && p.mel?.w) p.mel.w.mag = Math.max(1, p.mel.w.mag - 12);
       this.pop(p, bar ? 'バールで金庫をこじ開けている — 大きな音が響く！' : '工具セットで金庫を静かに開けている（8 秒）', '#e0c060');
     }
@@ -2980,7 +2983,12 @@ export class HostSimulation {
   }
 
   private openContainer(p: SimPlayer, o: SimObj): void {
-    if (!this.contents.has(o.id)) this.contents.set(o.id, this.rollLoot(o));
+    if (!this.contents.has(o.id)) {
+      const c = this.rollLoot(o);
+      // 目利き：もう一度レアの抽選
+      if (hasPerk(p.xp, 'eye') && o.kind !== 'box' && o.kind !== 'bag') this.rareDrop(c, this.tierAt(o.tx, o.ty), 2);
+      this.contents.set(o.id, c);
+    }
     const cj = this.jobs.find((j) => j.crate === o.id && j.kind === 'cache' && !j.done);
     if (cj) this.completeJob(cj, p);
     if (o.ready && o.kind !== 'bag') this.gainXp(p, 0, 4 + this.tierAt(o.tx, o.ty) * 3 + (o.kind === 'drop' ? 15 : 0));
@@ -3019,8 +3027,8 @@ export class HostSimulation {
   }
 
   /** レアドロップ：まれに、どの入れ物からも良い物が出る */
-  private rareDrop(out: (Slot | null)[], tier: number): void {
-    if (Math.random() > 0.02 + tier * 0.01) return;
+  private rareDrop(out: (Slot | null)[], tier: number, mul = 1): void {
+    if (Math.random() > (0.02 + tier * 0.01) * mul) return;
     const r = Math.random();
     if (r < 0.45) {
       const pool: WeaponId[] = tier >= 3 ? ['rifle', 'hunting', 'dmr', 'shotgun'] : ['smg', 'shotgun', 'pistol', 'rifle'];
@@ -3173,10 +3181,10 @@ export class HostSimulation {
       if (d.status !== 'down') continue;
       const reviver = this.players.find((p) => p !== d && p.status === 'alive' && p.revive && Math.hypot(p.x - d.x, p.y - d.y) <= PLAYER.reviveRange);
       if (reviver) {
-        d.reviveProgress += dt * skillMods(reviver.xp).reviveMul;
+        d.reviveProgress += dt * skillMods(reviver.xp).reviveMul * (hasPerk(reviver.xp, 'savior') ? 2 : 1);
         if (d.reviveProgress >= PLAYER.reviveTime) {
           d.status = 'alive';
-          d.hp = d.maxHp * PLAYER.reviveHpRatio;
+          d.hp = d.maxHp * (hasPerk(reviver.xp, 'savior') ? 0.6 : PLAYER.reviveHpRatio);
           d.hunger = Math.max(d.hunger, 30);
           d.reviveProgress = 0;
           d.downTimer = 0;
@@ -4675,7 +4683,9 @@ export class HostSimulation {
           if ((z.x - b.x) ** 2 + (z.y - b.y) ** 2 < r * r) {
             b.hit.push(z.id);
             this.events.push({ k: 'hit', x: b.x, y: b.y, o: b.owner, a: Math.atan2(b.vy, b.vx) });
-            this.damageZombie(z, b.dmg, b.owner, b.vx, b.vy, b.knock, b.ap);
+            const shooter = this.players.find((q) => q.id === b.owner);
+            const crit = shooter && hasPerk(shooter.xp, 'crit') && Math.random() < 0.1;
+            this.damageZombie(z, b.dmg * (crit ? 2 : 1), b.owner, b.vx, b.vy, b.knock, b.ap);
             // 貫通：威力を落としながら次の敵へ
             if (b.pierce > 0) {
               b.pierce--;

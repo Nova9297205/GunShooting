@@ -8,7 +8,7 @@
 // ============================================================
 import { MELEE_STATS, type MeleeId } from '../game/constants';
 import { AFFIX_NAMES, ATTACHMENTS, QUALITY, weaponLabel, capacityOf, effectiveStats, ITEMS, type ItemCat, type ItemId, isWeapon, loadKg, slotKg, WEAPON_STATS, type WeaponId } from '../game/items';
-import { levelOf, MAX_SKILL_LV, SKILLS, xpForLevel } from '../game/progression';
+import { PERKS, levelOf, MAX_SKILL_LV, SKILLS, xpForLevel } from '../game/progression';
 import type { PlayerSnap, Slot, StorageState } from '../types';
 
 const ICON: Record<ItemCat, string> = {
@@ -267,7 +267,7 @@ export class InventoryPanel {
     this.detail.innerHTML = `<div class="d-name">${sk.name}</div>
       <div class="d-chips"><span class="chip ok">Lv${lv}</span><span class="chip">SKILL</span></div>
       <p class="d-desc">${sk.desc}</p>
-      <dl><dt>上げ方</dt><dd>${sk.how}</dd><dt>経験値</dt><dd>${Math.floor(xp)} / ${lv >= MAX_SKILL_LV ? 'MAX' : xpForLevel(lv + 1)}</dd></dl>`;
+      <dl><dt>上げ方</dt><dd>${sk.how}</dd><dt>経験値</dt><dd>${Math.floor(xp)} / ${lv >= MAX_SKILL_LV ? 'MAX' : xpForLevel(lv + 1)}</dd>${PERKS.filter((q) => q.skill === i).map((q) => `<dt>${lv >= q.lv ? '✓' : `Lv${q.lv}`} ${q.name}</dt><dd style="opacity:${lv >= q.lv ? 1 : 0.55}">${q.desc}</dd>`).join('')}</dl>`;
   }
 
   private emptyDetail(): void {
