@@ -57,6 +57,8 @@ export interface RenderOptions {
   localTool: number;
   /** 全体地図を開いているか（B キー） */
   mapOpen?: boolean;
+  /** 持ち物・作業台などのパネルを開いているか（照準や大きな通知を出さない） */
+  panelOpen?: boolean;
   reviveHint: boolean;
   interactHint: string | null;
   syncMs?: number;
@@ -317,6 +319,7 @@ export class Renderer {
 
   // ============================================================
   private hudHidden = false;
+  private hudDimmed = false;
 
   render(view: ViewState, o: RenderOptions): void {
     const { ctx } = this;
@@ -324,6 +327,12 @@ export class Renderer {
     if (this.hudHidden !== !!o.mapOpen) {
       this.hudHidden = !!o.mapOpen;
       this.hudCanvas.style.visibility = this.hudHidden ? 'hidden' : '';
+    }
+    // 持ち物・作業台を開いている間は、パネルの後ろの HUD を薄くして文字が重ならないようにする
+    const dimHud = !!o.panelOpen && !o.mapOpen;
+    if (this.hudDimmed !== dimHud) {
+      this.hudDimmed = dimHud;
+      this.hudCanvas.style.opacity = dimHud ? '0.15' : '';
     }
     const dt = o.dt;
     this.time += dt;
@@ -1523,11 +1532,16 @@ export class Renderer {
     this.setOv('tox', 'opacity', tx2 > 10 ? Math.min(0.75, (tx2 - 10) / 90).toFixed(2) : '0');
 
     this.updateExplored(o.dt);
-    this.drawCompass(view, me, o.localId);
+    if (!o.panelOpen) this.drawCompass(view, me, o.localId);
+    // パネルを開いている間は入場通知を出さない（閉じたあとに古い通知が出ないよう捨てる）
+    if (o.panelOpen) this.locToast = null;
+    this.toastDim = horde ? 0.4 : 1;
     this.drawLocationToast(me, o.dt, !!fx.banner);
-    this.drawAllyIndicators(view, o.localId, o.effects);
-    this.drawDropIndicator(view, me);
-    this.drawFeed(fx, view.players.length);
+    if (!o.panelOpen) {
+      this.drawAllyIndicators(view, o.localId, o.effects);
+      this.drawDropIndicator(view, me);
+      this.drawFeed(fx, view.players.length);
+    }
     this.drawHudLayer(view, o, me);
     this.autoQuality(o.dt);
 
@@ -1538,22 +1552,24 @@ export class Renderer {
       centerCard(ctx, w / 2, h * 0.3, 'DOWN — ダウン中', `味方の救助を待て　残り ${Math.ceil(me.downTimer)} 秒`, '#d0583e', this.time);
     } else if (me && me.status === 'dead') {
       centerCard(ctx, w / 2, h * 0.3, 'K.I.A. — 戦闘不能', '仲間が朝（6:00）まで生き延びれば拠点で復帰する', '#8c8872', this.time);
-    } else {
+    } else if (!o.panelOpen) {
       let hint: string | null = null;
       if (o.reviveHint) hint = '[E] 長押しで蘇生';
       else if (o.interactHint) hint = o.interactHint;
       if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
     }
 
-    if (fx.banner) {
+    if (fx.banner && !o.panelOpen) {
       const b = fx.banner;
       const t = b.life / b.maxLife;
       const appear = clamp((1 - t) * 8, 0, 1);
       const fade = clamp(t * 4, 0, 1);
-      ctx.globalAlpha = Math.min(appear, fade);
+      // 追われている最中は薄く（敵や地形を隠さない）
+      ctx.globalAlpha = Math.min(appear, fade) * (horde ? 0.4 : 1);
       ctx.save();
-      ctx.translate(w / 2, h * 0.24);
-      const sc = 1 + (1 - appear) * 0.4;
+      // 画面の上寄り・小さめに表示（視界の中央を空ける）
+      ctx.translate(w / 2, Math.max(150, h * 0.19));
+      const sc = (1 + (1 - appear) * 0.3) * 0.82;
       ctx.scale(sc, sc);
       // 横帯＋見出し
       ctx.font = `bold 15px ${UI}`;
@@ -1586,6 +1602,8 @@ export class Renderer {
       this.drawWorldMap(view, o.localId);
       return;
     }
+    // パネルを開いている間はマウスカーソルで操作するので照準は出さない
+    if (o.panelOpen) return;
 
     // ---- クロスヘア（連射で広がる） ----
     const cx = o.mouseX;
@@ -1674,7 +1692,7 @@ export class Renderer {
 
   private drawHudLayer(view: ViewState, o: RenderOptions, me: PlayerSnap | undefined): void {
     this.hudT -= o.dt;
-    const key = `${o.localTool}|${me?.status}|${this.w}x${this.h}|${view.players.length}`;
+    const key = `${o.localTool}|${me?.status}|${this.w}x${this.h}|${view.players.length}|${o.panelOpen ? 1 : 0}`;
     if (this.hudT > 0 && key === this.hudKey) return;
     this.hudT = 1 / 15;
     this.hudKey = key;
@@ -1714,6 +1732,7 @@ export class Renderer {
 
   /** ロケーションに入ったときの表示（例：「警察署 ★★★ 危険」） */
   private curDist: string | null = null;
+  private toastDim = 1;
 
   private drawLocationToast(me: PlayerSnap | undefined, dt: number, bannerShown: boolean): void {
     if (me) {
@@ -1733,7 +1752,7 @@ export class Renderer {
         this.curDist = dkey;
         if (dist && !loc) {
           const info = DISTRICT_INFO[dist.kind];
-          this.locToast = { text: `${dist.name}  ${'★'.repeat(dist.tier)}`, sub: `物資：${info.loot}　脅威：${info.threat}`, sub2: `推奨：${info.advice}`, color: info.color, life: 4.5 };
+          this.locToast = { text: `${dist.name}  ${'★'.repeat(dist.tier)}`, sub: `物資：${info.loot}　脅威：${info.threat}`, sub2: `推奨：${info.advice}`, color: info.color, life: 4 };
         }
       }
     }
@@ -1747,7 +1766,7 @@ export class Renderer {
       return;
     }
     const { ctx, w } = this;
-    ctx.globalAlpha = Math.min(1, t.life, (4.5 - t.life) * 4);
+    ctx.globalAlpha = Math.min(1, t.life, (4.5 - t.life) * 4) * this.toastDim;
     // 場所に入ったときの表示：上部中央の細い帯
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -2297,7 +2316,7 @@ export class Renderer {
     });
 
     const cur = SLOTS[o.localTool];
-    if (cur && me) {
+    if (cur && me && !o.panelOpen) {
       const s = heldWeapon({ ...me, tool: o.localTool });
       const name: string = s ? ITEMS[s.id].name : cur.name;
       ctx.font = `bold 12px ${UI}`;
@@ -2496,17 +2515,33 @@ export class Renderer {
     ctx.translate(x, y);
     ctx.scale(sc, sc);
     if (kind === 'tower') {
-      ctx.strokeStyle = '#b8b4a0';
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(-3, 4);
-      ctx.lineTo(0, -5);
-      ctx.lineTo(3, 4);
-      ctx.moveTo(-2, 1);
-      ctx.lineTo(2, 1);
-      ctx.stroke();
+      // 通信塔：裾の広い鉄骨の塔＋筋交い＋アンテナと赤い航空灯（文字の「A」に見えないように）
+      const mast = () => {
+        ctx.beginPath();
+        ctx.moveTo(-4, 5);
+        ctx.lineTo(-1.2, -5);
+        ctx.moveTo(4, 5);
+        ctx.lineTo(1.2, -5);
+        ctx.moveTo(-3.2, 2);
+        ctx.lineTo(2.4, -1.5);
+        ctx.moveTo(3.2, 2);
+        ctx.lineTo(-2.4, -1.5);
+        ctx.moveTo(-4, 5);
+        ctx.lineTo(4, 5);
+        ctx.moveTo(0, -5);
+        ctx.lineTo(0, -9);
+        ctx.stroke();
+      };
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.lineWidth = 2.6;
+      mast();
+      ctx.strokeStyle = '#c8c2a8';
+      ctx.lineWidth = 1;
+      mast();
       ctx.fillStyle = Math.sin(this.time * 4) > 0 ? '#ff5a3c' : '#7a2a20';
-      ctx.fillRect(-1, -6, 2, 2);
+      ctx.beginPath();
+      ctx.arc(0, -9, 1.4, 0, Math.PI * 2);
+      ctx.fill();
     } else if (kind === 'water') {
       ctx.fillStyle = '#9aa4a8';
       ctx.fillRect(-3.5, -4, 7, 4);
@@ -2634,7 +2669,7 @@ export class Renderer {
     const mx = Math.round(w / 2 - mw / 2);
     const my = Math.round((h - mh - LEG) / 2 + 14);
     // 背後の HUD が透けないよう、ほぼ不透明な暗幕を敷く
-    ctx.fillStyle = 'rgba(7,8,6,0.94)';
+    ctx.fillStyle = '#070806';
     ctx.fillRect(0, 0, w, h);
     panel(ctx, mx - 12, my - 34, mw + 24, mh + 34 + LEG + 8);
     ctx.font = `10px ${MONO}`;

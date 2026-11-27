@@ -604,6 +604,7 @@ export class GameSession {
       skipAnimDetectId: this.o.mode === 'guest' ? localId : null,
       localTool: this.localTool,
       mapOpen: this.mapOpen,
+      panelOpen: this.craftMenu.open || this.invPanel.open,
       reviveHint,
       interactHint: me && me.status === 'alive' ? this.interactHint(me) : null,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,

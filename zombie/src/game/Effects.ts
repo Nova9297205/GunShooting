@@ -227,7 +227,7 @@ export class Effects {
     this.trauma = Math.min(1, this.trauma + amount);
   }
 
-  showBanner(text: string, sub: string, color: string, life = 3.2): void {
+  showBanner(text: string, sub: string, color: string, life = 2.6): void {
     this.banner = { text, sub, life, maxLife: life, color };
   }
 
