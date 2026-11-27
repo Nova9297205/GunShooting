@@ -24,10 +24,10 @@ export const NAME_MAX = 10;
 export const PLAYER_COLORS = ['#7f9cb8', '#93a86a', '#c4a35c'];
 
 // ---------------- 時間（昼夜サイクル） ----------------
-/** 06:00〜20:00 の昼（実時間秒） */
-export const DAY_SECONDS = 160;
-/** 20:00〜06:00 の夜（実時間秒） */
-export const NIGHT_SECONDS = 70;
+/** 06:00〜20:00 の昼（実時間秒）：遠征・探索にじっくり使える長さ */
+export const DAY_SECONDS = 660;
+/** 20:00〜06:00 の夜（実時間秒）：拠点で休む（ベッドで眠れば朝まで飛ばせる）か、闇の中を進むか */
+export const NIGHT_SECONDS = 270;
 export const CYCLE_SECONDS = DAY_SECONDS + NIGHT_SECONDS;
 /** 松明の明かりの半径(px) */
 export const TORCH_LIGHT = 200;
@@ -50,7 +50,7 @@ export const PLAYER = {
   interactRange: 62,
   buildRange: 170,
   /** 空腹ゲージが 100→0 になるまでの秒数 */
-  hungerSeconds: 300,
+  hungerSeconds: 840,
   /** 空腹0のときのHP減少/秒 */
   starveDps: 1.5,
   foodValue: 40,

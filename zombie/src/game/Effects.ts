@@ -102,6 +102,8 @@ export class Effects {
   listener = { x: 0, y: 0 };
   /** タレットごとの最後の射撃方向（見た目用） */
   turretAim = new Map<number, { a: number; flash: number }>();
+  /** 朝まで眠ったときの暗転（秒） */
+  sleepFade = 0;
   /** 仲間のピン（プレイヤーごとに1つ） */
   pings: { id: number; x: number; y: number; t: 'enemy' | 'loot' | 'go'; life: number }[] = [];
 
@@ -270,6 +272,7 @@ export class Effects {
     }
     this.corpses = this.corpses.filter((c) => c.life > 0);
     for (const t of this.turretAim.values()) t.flash = Math.max(0, t.flash - dt);
+    this.sleepFade = Math.max(0, this.sleepFade - dt);
     for (const p of this.pings) p.life -= dt;
     this.pings = this.pings.filter((p) => p.life > 0);
     const kk = Math.exp(-14 * dt);
@@ -432,6 +435,9 @@ export class Effects {
         // 叫び声の大きな波紋
         this.ring(ev.x, ev.y, '#e8c8b0', 220, 0.9);
         this.ring(ev.x, ev.y, '#e09070', 120, 0.6);
+        break;
+      case 'sleep':
+        this.sleepFade = 2.2;
         break;
       case 'boom':
         this.burst(ev.x, ev.y, '#ffb050', 30, 380, 0.5, 4, 'spark', true);
