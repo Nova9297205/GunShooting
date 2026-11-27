@@ -143,6 +143,11 @@ interface SimZombie extends ZombieSnap {
   hitIds?: number[];
   /** 酸を吐く者：次に吐けるまで */
   spitCd?: number;
+  /** 最後に傷ついた時刻（再生の精鋭） */
+  hurtT?: number;
+  /** 突進の精鋭：次の突進まで・構えたときの相手との距離 */
+  dashCd?: number;
+  dashD?: number;
   kx: number;
   ky: number;
   attackCd: number;
@@ -991,6 +996,7 @@ export class HostSimulation {
         atk: z.atk,
         ...(z.elite ? { elite: true } : {}),
         ...(z.tele ? { tele: z.tele } : {}),
+        ...(z.trait ? { trait: z.trait } : {}),
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, owner: b.owner, x: r1(b.x), y: r1(b.y), vx: Math.round(b.vx), vy: Math.round(b.vy) })),
     };
@@ -3377,6 +3383,33 @@ export class HostSimulation {
     }
   }
 
+  // ======================== 精鋭の特性 ========================
+  /** 再生：3 秒傷つかなければ毎秒 5% 回復（撃ち続けて一気に倒す）。突進：構えてから飛びかかる（横に避ける） */
+  private updateTrait(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): void {
+    if (z.trait === 'regen' && z.hp < z.maxHp && this.time - (z.hurtT ?? -99) > 3) z.hp = Math.min(z.maxHp, z.hp + z.maxHp * 0.05 * dt);
+    if (z.trait !== 'dash') return;
+    z.dashCd = (z.dashCd ?? 2) - dt;
+    if ((z.teleT ?? 0) > 0 && z.tele === 5) {
+      z.teleT! -= dt;
+      if (z.teleT! <= 0) {
+        z.tele = 0;
+        // 構えたときの向きへ飛ぶ（構えの間に横へずれれば外れる）
+        // 構えたときの相手の位置まで届く勢い（勢いは毎秒 e^-6 で落ちるので 距離×6.3）
+        const imp = Math.min(2300, Math.max(700, (z.dashD ?? 250) * 6.3));
+        z.kx += Math.cos(z.angle) * imp;
+        z.ky += Math.sin(z.angle) * imp;
+        z.dashCd = 3.5;
+      }
+      return;
+    }
+    if (near && z.state === 'chase' && z.dashCd <= 0 && near.d > 110 && near.d < 360 && this.world.lineWalkable(z.x, z.y, near.p.x, near.p.y)) {
+      z.tele = 5;
+      z.teleT = 0.5;
+      z.dashD = near.d;
+      z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+    }
+  }
+
   // ======================== 這う者・酸を吐く者 ========================
   /** 這う者：伏せたまま動かない。近づいた人に、ぴくっと動いてから噛みつく（出血） */
   private updateCrawler(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): boolean {
@@ -3775,7 +3808,7 @@ export class HostSimulation {
       wanderT: Math.random() * 3,
       senseT: Math.random() * 0.3,
       speedMul: (0.85 + Math.random() * 0.3) * (isElite ? 1.15 : 1),
-      ...(isElite ? { elite: true } : {}),
+      ...(isElite ? { elite: true, trait: (['dash', 'regen', 'split', 'armor'] as const)[Math.floor(Math.random() * 4)] } : {}),
       stuckT: 0,
       route: null,
       routeI: 0,
@@ -4037,6 +4070,8 @@ export class HostSimulation {
     if (z.type === 'titan' && this.updateTitan(z, dt, near)) return;
     if (z.type === 'crawler' && this.updateCrawler(z, dt, near)) return;
     if (z.type === 'spitter' && this.updateSpitter(z, dt, near)) return;
+    if (z.trait) this.updateTrait(z, dt, near);
+    if ((z.teleT ?? 0) > 0 && z.tele === 5) return;
     let speed = (night ? st.nightSpeed : st.daySpeed) * z.speedMul * this.world.speedAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE));
     let dx = 0;
     let dy = 0;
@@ -4242,7 +4277,9 @@ export class HostSimulation {
     // 巨像は弾で押し戻されない（撃ち続けるだけで近寄らせない、を防ぐ）
     if (z.type === 'titan') knock *= 0.1;
     // 装甲：通常弾は軽減される（徹甲弾・近接は無視）
-    const armor = ZOMBIE[z.type].armor;
+    // 重装の精鋭：通常弾はほとんど通らない（徹甲弾・近接・爆発で）
+    const armor = z.trait === 'armor' ? Math.max(ZOMBIE[z.type].armor, 0.7) : ZOMBIE[z.type].armor;
+    z.hurtT = this.time;
     if (!ap && armor > 0) {
       dmg *= 1 - armor;
       this.events.push({ k: 'ricochet', x: z.x, y: z.y });
@@ -4265,6 +4302,19 @@ export class HostSimulation {
 
   private killZombie(z: SimZombie, owner: number, dx = 0, dy = 0): void {
     z.dead = true;
+    // 分裂の精鋭：倒すと 2 体の走る者に分かれる（まとめて撃てる位置で倒す）
+    if (z.trait === 'split') {
+      for (const side of [-1, 1]) {
+        const c = this.spawnZombie('runner', z.x + side * 14, z.y - side * 10);
+        c.elite = false;
+        delete c.trait;
+        c.hp = c.maxHp = c.maxHp * 0.8;
+        c.keep = z.keep;
+        this.startChase(c);
+        c.targetX = z.targetX;
+        c.targetY = z.targetY;
+      }
+    }
     const killer = this.players.find((p) => p.id === owner);
     if (killer) {
       killer.kills++;

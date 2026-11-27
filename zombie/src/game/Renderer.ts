@@ -136,6 +136,9 @@ export function formatClock(m: number): string {
   return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
+/** 精鋭の特性の名前 */
+const TRAIT_NAME = { dash: '突進', regen: '再生', split: '分裂', armor: '重装' } as const;
+
 export class Renderer {
   art: ArtSet = new VectorArt();
   private ctx: CanvasRenderingContext2D;
@@ -1993,9 +1996,23 @@ export class Renderer {
         ctx.textBaseline = 'middle';
         ctx.lineWidth = 3;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        ctx.strokeText('精鋭', z.x, z.y + r + 12);
+        const tag = `精鋭${z.trait ? `・${TRAIT_NAME[z.trait]}` : ''}`;
+        ctx.strokeText(tag, z.x, z.y + r + 12);
         ctx.fillStyle = '#d6a8ff';
-        ctx.fillText('精鋭', z.x, z.y + r + 12);
+        ctx.fillText(tag, z.x, z.y + r + 12);
+        // 再生中は緑の＋、突進の構えは赤い輪
+        if (z.trait === 'regen' && z.hp < z.maxHp) {
+          ctx.fillStyle = `rgba(120,230,120,${0.5 + Math.sin(this.time * 6) * 0.3})`;
+          ctx.fillText('＋', z.x + r + 6, z.y - r);
+        }
+      }
+      if (z.tele === 5) {
+        ctx.strokeStyle = `rgba(240,90,60,${0.5 + Math.sin(this.time * 26) * 0.4})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(z.x, z.y);
+        ctx.lineTo(z.x + Math.cos(z.angle) * 160, z.y + Math.sin(z.angle) * 160);
+        ctx.stroke();
       }
       if (z.hp < z.maxHp) {
         const w = z.type === 'titan' ? 0 : z.type === 'brute' ? 40 : 24;

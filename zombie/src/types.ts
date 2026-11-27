@@ -206,6 +206,8 @@ export interface ZombieSnap {
   atk: number;
   /** 精鋭（手強く、良い戦利品を落とす） */
   elite?: boolean;
+  /** 精鋭の特性：突進・再生・分裂・重装 */
+  trait?: 'dash' | 'regen' | 'split' | 'armor';
   /** 予備動作（1 = 巨像の突進・2 = 巨像の地鳴り・3 = 這う者の噛みつき・4 = 酸を吐く者の構え） */
   tele?: number;
 }
