@@ -236,6 +236,42 @@ export const GIVE_RANGE = 220;
 const HEAT_RECOVER: Record<WeaponId, number> = { pistol: 7, smg: 6.5, rifle: 3.6, shotgun: 4, hunting: 3, dmr: 4.2 };
 const HEAT_MAX: Record<WeaponId, number> = { pistol: 0.2, smg: 0.24, rifle: 0.34, shotgun: 0.3, hunting: 0.3, dmr: 0.26 };
 
+/** セーブデータ（このブラウザの localStorage に1つだけ保存） */
+export interface SaveData {
+  v: 1;
+  savedAt: number;
+  seed: number;
+  day: number;
+  cycleT: number;
+  phase: TimePhase;
+  weather: Weather;
+  base: Record<Facility, number>;
+  storage: StorageState;
+  dropAt: number;
+  nextObjId: number;
+  objs: SimObj[];
+  removed: number[];
+  contents: [number, (Slot | null)[]][];
+  players: {
+    id: number;
+    name: string;
+    x: number;
+    y: number;
+    hp: number;
+    maxHp: number;
+    hunger: number;
+    tox: number;
+    status: PlayerSnap['status'];
+    bag: (Slot | null)[];
+    prim: Slot | null;
+    sec: Slot | null;
+    tool: number;
+    kills: number;
+    xp: number[];
+  }[];
+  extra?: Record<string, unknown>;
+}
+
 // ---------------- 小さな二分ヒープ（Dijkstra 用） ----------------
 class MinHeap {
   private k: number[] = [];
@@ -332,6 +368,9 @@ export class HostSimulation {
   private events: GameEvent[] = [];
   private changed = new Set<number>();
   private removed: number[] = [];
+  /** 開始時から変化したオブジェクト・取り除かれたオブジェクト（セーブ・再接続でワールドを再現する） */
+  private everChanged = new Set<number>();
+  private everRemoved = new Set<number>();
   private nextId = 1;
   private nextObjId = BUILD_ID_START;
   // Float64 で保持する（Float32 だとヒープのキーとの丸め誤差で同じノードが何度も再投入され、計算が爆発する）
@@ -491,6 +530,125 @@ export class HostSimulation {
     this.players = this.players.filter((p) => p.id !== playerId);
   }
 
+  /** 通信が切れた仲間：キャラクターは残し、再接続を待つ（その間は狙われず、空腹なども進まない） */
+  setAway(playerId: number, away: boolean): void {
+    const p = this.players.find((q) => q.id === playerId);
+    if (!p || !!p.away === away) return;
+    p.away = away;
+    p.queue.length = 0;
+    p.fire = false;
+    p.revive = false;
+    this.events.push({ k: 'feed', cat: 'ally', t: away ? `${p.name} の通信が切れた（再接続を待っています）` : `${p.name} が再接続した`, c: away ? '#c9a050' : '#9fc48a' });
+  }
+
+  /** 開始時からのワールドの変化すべて（途中から参加するゲスト・続きから用） */
+  fullWorldDiff(): { objs: ObjSnap[]; removed: number[] } {
+    // 未送信の差分も含める（ただし消費はしない：他のゲストへ送るぶんが消えないように）
+    const removed = new Set([...this.everRemoved, ...this.removed]);
+    const objs: ObjSnap[] = [];
+    for (const id of new Set([...this.everChanged, ...this.changed])) {
+      const o = this.world.objects.get(id);
+      if (o && !removed.has(id)) objs.push(toObjSnap(o));
+    }
+    return { objs, removed: [...removed] };
+  }
+
+  /** セーブデータ（ソロ・ホスト）。ゾンビは保存しない（チャンクに近づくと湧き直す） */
+  toSave(): SaveData {
+    const removedNow = new Set([...this.everRemoved, ...this.removed]);
+    const objs: SimObj[] = [];
+    for (const id of new Set([...this.everChanged, ...this.changed])) {
+      const o = this.world.objects.get(id);
+      if (o && !removedNow.has(id)) objs.push({ ...o });
+    }
+    return {
+      v: 1,
+      savedAt: Date.now(),
+      seed: this.seed,
+      day: this.day,
+      cycleT: this.cycleT,
+      phase: this.phase,
+      weather: this.weather,
+      base: { ...this.base },
+      storage: this.storage,
+      dropAt: this.dropAt,
+      nextObjId: this.nextObjId,
+      objs,
+      removed: [...removedNow],
+      contents: [...this.contents.entries()],
+      players: this.players.map((p) => ({
+        id: p.id,
+        name: p.name,
+        x: p.x,
+        y: p.y,
+        hp: p.hp,
+        maxHp: p.maxHp,
+        hunger: p.hunger,
+        tox: p.tox,
+        status: p.status,
+        bag: p.bag,
+        prim: p.prim,
+        sec: p.sec,
+        tool: p.tool,
+        kills: p.kills,
+        xp: p.xp,
+      })),
+      extra: this.saveExtra(),
+    };
+  }
+
+  /** 追加の保存項目（拡張用） */
+  protected saveExtra(): Record<string, unknown> {
+    return {};
+  }
+
+  /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
+  static fromSave(lobby: LobbyPlayer[], data: SaveData): HostSimulation {
+    const sim = new HostSimulation(lobby, data.seed);
+    sim.events = [];
+    for (const id of data.removed) {
+      sim.world.removeObj(id);
+      sim.everRemoved.add(id);
+    }
+    for (const o of data.objs) {
+      sim.world.setObj({ ...o });
+      sim.everChanged.add(o.id);
+    }
+    sim.contents = new Map(data.contents);
+    sim.day = data.day;
+    sim.cycleT = data.cycleT;
+    sim.phase = data.phase;
+    sim.base = { ...sim.base, ...data.base };
+    sim.storage = data.storage;
+    sim.storage.ver = (sim.storage.ver ?? 1) + 1;
+    sim.dropAt = data.dropAt;
+    sim.nextObjId = Math.max(sim.nextObjId, data.nextObjId);
+    sim.setWeather(data.weather, true);
+    for (const p of sim.players) {
+      const s = data.players.find((q) => q.id === p.id);
+      if (!s) continue;
+      Object.assign(p, { x: s.x, y: s.y, hp: s.hp, maxHp: s.maxHp, hunger: s.hunger, tox: s.tox, bag: s.bag, prim: s.prim, sec: s.sec, tool: s.tool, kills: s.kills });
+      p.xp = p.xp.map((v, i) => Math.max(v, s.xp[i] ?? 0));
+      p.lv = p.xp.map(levelOf);
+      sim.applySkills(p);
+      // ダウン・戦闘不能のまま保存されていたら、拠点で起き上がった状態から
+      if (s.status !== 'alive') {
+        p.status = 'alive';
+        p.hp = p.maxHp * 0.6;
+        p.x = (CAMPFIRE_TILE.x + 0.5) * TILE - 50;
+        p.y = (CAMPFIRE_TILE.y + 0.5) * TILE - 30;
+      }
+      if (!sim.storage.personal[p.id]) sim.storage.personal[p.id] = emptyBag(STORAGE_SIZES[sim.base.storage]?.personal ?? STORAGE_SIZES[0].personal);
+    }
+    // 拠点の周りにいたゾンビは消して、保存された位置の周りから湧き直す
+    sim.zombies = [];
+    sim.chunkActive.fill(0);
+    sim.chunkSeeded.fill(-1e9);
+    sim.updateChunks(true);
+    sim.events.push({ k: 'banner', t: `DAY ${sim.day}`, s: '前回の続きから。物資を集めて生き延びろ', c: '#e0cfa8', snd: 'day' });
+    return sim;
+  }
+
   drainEvents(): GameEvent[] {
     const e = this.events;
     this.events = [];
@@ -527,6 +685,11 @@ export class HostSimulation {
 
   takeObjDelta(): { objs: ObjSnap[]; removed: number[] } {
     const objs: ObjSnap[] = [];
+    for (const id of this.changed) this.everChanged.add(id);
+    for (const id of this.removed) {
+      this.everRemoved.add(id);
+      this.everChanged.delete(id);
+    }
     for (const id of this.changed) {
       const o = this.world.objects.get(id);
       if (o) objs.push(toObjSnap(o));
@@ -555,6 +718,7 @@ export class HostSimulation {
       players: this.players.map((p) => ({
         id: p.id,
         name: p.name,
+        ...(p.away ? { away: true } : {}),
         x: r1(p.x),
         y: r1(p.y),
         bodyAngle: r2(p.bodyAngle),
@@ -706,6 +870,11 @@ export class HostSimulation {
   // ======================== プレイヤー ========================
 
   private updatePlayer(p: SimPlayer, dt: number): void {
+    // 通信が切れている仲間は、その場で待機（空腹・汚染・ダウンの時間も止める）
+    if (p.away) {
+      p.queue.length = 0;
+      return;
+    }
     for (const f of p.queue) {
       const px = p.x;
       const py = p.y;
@@ -1547,7 +1716,7 @@ export class HostSimulation {
   }
 
   private damagePlayer(p: SimPlayer, dmg: number): void {
-    if (p.status !== 'alive') return;
+    if (p.status !== 'alive' || p.away) return;
     p.hp -= dmg;
     p.search = null; // 攻撃されたら探索は中断
     this.events.push({ k: 'phit', id: p.id });
@@ -2090,7 +2259,7 @@ export class HostSimulation {
     let best: SimPlayer | null = null;
     let bd = Infinity;
     for (const p of this.players) {
-      if (p.status !== 'alive') continue;
+      if (p.status !== 'alive' || p.away) continue;
       const d = Math.hypot(p.x - x, p.y - y);
       if (d < bd) {
         bd = d;

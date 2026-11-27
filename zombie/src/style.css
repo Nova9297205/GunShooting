@@ -343,6 +343,37 @@ input[type='text'],
 ::placeholder {
   color: #5e5c4c;
 }
+.continue-box {
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(147, 183, 124, 0.45);
+  background: rgba(60, 80, 40, 0.18);
+}
+.continue-box.hidden {
+  display: none;
+}
+.continue-box .cb-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 7px;
+  font-size: 12px;
+  color: #93b77c;
+}
+.continue-box .cb-head span {
+  font-family: 'Share Tech Mono', monospace;
+}
+.continue-box .cb-btns {
+  display: flex;
+  gap: 6px;
+}
+.continue-box .cb-btns .btn {
+  flex: 1;
+  padding: 8px 6px;
+  font-size: 13px;
+}
+.continue-box .cb-btns .btn.small {
+  flex: 0 0 auto;
+}
 .mode-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1567,3 +1598,166 @@ input[type='range'] {
 #perf b { font-weight: 500; }
 #perf i { font-style: normal; }
 #perf .dim { color: rgba(216, 210, 184, 0.45); font-size: 11px; }
+
+/* ---- 再接続（ゲスト） ---- */
+.reconnect {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 7, 5, 0.82);
+}
+.reconnect.hidden {
+  display: none;
+}
+.reconnect .panel {
+  width: min(440px, calc(100vw - 32px));
+  padding-bottom: 14px;
+  text-align: center;
+}
+.reconnect p {
+  margin: 18px 16px;
+  color: #e6e1cc;
+  font-size: 14px;
+}
+
+/* ---- タッチ操作（スマホ・タブレット） ---- */
+#touch {
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#touch.hidden {
+  display: none;
+}
+#game {
+  touch-action: none;
+}
+.tc-stick {
+  position: fixed;
+  width: 112px;
+  height: 112px;
+  margin: -56px 0 0 -56px;
+  border-radius: 50%;
+  border: 2px solid rgba(230, 225, 204, 0.35);
+  background: rgba(10, 12, 8, 0.25);
+  pointer-events: none;
+}
+.tc-stick.aim {
+  border-color: rgba(224, 163, 58, 0.45);
+}
+.tc-stick.aim.firing {
+  border-color: rgba(214, 86, 60, 0.85);
+  box-shadow: 0 0 14px rgba(214, 86, 60, 0.45);
+}
+.tc-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 50%;
+  background: rgba(230, 225, 204, 0.45);
+  border: 1px solid rgba(0, 0, 0, 0.4);
+}
+.tc-btns {
+  position: fixed;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-62%);
+  display: grid;
+  grid-template-columns: repeat(2, 58px);
+  gap: 8px;
+}
+.tc-btn {
+  width: 58px;
+  height: 46px;
+  border-radius: 10px;
+  border: 1px solid rgba(224, 163, 58, 0.5);
+  background: rgba(14, 16, 11, 0.62);
+  color: #e6e1cc;
+  font: bold 12px 'Noto Sans JP', sans-serif;
+  touch-action: none;
+}
+.tc-btn.on {
+  background: rgba(224, 163, 58, 0.55);
+  color: #15170f;
+}
+/* 縦向きのスマホ：横向きにするよう案内 */
+#rotate-hint {
+  display: none;
+}
+@media (orientation: portrait) and (pointer: coarse) {
+  #rotate-hint {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    text-align: center;
+    background: #0b0c09;
+    color: #e6e1cc;
+    font: bold 16px 'Noto Sans JP', sans-serif;
+    line-height: 1.8;
+  }
+}
+
+/* 背の低い画面（スマホの横向きなど）：パネルは画面いっぱいまで使い、中身をスクロール */
+@media (max-height: 520px) {
+  .modal {
+    transform: translate(-50%, -50%);
+    max-height: calc(100vh - 12px);
+  }
+  .inv-wrap,
+  #craft-list {
+    min-height: 0;
+    flex: 1 1 auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .modal .panel-head {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+  .modal-hint {
+    display: none;
+  }
+  .detail {
+    display: none;
+  }
+}
+
+/* 小さい画面：右下のボタンを小さく、タッチのボタンは右端の中ほどに */
+@media (max-height: 520px), (max-width: 900px) {
+  #hud-buttons {
+    right: 6px;
+    bottom: 6px;
+    gap: 4px;
+  }
+  .hud-btn {
+    padding: 4px 7px;
+    font-size: 11px;
+  }
+  .hud-btn kbd {
+    display: none;
+  }
+  .tc-btns {
+    grid-template-columns: repeat(2, 50px);
+    gap: 6px;
+    top: auto;
+    bottom: 52px;
+    transform: none;
+  }
+  .tc-btn {
+    width: 50px;
+    height: 36px;
+    font-size: 11px;
+  }
+}

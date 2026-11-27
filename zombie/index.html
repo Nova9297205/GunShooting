@@ -32,6 +32,14 @@
             <input id="input-name" maxlength="10" placeholder="未入力なら P1〜P3" autocomplete="off" spellcheck="false" />
           </label>
 
+          <div id="continue-box" class="continue-box hidden">
+            <div class="cb-head"><span>// SAVE</span><b id="continue-desc">—</b></div>
+            <div class="cb-btns">
+              <button id="btn-cont-solo" class="btn primary">ソロで続ける</button>
+              <button id="btn-cont-host" class="btn">部屋を作って続ける</button>
+              <button id="btn-cont-del" class="btn ghost small" title="セーブを消す">消す</button>
+            </div>
+          </div>
           <div class="mode-grid">
             <button id="btn-solo" class="btn mode">
               <b>ソロ出撃</b>
@@ -109,6 +117,7 @@
       <button id="btn-inv" class="hud-btn" title="バックパック [Tab]"><span>持ち物</span><kbd>Tab</kbd></button>
       <button id="btn-map" class="hud-btn" title="地図 [B]"><span>地図</span><kbd>B</kbd></button>
       <button id="btn-mute" class="hud-btn icon" title="ミュート [M]">🔊</button>
+      <button id="btn-quit" class="hud-btn icon" title="保存してタイトルへ">⏏</button>
     </div>
 
     <!-- 作業台：武器改造・クラフト・拠点強化 -->
@@ -139,6 +148,15 @@
     </div>
 
     <div id="toast" class="toast hidden"></div>
+    <div id="rotate-hint">📱 画面を横向きにしてください<br /><small>左手で移動、右手で照準（外側まで倒すと射撃）</small></div>
+    <!-- ゲスト：通信が切れたときの再接続 -->
+    <div id="reconnect" class="reconnect hidden">
+      <div class="panel tac">
+        <div class="panel-head"><span class="ph-code">// LINK LOST</span><span>再接続</span></div>
+        <p id="reconnect-msg">ホストとの接続が切れました。再接続しています…</p>
+        <button id="reconnect-cancel" class="btn ghost">あきらめてタイトルへ</button>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

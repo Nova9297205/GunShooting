@@ -95,7 +95,34 @@ export interface NetHandlers {
   onInput: (playerId: number, f: InputFrame) => void;
   onPeerLeft: (playerId: number) => void;
   onHostLost: (reason: string) => void;
+  /** ホスト：通信が切れていたゲストが戻ってきた（そのゲストへ開始情報を送る） */
+  onRejoin: (playerId: number) => void;
 }
+
+/** ゲスト：再接続のための合言葉（このブラウザに保存） */
+const REJOIN_KEY = 'deadnights2d.rejoin';
+export interface RejoinInfo {
+  room: string;
+  slot: number;
+  token: string;
+}
+export function loadRejoin(): RejoinInfo | null {
+  try {
+    const r = JSON.parse(localStorage.getItem(REJOIN_KEY) ?? 'null') as RejoinInfo | null;
+    return r && typeof r.slot === 'number' && typeof r.token === 'string' ? r : null;
+  } catch {
+    return null;
+  }
+}
+function storeRejoin(r: RejoinInfo | null): void {
+  try {
+    if (r) localStorage.setItem(REJOIN_KEY, JSON.stringify(r));
+    else localStorage.removeItem(REJOIN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+const newToken = () => Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
 
 export class NetworkManager {
   role: 'host' | 'guest' | null = null;
@@ -112,6 +139,9 @@ export class NetworkManager {
   private handlers: Partial<NetHandlers> = {};
   private destroyed = false;
   private hostName = 'P1';
+  /** ホスト：各スロットの合言葉と、ゲーム中に通信が切れたスロット（再接続を待つ） */
+  private tokens = new Map<number, string>();
+  private away = new Map<number, { name: string; prof: Profile }>();
 
   setHandlers(h: Partial<NetHandlers>): void {
     this.handlers = { ...this.handlers, ...h };
@@ -155,6 +185,17 @@ export class NetworkManager {
       const msg = data as GuestMessage;
       if (!msg) return;
       if (msg.type === 'hello' && slot < 0) {
+        // ゲーム中に通信が切れた人が、合言葉を持って戻ってきた
+        if (this.inGame && msg.rejoin && this.away.has(msg.rejoin.slot) && this.tokens.get(msg.rejoin.slot) === msg.rejoin.token) {
+          slot = msg.rejoin.slot;
+          const info = this.away.get(slot)!;
+          this.away.delete(slot);
+          this.conns.set(slot, { conn, name: info.name, prof: info.prof });
+          this.rebuildLobby();
+          conn.send({ type: 'welcome', slot, players: this.players, token: this.tokens.get(slot) } satisfies HostMessage);
+          this.handlers.onRejoin?.(slot);
+          return;
+        }
         if (this.inGame) return reject('ゲーム進行中のため参加できません');
         for (let i = 1; i < MAX_PLAYERS; i++) {
           if (!this.conns.has(i)) {
@@ -164,8 +205,9 @@ export class NetworkManager {
         }
         if (slot < 0) return reject('ルームが満員です（最大3人）');
         this.conns.set(slot, { conn, name: sanitizeName(msg.name, slot), prof: sanitizeProfile(msg.prof) });
+        this.tokens.set(slot, newToken());
         this.rebuildLobby();
-        conn.send({ type: 'welcome', slot, players: this.players } satisfies HostMessage);
+        conn.send({ type: 'welcome', slot, players: this.players, token: this.tokens.get(slot) } satisfies HostMessage);
         this.broadcastLobby();
       } else if (msg.type === 'input' && slot >= 0) {
         this.handlers.onInput?.(slot, msg.f);
@@ -173,6 +215,8 @@ export class NetworkManager {
     });
     const onLeave = () => {
       if (slot < 0 || this.conns.get(slot)?.conn !== conn) return;
+      // ゲーム中なら席を空けずに再接続を待つ
+      if (this.inGame) this.away.set(slot, { name: this.conns.get(slot)!.name, prof: this.conns.get(slot)!.prof });
       this.conns.delete(slot);
       this.rebuildLobby();
       this.broadcastLobby();
@@ -184,8 +228,20 @@ export class NetworkManager {
   }
 
   private rebuildLobby(): void {
-    const ids = [...this.conns.keys()].sort();
-    this.players = [{ id: 0, name: this.hostName, prof: loadProfile() }, ...ids.map((id) => ({ id, name: this.conns.get(id)!.name, prof: this.conns.get(id)!.prof }))];
+    const ids = [...new Set([...this.conns.keys(), ...this.away.keys()])].sort();
+    this.players = [
+      { id: 0, name: this.hostName, prof: loadProfile() },
+      ...ids.map((id) => {
+        const c = this.conns.get(id) ?? this.away.get(id)!;
+        return { id, name: c.name, prof: c.prof };
+      }),
+    ];
+  }
+
+  /** ホスト：1人のゲストにだけ開始情報を送る（再接続） */
+  sendStartTo(slot: number, info: StartInfo): void {
+    const c = this.conns.get(slot);
+    if (c?.conn.open) sendBig(c.conn, { type: 'start', info } satisfies HostMessage);
   }
 
   private broadcastLobby(): void {
@@ -217,12 +273,15 @@ export class NetworkManager {
 
   returnToLobby(): void {
     this.inGame = false;
+    // 戻ってこなかった人の席は空ける
+    this.away.clear();
+    this.rebuildLobby();
     this.broadcastLobby();
   }
 
   // ======================== ゲスト ========================
 
-  async join(code: string, name: string): Promise<{ slot: number; players: LobbyPlayer[] }> {
+  async join(code: string, name: string, rejoin?: RejoinInfo | null): Promise<{ slot: number; players: LobbyPlayer[] }> {
     this.role = 'guest';
     this.roomCode = code.toUpperCase().trim();
     this.peer = await this.openPeer(null);
@@ -246,7 +305,9 @@ export class NetworkManager {
       this.hostConn = conn;
       let lastSnapAt = 0;
 
-      conn.on('open', () => conn.send({ type: 'hello', name, prof: loadProfile() } satisfies GuestMessage));
+      conn.on('open', () =>
+        conn.send({ type: 'hello', name, prof: loadProfile(), ...(rejoin && rejoin.room === this.roomCode ? { rejoin: { slot: rejoin.slot, token: rejoin.token } } : {}) } satisfies GuestMessage),
+      );
       const asm = new ChunkAssembler();
       conn.on('data', (raw) => {
         const data = asm.feed(raw);
@@ -255,6 +316,7 @@ export class NetworkManager {
         switch (msg.type) {
           case 'welcome':
             this.localId = msg.slot;
+            if (msg.token) storeRejoin({ room: this.roomCode, slot: msg.slot, token: msg.token });
             this.players = msg.players;
             clearTimeout(timer);
             if (!settled) {

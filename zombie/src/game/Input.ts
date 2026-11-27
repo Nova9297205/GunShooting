@@ -19,6 +19,24 @@ export class InputController {
   private clickQueued = false;
   /** ホイールで選択ツールを変える量（+1 / -1） */
   wheel = 0;
+  /** タッチ操作：移動スティックの向き（-1..1）と、照準スティックを外側まで倒しているか */
+  touchMove: { x: number; y: number } | null = null;
+  touchFire = false;
+
+  /** タッチのボタン：押した瞬間のキーとして渡す */
+  press(code: string): void {
+    this.edges.add(code);
+  }
+
+  /** タッチのボタン：押しっぱなしのキー（蘇生など） */
+  setKey(code: string, down: boolean): void {
+    if (down) this.keys.add(code);
+    else this.keys.delete(code);
+  }
+
+  pressDash(): void {
+    this.dashQueued = true;
+  }
 
   constructor(private target: HTMLCanvasElement) {}
 
@@ -48,6 +66,7 @@ export class InputController {
   }
 
   getMove(): { x: number; y: number } {
+    if (this.touchMove) return { ...this.touchMove };
     let x = 0;
     let y = 0;
     if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) y -= 1;
@@ -74,7 +93,7 @@ export class InputController {
 
   /** 左ボタンが押されている、またはこのフレームまでにクリックがあった */
   consumeFire(): boolean {
-    const f = this.mouseDown || this.clickQueued;
+    const f = this.mouseDown || this.clickQueued || this.touchFire;
     this.clickQueued = false;
     return f;
   }
