@@ -7,7 +7,7 @@ import { audio } from './game/Audio';
 import { HostSimulation } from './game/Engine';
 import { GameSession } from './game/GameSession';
 import { loadRejoin, NetworkManager, sanitizeName } from './network/NetworkManager';
-import { levelOf, loadProfile, type Profile, saveProfile, SKILLS } from './game/progression';
+import { addRecord, levelOf, loadProfile, loadRecords, type Profile, saveProfile, SKILLS } from './game/progression';
 import { TitleBackdrop } from './ui/TitleBackdrop';
 import { clearSave, describeSave, loadSave } from './game/save';
 import type { SaveData } from './game/Engine';
@@ -94,9 +94,15 @@ let continueSave: SaveData | null = null;
 function renderProfile(): void {
   const prof = loadProfile();
   const box = $('profile-box');
+  const recs = loadRecords().slice(0, 3);
+  const recHtml = recs.length
+    ? `<div class="pb-recs"><span>戦績 TOP3</span>${recs
+        .map((r, i) => `<div class="pb-rec"><i>${i + 1}</i>DAY ${r.day}・撃破 ${r.kills}・価値 ${r.value}<small>${r.mode === 'solo' ? 'ソロ' : `${r.players}人`}・${new Date(r.at).toLocaleDateString()}</small></div>`)
+        .join('')}</div>`
+    : '';
   box.innerHTML = `<div class="pb-title"><span>保存済みの記録</span><span>最長生存 <b>${prof.bestDay}</b> 日 ・ 持ち帰り総額 <b>${prof.banked}</b></span></div>${SKILLS.map(
     (sk, i) => `<div class="pb-skill">${sk.name}<b>Lv${levelOf(prof.xp[i] ?? 0)}</b></div>`,
-  ).join('')}`;
+  ).join('')}${recHtml}`;
 }
 
 /** ロビーのカード用：スキルのレベル表示 */
@@ -186,7 +192,10 @@ function showResult(r: GameResult): void {
     prof.bestDay = Math.max(prof.bestDay, r.day);
     prof.banked += mine.value;
     saveProfile(prof);
-  }
+    // 戦績（上位10件）に追加
+    const { rank, best } = addRecord({ at: Date.now(), name: mine.name, day: r.day, kills: mine.kills, value: mine.value, mode, players: r.players.length });
+    $('result-record').textContent = best ? '★ 自己ベスト更新！' : rank <= 10 ? `戦績 ${rank} 位` : '';
+  } else $('result-record').textContent = '';
   $('result-day').textContent = String(r.day);
   const body = $('result-body');
   body.innerHTML = '';

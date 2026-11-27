@@ -17,6 +17,7 @@ import {
   MAP_W,
   PLAYER,
   PLAYER_COLORS,
+  SAFEHOUSE,
   T_BRIDGE,
   T_ROAD,
   T_SHALLOW,
@@ -433,6 +434,7 @@ export class Renderer {
     this.drawWaterShimmer(vx0, vy0, vx1, vy1);
 
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
+    if (view.base.garden >= 1) this.drawGarden(view.base.garden);
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
     // （地図の端は柵で塞がず、外側の遠景と汚染の霞につなげる）
@@ -563,6 +565,34 @@ export class Renderer {
       });
     }
     this.vision.update(this.world, viewers);
+  }
+
+  /** 拠点の菜園：畝と作物（レベルが上がると畝が増え、作物が育つ） */
+  private drawGarden(lv: number): void {
+    const { ctx } = this;
+    const x0 = (SAFEHOUSE.x + 11) * TILE;
+    const y0 = (SAFEHOUSE.y + 2) * TILE;
+    const rows = lv >= 2 ? 4 : 2;
+    for (let r = 0; r < rows; r++) {
+      const y = y0 + r * 34;
+      ctx.fillStyle = 'rgba(0,0,0,0.25)';
+      ctx.fillRect(x0 + 3, y + 5, 200, 20);
+      ctx.fillStyle = '#4a3a28';
+      ctx.fillRect(x0, y, 200, 20);
+      ctx.fillStyle = 'rgba(120,95,60,0.6)';
+      ctx.fillRect(x0, y, 200, 3);
+      for (let k = 0; k < 10; k++) {
+        const px = x0 + 10 + k * 19;
+        const py = y + 10;
+        const s = lv >= 2 ? 8 : 5;
+        ctx.fillStyle = k % 3 === 0 ? '#7a9a48' : '#5e8a3a';
+        for (const a of [-0.9, 0, 0.9]) {
+          ctx.beginPath();
+          ctx.ellipse(px + Math.sin(a) * s * 0.6, py - Math.cos(a) * s * 0.4, s * 0.45, s * 0.9, a, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
   }
 
   /** 水面の揺らぎ：映っている水のタイルに、ゆっくり流れる光の筋（毎フレーム・軽量） */
@@ -2085,6 +2115,7 @@ export class Renderer {
       ctx.textAlign = 'left';
       bx -= 4;
     };
+    if (view.horde) badge('大群', '#e0583e', Math.sin(this.time * 6) > 0);
     if (view.wx > 0.3 && view.weather !== 'clear') badge({ fog: '霧', rain: '雨', storm: '嵐', clear: '' }[view.weather], '#9fb4c8');
     badge(night ? '☾ 夜' : '☀ 昼', night ? '#9fb4c8' : '#e0a33a', !night);
 
@@ -2121,7 +2152,11 @@ export class Renderer {
       const d = Math.hypot(tx - BASE_TX, ty - BASE_TY);
       const tier = loc && loc.kind !== 'base' ? loc.tier : tierAtDistance(d);
       const edge = edgeDistance(tx, ty) < EDGE_BAND;
-      if (loc?.kind === 'base') {
+      if (loc?.kind === 'base' && view.horde) {
+        sub = '拠点 — 大群が侵入してくる';
+        col = '#e0583e';
+        tag = 'DANGER';
+      } else if (loc?.kind === 'base') {
         sub = '拠点 — 安全地帯';
         col = '#93b77c';
         tag = 'SAFE';

@@ -348,7 +348,12 @@ export class HostSimulation {
   contents = new Map<number, (Slot | null)[]>();
   storage: StorageState = { ver: 1, shared: emptyBag(STORAGE_SIZES[0].shared), personal: {} };
   /** 拠点設備のレベル */
-  base: Record<Facility, number> = { bench: 1, storage: 0, med: 0, supply: 0 };
+  base: Record<Facility, number> = { bench: 1, storage: 0, med: 0, supply: 0, garden: 0 };
+  /** 大群の夜（3日ごと）：拠点の柵も安全ではなくなる */
+  hordeNight = false;
+  private hordeWaves = 0;
+  private hordeT = 0;
+  private hordeReward = false;
   weather: Weather = 'clear';
   /** 天候の強さ（0..1 でなめらかに切り替わる） */
   wx = 0;
@@ -669,7 +674,8 @@ export class HostSimulation {
       if (p.status !== 'alive' || inBase(p.x, p.y)) continue;
       const d = Math.round(Math.hypot(p.x / TILE - BASE_TX, p.y / TILE - BASE_TY));
       const secs = Math.round((d * TILE) / PLAYER.speed);
-      this.events.push({ k: 'feed', cat: 'danger', t: `日没まで約1時間：拠点まで ${d}m（走って約${secs}秒）。夜は感染体が速く、多くなる`, c: '#e0a33a', id: p.id, snd: 'alarm' });
+      const horde = this.day % 3 === 0;
+      this.events.push({ k: 'feed', cat: 'danger', t: `${horde ? '今夜は大群の夜！ ' : ''}日没まで約1時間：拠点まで ${d}m（走って約${secs}秒）。${horde ? '拠点の柵も破られる。弾と回復を備えて戻れ' : '夜は感染体が速く、多くなる'}`, c: horde ? '#e0583e' : '#e0a33a', id: p.id, snd: 'alarm' });
     }
   }
 
@@ -713,6 +719,7 @@ export class HostSimulation {
       ...(withStorage ? { storage: this.storage } : {}),
       weather: this.weather,
       wx: r2(this.wx),
+      ...(this.hordeNight ? { horde: true } : {}),
       base: this.base,
       drop: this.dropPos(),
       players: this.players.map((p) => ({
@@ -786,6 +793,15 @@ export class HostSimulation {
     this.tick++;
     this.updateClock(dt);
     this.updateReturnAdvice();
+    if (this.hordeNight && this.hordeWaves > 0) {
+      this.hordeT -= dt;
+      if (this.hordeT <= 0) {
+        this.hordeT = 22;
+        this.hordeWaves--;
+        this.spawnHordeWave();
+        if (this.hordeWaves < 2) this.events.push({ k: 'feed', cat: 'danger', t: '次の群れが来る！', c: '#e0583e', snd: 'alarm' });
+      }
+    }
     for (const p of this.players) this.updatePlayer(p, dt);
     this.updateRevive(dt);
     this.flowTimer -= dt;
@@ -838,9 +854,27 @@ export class HostSimulation {
     this.rollWeather();
     if (this.phase === 'night') {
       this.spawnPatrols(1 + Math.floor(Math.random() * 2));
-      this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: '闇が濃くなった。懐中電灯の光はゾンビにも見えている', c: '#aab4c8', snd: 'night' });
+      if (this.day % 3 === 0) {
+        // 大群の夜：拠点の柵も破られる。3回に分けて押し寄せる
+        this.hordeNight = true;
+        this.hordeWaves = 3;
+        this.hordeT = 0;
+        this.events.push({ k: 'banner', t: `DAY ${this.day} - 大群の夜`, s: '大群が押し寄せる。今夜は拠点の柵も破られる — 朝まで持ちこたえろ', c: '#e0583e', snd: 'horde' });
+      } else this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: '闇が濃くなった。懐中電灯の光はゾンビにも見えている', c: '#aab4c8', snd: 'night' });
     } else {
-      this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: '夜を越えた。物資を集めて拠点へ持ち帰れ', c: '#e0cfa8', snd: 'day' });
+      if (this.hordeNight) {
+        // 大群の夜を越えた：生き残った人に経験値、拠点の収納箱に特別な補給
+        this.hordeNight = false;
+        this.hordeWaves = 0;
+        this.hordeReward = true;
+        for (const z of this.zombies) z.keep = false;
+        for (const p of this.players) {
+          if (p.status !== 'alive') continue;
+          this.gainXp(p, 2, 25);
+          this.gainXp(p, 1, 15);
+        }
+        this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: '大群の夜を越えた！ 拠点の収納箱に特別な補給が届いている', c: '#e0cfa8', snd: 'clear' });
+      } else this.events.push({ k: 'banner', t: `DAY ${this.day}`, s: '夜を越えた。物資を集めて拠点へ持ち帰れ', c: '#e0cfa8', snd: 'day' });
       // 戦闘不能者は拠点で復帰（持ち物は倒れた場所に落ちたまま）
       const cx = (CAMPFIRE_TILE.x + 0.5) * TILE;
       const cy = (CAMPFIRE_TILE.y + 0.5) * TILE;
@@ -862,6 +896,7 @@ export class HostSimulation {
           this.changed.add(o.id);
         }
       }
+      this.hordeReward = false;
       // 次の補給物資の投下時刻
       this.dropAt = 20 + Math.random() * 50;
     }
@@ -1371,7 +1406,7 @@ export class HostSimulation {
         this.base[def.id] = lv + 1;
         if (def.id === 'storage') this.resizeStorage();
         this.storage.ver++;
-        this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が拠点の${def.name}を強化した（Lv${cur + 2}）`, c: '#e0cfa8', snd: 'level' });
+        this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が拠点の${def.name}を強化した（Lv${this.base[def.id]}）`, c: '#e0cfa8', snd: 'level' });
         this.pop(p, `${def.name} 強化！`, '#e0cfa8', 'craft');
         break;
       }
@@ -1589,7 +1624,8 @@ export class HostSimulation {
 
   /** 入れ物の中身を生成（遠く危険な場所ほど多く・レアに） */
   private rollLoot(o: SimObj): (Slot | null)[] {
-    const out = emptyBag(o.kind === 'mcrate' || o.kind === 'wcase' || o.kind === 'drop' ? 8 : 6);
+    // 拠点の収納箱は毎朝の補給・菜園の収穫・褒美がまとめて入るので広め
+    const out = emptyBag(o.kind === 'box' ? 12 : o.kind === 'mcrate' || o.kind === 'wcase' || o.kind === 'drop' ? 8 : 6);
     let table = LOOT[o.kind];
     if (!table) return out;
     const tier = o.kind === 'box' ? 0 : o.kind === 'drop' ? 4 : this.tierAt(o.tx, o.ty);
@@ -1811,7 +1847,7 @@ export class HostSimulation {
     const y = (i - x) / MAP_W;
     // 拠点（安全地帯）にはゾンビは入らない
     const sh = SAFEHOUSE;
-    if (x >= sh.x && y >= sh.y && x < sh.x + sh.w && y < sh.y + sh.h) return -1;
+    if (!this.hordeNight && x >= sh.x && y >= sh.y && x < sh.x + sh.w && y < sh.y + sh.h) return -1;
     const o = this.world.objAt(x, y);
     // 浅瀬は遅いので遠回りでも橋を選びがち
     if (!o) return t === T_SHALLOW ? 2.5 : 1;
@@ -1824,7 +1860,7 @@ export class HostSimulation {
     flow.fill(Infinity);
     const heap = new MinHeap();
     for (const p of this.players) {
-      if (p.status !== 'alive' || inBase(p.x, p.y)) continue;
+      if (p.status !== 'alive' || p.away || this.safeIn(p.x, p.y)) continue;
       const i = Math.floor(p.y / TILE) * MAP_W + Math.floor(p.x / TILE);
       flow[i] = 0;
       heap.push(0, i);
@@ -2225,6 +2261,19 @@ export class HostSimulation {
     }
     if (this.base.med >= 1) addItem(c, 'bandage', 2);
     if (this.base.med >= 2) addItem(c, 'medkit', 1);
+    // 菜園の収穫
+    if (this.base.garden >= 1) {
+      addItem(c, 'can', this.base.garden >= 2 ? 4 : 2);
+      addItem(c, 'herbs', this.base.garden >= 2 ? 2 : 1);
+      if (this.base.garden >= 2) addItem(c, 'mre', 1);
+    }
+    // 大群の夜を越えた褒美
+    if (this.hordeReward) {
+      addItem(c, 'ammo9', 20);
+      addItem(c, 'ammo762', 15);
+      addItem(c, 'medkit', 1);
+      addItem(c, 'mre', 1);
+    }
     return c;
   }
 
@@ -2255,6 +2304,41 @@ export class HostSimulation {
     return this.world.lineClear(z.x, z.y, p.x, p.y);
   }
 
+  /** 拠点の中で、いまゾンビから守られているか（大群の夜は守られない） */
+  private safeIn(x: number, y: number): boolean {
+    return !this.hordeNight && inBase(x, y);
+  }
+
+  /** 大群：各プレイヤーの周り（画面の外）から一斉に押し寄せる */
+  private spawnHordeWave(): void {
+    const alive = this.players.filter((p) => p.status === 'alive' && !p.away);
+    if (!alive.length) return;
+    const total = Math.min(48, 10 + this.day * 2);
+    for (const p of alive) {
+      const n = Math.ceil(total / alive.length);
+      for (let k = 0; k < n && this.zombies.length < MAX_ZOMBIES; k++) {
+        for (let t = 0; t < 12; t++) {
+          const a = Math.random() * Math.PI * 2;
+          const d = 650 + Math.random() * 350;
+          const x = p.x + Math.cos(a) * d;
+          const y = p.y + Math.sin(a) * d;
+          const tx = Math.floor(x / TILE);
+          const ty = Math.floor(y / TILE);
+          if (this.world.solid(tx, ty) || inBase(x, y)) continue;
+          const tier = Math.min(4, tierAtDistance(Math.hypot(tx - BASE_TX, ty - BASE_TY)) + 1);
+          const z = this.spawnZombie(this.typeAt(tier, tx, ty), x, y);
+          z.keep = true;
+          z.state = 'chase';
+          z.stateT = 40;
+          z.targetX = p.x;
+          z.targetY = p.y;
+          break;
+        }
+      }
+    }
+    this.flowTimer = 0;
+  }
+
   private nearestAlive(x: number, y: number): { p: SimPlayer; d: number } | null {
     let best: SimPlayer | null = null;
     let bd = Infinity;
@@ -2281,7 +2365,7 @@ export class HostSimulation {
     if (z.senseT <= 0) {
       z.senseT = 0.2;
       for (const p of this.players) {
-        if (p.status !== 'alive' || inBase(p.x, p.y)) continue;
+        if (p.status !== 'alive' || p.away || this.safeIn(p.x, p.y)) continue;
         if (this.canSee(z, p)) {
           this.startChase(z);
           z.targetX = p.x;
@@ -2372,8 +2456,8 @@ export class HostSimulation {
     const py = z.y;
     const collided: { tx: number; ty: number }[] = [];
     moveCircle(z, (dx * speed + z.kx) * dt, (dy * speed + z.ky) * dt, st.radius, this.world, collided);
-    // 拠点（安全地帯）には入れない
-    if (inBase(z.x, z.y)) {
+    // 拠点（安全地帯）には入れない（大群の夜は除く）
+    if (this.safeIn(z.x, z.y)) {
       z.x = px;
       z.y = py;
       if (z.state !== 'chase') {

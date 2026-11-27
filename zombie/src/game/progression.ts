@@ -91,7 +91,7 @@ export function saveProfile(p: Profile): void {
 }
 
 // ---------------- 拠点設備 ----------------
-export type Facility = 'bench' | 'storage' | 'med' | 'supply';
+export type Facility = 'bench' | 'storage' | 'med' | 'supply' | 'garden';
 
 export interface FacilityDef {
   id: Facility;
@@ -139,6 +139,15 @@ export const FACILITIES: FacilityDef[] = [
       { scrap: 16, parts: 3, tools: 1, mre: 1 },
     ],
   },
+  {
+    id: 'garden',
+    name: '菜園',
+    levels: ['未設置（森林の薬草を植えて始める）', 'Lv1：毎朝 缶詰2・薬草1が採れる', 'Lv2：毎朝 缶詰4・薬草2・軍用レーション1'],
+    costs: [
+      { cloth: 6, scrap: 8, herbs: 2 },
+      { scrap: 14, chem: 3, tools: 1 },
+    ],
+  },
 ];
 
 export const STORAGE_SIZES = [
@@ -147,3 +156,36 @@ export const STORAGE_SIZES = [
   { shared: 80, personal: 40 },
 ];
 export const MED_REGEN = [2, 4, 7];
+
+// ---------------- 戦績（このブラウザに上位10件） ----------------
+export interface RunRecord {
+  at: number;
+  name: string;
+  day: number;
+  kills: number;
+  value: number;
+  mode: string;
+  players: number;
+}
+const REC_KEY = 'deadnights2d.records';
+
+export function loadRecords(): RunRecord[] {
+  try {
+    const r = JSON.parse(localStorage.getItem(REC_KEY) ?? '[]') as RunRecord[];
+    return Array.isArray(r) ? r.filter((x) => x && typeof x.day === 'number') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 記録を追加して順位を返す（生存日数 → 持ち帰った価値 → 撃破数の順）。best = 1位になった */
+export function addRecord(rec: RunRecord): { rank: number; best: boolean } {
+  const list = [...loadRecords(), rec].sort((a, b) => b.day - a.day || b.value - a.value || b.kills - a.kills);
+  const rank = list.indexOf(rec) + 1;
+  try {
+    localStorage.setItem(REC_KEY, JSON.stringify(list.slice(0, 10)));
+  } catch {
+    /* ignore */
+  }
+  return { rank, best: rank === 1 };
+}

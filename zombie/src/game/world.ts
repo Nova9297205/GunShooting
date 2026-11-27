@@ -1081,6 +1081,8 @@ export function generateWorld(seed: number): GeneratedWorld {
     for (let x = 1; x < MAP_W - 1; x++) {
       if (terrain[idx(x, y)] !== T_ROAD) continue;
       if (x >= sh.x - 2 && x <= sh.x + sh.w + 1 && y >= sh.y - 2 && y <= sh.y + sh.h + 1) continue;
+      // 橋の上と、橋の前後（渡れる場所が限られるので車でふさがない）
+      if (features.bridges.some((bb) => !bb.broken && x >= bb.x - 4 && x <= bb.x + bb.w + 3 && y >= bb.y - 1 && y <= bb.y + bb.h)) continue;
       // 国道は乗り捨てられた車の列が多い
       const onHwy = features.highways.some((h) => (h.horiz ? y >= h.at && y < h.at + h.w : x >= h.at && x < h.at + h.w));
       const p = (0.012 + tierAtDistance(distOf(x, y)) * 0.006) * (onHwy ? 1.8 : 1);

@@ -1761,3 +1761,39 @@ input[type='range'] {
     font-size: 11px;
   }
 }
+
+/* ---- 戦績 ---- */
+.pb-recs {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(190, 180, 130, 0.18);
+  font-size: 11px;
+  color: #bdb79e;
+}
+.pb-recs > span {
+  display: block;
+  margin-bottom: 3px;
+  color: #e0a33a;
+  font-family: 'Share Tech Mono', monospace;
+}
+.pb-rec {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.pb-rec i {
+  font-style: normal;
+  color: #e0a33a;
+  width: 12px;
+}
+.pb-rec small {
+  margin-left: auto;
+  color: #8c8872;
+}
+.result-record {
+  margin: 0 0 8px;
+  color: #e0b862;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}

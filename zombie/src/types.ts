@@ -225,6 +225,8 @@ export type GameEvent =
 
 /** 描画に必要なワールドの状態（オブジェクトは TileWorld 側で保持） */
 export interface ViewState {
+  /** 大群の夜 */
+  horde?: boolean;
   time: number;
   tick: number;
   day: number;
