@@ -9,6 +9,7 @@ import { isTouchDevice, TouchControls } from '../ui/TouchControls';
 import { clearSave, writeSave } from './save';
 import { buildDef, buildSpotError, canAfford } from './build';
 import { seatPos, trunkPos, VEHICLE } from './vehicles';
+import { gamepad, PAD, padSettings } from '../ui/Gamepad';
 import { PerfOverlay, type PerfCounts } from './PerfOverlay';
 import type {
   VehicleSnap,
@@ -106,6 +107,13 @@ export class GameSession {
   private lastBuild: BuildKind = 'woodWall';
   private buildGhost: { tx: number; ty: number; err: string | null } | null = null;
   private touchFirePrev = false;
+  // ---- コントローラー ----
+  private padSettings = padSettings();
+  private padBtn = document.getElementById('btn-pad');
+  private padAim = { x: 180, y: 0 };
+  private padMove = false;
+  private padFire = false;
+  private padRevive = false;
   /** 入れ物・倉庫を開いたことで自動的にパネルを開いたか */
   private autoOpened = false;
   private lastViewing = 0;
@@ -208,6 +216,7 @@ export class GameSession {
       this.mapOpen = !this.mapOpen;
       audio.click();
     };
+    if (this.padBtn) this.padBtn.onclick = () => this.padSettings.toggle();
     this.muteBtn.onclick = () => {
       audio.toggleMute();
       audio.click();
@@ -215,6 +224,8 @@ export class GameSession {
   }
 
   stop(): void {
+    gamepad.gameplay = false;
+    this.padSettings.toggle(false);
     // 抜けるときに保存（全滅で終わったときは保存しない）
     if (this.sim && !this.sim.gameOver) writeSave(this.sim.toSave());
     this.renderer.destroy();
@@ -549,6 +560,7 @@ export class GameSession {
     }
 
     // ---- 入力 ----
+    this.applyGamepad(myPos, myStatus);
     const prevTool = this.localTool;
     // V：建設モード（建てる物は 1〜6・ホイールで選ぶ）
     if (this.input.consume('KeyV')) {
@@ -739,6 +751,7 @@ export class GameSession {
       interactHint: me && me.status === 'alive' && !this.buildKind ? this.touchWords(this.interactHint(me) ?? this.giveHint(me, view, dt)) : null,
       build: this.buildKind && this.buildGhost ? { kind: this.buildKind, ...this.buildGhost } : null,
       touch: !!this.touch,
+      pad: gamepad.active && gamepad.usedT > this.input.mouseT,
       syncMs: this.o.mode === 'guest' ? this.o.net?.snapInterval : undefined,
       muted: audio.settings.muted,
     });
@@ -929,8 +942,73 @@ export class GameSession {
     return false;
   }
 
+  /** コントローラーの入力を、キー・マウスの入力に置き換えて渡す（ゲーム中だけ。パネルでは画面のカーソル） */
+  private applyGamepad(myPos: { x: number; y: number } | null, status: PlayerSnap['status']): void {
+    const menu = this.craftMenu.open || this.invPanel.open || this.mapOpen || this.padSettings.open;
+    gamepad.gameplay = !menu;
+    const g = gamepad.current();
+    const release = () => {
+      if (this.padMove) this.input.touchMove = null;
+      if (this.padFire) this.input.touchFire = false;
+      if (this.padRevive) this.input.setKey('KeyE', false);
+      this.padMove = this.padFire = this.padRevive = false;
+    };
+    if (!g || menu) {
+      release();
+      return;
+    }
+    const pr = gamepad.takePressed();
+    // 移動
+    if (gamepad.lx || gamepad.ly) {
+      this.input.touchMove = { x: gamepad.lx, y: gamepad.ly };
+      this.padMove = true;
+    } else if (this.padMove) {
+      this.input.touchMove = null;
+      this.padMove = false;
+    }
+    // 射撃（RT）
+    const fire = gamepad.rt > 0.5;
+    if (fire || this.padFire) {
+      this.input.touchFire = fire;
+      this.padFire = fire;
+    }
+    // 蘇生（LT 長押し）
+    const rev = gamepad.lt > 0.5;
+    if (rev !== this.padRevive) {
+      this.input.setKey('KeyE', rev);
+      this.padRevive = rev;
+    }
+    // 照準（右スティック）：自分から見た向きと距離。マウスを最後に使っていたらマウスを優先
+    const m = Math.hypot(gamepad.rx, gamepad.ry);
+    if (m > 0.15) this.padAim = { x: (gamepad.rx / m) * (90 + m * 230), y: (gamepad.ry / m) * (90 + m * 230) };
+    if (myPos && gamepad.usedT > this.input.mouseT) {
+      const s = this.renderer.worldToScreen(myPos.x, myPos.y);
+      this.input.mouseX = s.x + this.padAim.x;
+      this.input.mouseY = s.y + this.padAim.y;
+    }
+    if (status === 'dead') return;
+    const key = (b: number, code: string) => {
+      if (pr.has(b)) this.input.press(code);
+    };
+    key(PAD.A, 'KeyF');
+    if (pr.has(PAD.B)) this.input.pressDash();
+    key(PAD.X, this.buildKind ? 'KeyX' : 'KeyR');
+    if (pr.has(PAD.Y) || pr.has(PAD.RB)) this.input.wheel += 1;
+    if (pr.has(PAD.LB)) this.input.wheel -= 1;
+    key(PAD.START, 'Tab');
+    key(PAD.BACK, 'KeyB');
+    key(PAD.L3, 'KeyQ');
+    key(PAD.R3, 'KeyH');
+    key(PAD.UP, 'KeyG');
+    key(PAD.DOWN, 'KeyV');
+    key(PAD.LEFT, 'KeyC');
+    key(PAD.RIGHT, 'KeyT');
+  }
+
   /** タッチ端末では、キーの名前をボタンの名前に置き換える */
   private touchWords(h: string | null): string | null {
+    if (h && gamepad.active && gamepad.usedT > this.input.mouseT)
+      return h.replace(/\[F\]/g, '[A]').replace(/\[E\] 長押し/g, '[LT] 長押し').replace(/\[Q\]/g, '[L3]').replace(/\[H\]/g, '[R3]').replace(/\[C\]/g, '[十字←]').replace(/移動キー/g, '左スティック');
     if (!h || !this.touch) return h;
     return h.replace(/\[F\]/g, '[調べる]').replace(/\[E\] 長押し/g, '[蘇生] 長押し').replace(/\[Q\]/g, '[食事]').replace(/\[C\]/g, '[作業台]').replace(/移動キー/g, '左スティック');
   }

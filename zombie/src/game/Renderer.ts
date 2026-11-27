@@ -72,6 +72,8 @@ export interface RenderOptions {
   build?: { kind: BuildKind; tx: number; ty: number; err: string | null } | null;
   /** タッチ操作の端末 */
   touch?: boolean;
+  /** コントローラーで遊んでいる */
+  pad?: boolean;
 }
 
 /** 射撃・近接・リロードを検出したときに呼ばれるフック（効果音用） */
@@ -454,7 +456,7 @@ export class Renderer {
     ctx.font = `bold 12px ${UI}`;
     ctx.fillStyle = '#e0a33a';
     ctx.fillText(
-      touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜6]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
+      this.padUI ? '建設モード — [RB/LB] 選ぶ・右スティックで場所・[RT] 建てる・[X] 撤去・[A] 修理・[十字↓] 終了' : touch ? '建設モード — [武器] 選ぶ・右スティックで向けて撃つ＝建てる・[建設] 終了' : '建設モード — [1〜6]/ホイール 選択・左クリック 建てる・右クリック 撤去・[F] 修理・[V]/Esc 終了',
       this.w / 2,
       y0 - 12,
     );
@@ -536,6 +538,10 @@ export class Renderer {
     const baked = this.art.bakeTerrain(this.world);
     this.terrain = baked.cache;
     this.miniCanvas = baked.mini;
+  }
+
+  worldToScreen(wx: number, wy: number): { x: number; y: number } {
+    return { x: wx - this.cam.x + this.w / 2, y: wy - this.cam.y + this.h / 2 };
   }
 
   screenToWorld(sx: number, sy: number): { x: number; y: number } {
@@ -693,6 +699,7 @@ export class Renderer {
     this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
     this.touchUI = !!o.touch;
+    this.padUI = !!o.pad;
     this.vehLights = (view.vehicles ?? []).filter((v) => v.seats[0] >= 0 && !v.broken).map((v) => ({ x: v.x + Math.cos(v.a) * 90, y: v.y + Math.sin(v.a) * 90 }));
     for (const v of view.vehicles ?? []) if (v.x > vx0 - 60 && v.y > vy0 - 60 && v.x < vx1 + 60 && v.y < vy1 + 60) this.drawVehicle(v, view);
     for (const p of view.players) if (p.veh === undefined) this.drawPlayerMarker(p, p.id === o.localId);
@@ -1355,6 +1362,7 @@ export class Renderer {
   photo = false;
   /** タッチ操作の端末（ボタン名で案内する） */
   private touchUI = false;
+  private padUI = false;
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
     const out: { x: number; y: number; r: number; warm: number }[] = [];
     for (const l of this.vehLights) out.push({ x: l.x, y: l.y, r: 230, warm: 0.15 });
@@ -2566,7 +2574,7 @@ export class Renderer {
     const { ctx } = this;
     const items: { t: string; fix: string; c: string; bad: boolean }[] = [];
     const has = (id: ItemId) => countItem(me.bag, id) > 0;
-    const H = this.touchUI ? '[回復]' : '[H]';
+    const H = this.padUI ? '[R3]' : this.touchUI ? '[回復]' : '[H]';
     if (me.bleed) items.push({ t: '出血', fix: has('bandage') || has('medkit') ? `${H} 包帯で止血` : '包帯がない！ 布2で作れる', c: '#e0583e', bad: true });
     if (me.frac === 1) items.push({ t: '骨折', fix: has('splint') ? `${H} 添え木を当てる` : '添え木（布2・鉄くず1）を作る', c: '#e0583e', bad: true });
     else if (me.frac === 2) items.push({ t: '骨折（手当て済み）', fix: '少し足が遅い・じきに治る', c: '#c9a050', bad: false });
@@ -2735,7 +2743,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = `9px ${UI}`;
     ctx.fillStyle = '#6f6c5a';
-    ctx.fillText('F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
+    ctx.fillText(this.padUI ? 'A 調べる ・ START 持ち物 ・ X 装填 ・ 十字← 作業台 ・ 十字↓ 建設 ・ BACK 地図' : 'F 探索/乗る ・ Tab 持ち物 ・ R 装填 ・ C 作業台 ・ V 建設 ・ B 地図', x + 10, y + ph - 9, pw - 20);
     void view;
   }
 

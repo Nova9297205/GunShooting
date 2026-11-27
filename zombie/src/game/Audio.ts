@@ -6,6 +6,7 @@
 // ============================================================
 import type { GameEvent, SoundKey, ViewState, WeaponId } from '../types';
 import { TILE, ZOMBIE } from './constants';
+import { gamepad } from '../ui/Gamepad';
 
 export type MusicMood = 'day' | 'night' | 'horde';
 
@@ -579,7 +580,10 @@ export class AudioManager {
         if (ev.o === localId && this.gate('killconf', 0.05)) this.tone({ type: 'triangle', f: 220, f2: 110, dur: 0.12, g: 0.14 });
         break;
       case 'phit':
-        if (ev.id === localId) this.hurt();
+        if (ev.id === localId) {
+          this.hurt();
+          gamepad.rumble(0.6, 0.4, 160);
+        }
         break;
       case 'down':
         this.down(ev.x, ev.y, ev.id === localId);
@@ -598,6 +602,7 @@ export class AudioManager {
         break;
       case 'crash':
         this.crash(ev.x, ev.y, 'car');
+        if (Math.hypot(ev.x - this.listener.x, ev.y - this.listener.y) < 200) gamepad.rumble(0.3 + ev.hard * 0.7, 0.3, 120 + ev.hard * 200);
         break;
       case 'smash':
         this.smash(ev.x, ev.y, ev.kind);

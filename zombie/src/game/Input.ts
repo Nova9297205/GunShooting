@@ -145,7 +145,10 @@ export class InputController {
     this.altDown = false;
   };
 
+  /** 最後にマウスを動かした時刻（コントローラーの照準と切り替えるため） */
+  mouseT = 0;
   private onMouseMove = (e: MouseEvent) => {
+    if (e.isTrusted) this.mouseT = performance.now();
     const r = this.target.getBoundingClientRect();
     this.mouseX = e.clientX - r.left;
     this.mouseY = e.clientY - r.top;

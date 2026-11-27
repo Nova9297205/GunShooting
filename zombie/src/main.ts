@@ -9,6 +9,7 @@ import { GameSession } from './game/GameSession';
 import { loadRejoin, NetworkManager, sanitizeName } from './network/NetworkManager';
 import { addRecord, levelOf, loadProfile, loadRecords, type Profile, saveProfile, SKILLS } from './game/progression';
 import { TitleBackdrop } from './ui/TitleBackdrop';
+import { padSettings } from './ui/Gamepad';
 import { clearSave, describeSave, loadSave } from './game/save';
 import type { SaveData } from './game/Engine';
 import type { GameMode, ObjKind, GameResult, LobbyPlayer, StartInfo } from './types';
@@ -460,3 +461,6 @@ const roomParam = new URLSearchParams(location.search).get('room');
 if (roomParam) $<HTMLInputElement>('input-code').value = roomParam.toUpperCase();
 
 show('title');
+
+// コントローラー設定（タイトル画面）
+$('btn-title-pad').addEventListener('click', () => padSettings().toggle(true));
