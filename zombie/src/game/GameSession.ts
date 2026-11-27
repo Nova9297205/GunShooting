@@ -591,6 +591,8 @@ export class GameSession {
       me.status === 'alive' &&
       view.players.some((p) => p.id !== localId && p.status === 'down' && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange);
 
+    // 地図を開いている間は右下のボタンを隠す（地図の枠に重ならないように）
+    this.hudButtons.style.visibility = this.mapOpen ? 'hidden' : '';
     this.renderer.render(view, {
       localId,
       mode: this.o.mode,

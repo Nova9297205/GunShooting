@@ -8,8 +8,9 @@ const EDGE_CODES = ['KeyF', 'KeyR', 'KeyC', 'KeyQ', 'KeyH', 'KeyB', 'KeyM', 'Key
 export class InputController {
   private keys = new Set<string>();
   private edges = new Set<string>();
-  mouseX = 0;
-  mouseY = 0;
+  // マウスを動かす前は画面の中央（左上の HUD に照準が重ならないように）
+  mouseX = typeof window !== 'undefined' ? window.innerWidth / 2 : 0;
+  mouseY = typeof window !== 'undefined' ? window.innerHeight / 2 : 0;
   mouseDown = false;
   /** 右ボタン押しっぱなし */
   altDown = false;
