@@ -6,13 +6,22 @@ import type { GameMode, ObjSnap, PlayerSnap, ViewState, WeaponId, ZombieSnap } f
 import { Tool } from '../types';
 import { type ArtSet, type PlayerAnim, type TallQuery, VectorArt, type ZombieAnim } from './Art';
 import {
+  CHUNK,
+  CHUNKS_X,
+  CHUNKS_Y,
+  BASE_TX,
+  BASE_TY,
   CYCLE_SECONDS,
   DAY_SECONDS,
   MAP_H,
   MAP_W,
   PLAYER,
   PLAYER_COLORS,
+  T_BRIDGE,
+  T_ROAD,
+  T_SHALLOW,
   T_WALL,
+  T_WATER,
   T_WINDOW,
   TILE,
   TORCH_LIGHT,
@@ -26,7 +35,11 @@ import type { Decal, Effects } from './Effects';
 import { clamp } from './physics';
 import { type Viewer, Vision } from './vision';
 import { locationAt, type TileWorld } from './world';
-import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
+import { roofCanvas } from './RoofArt';
+import type { TerrainCache } from './TerrainArt';
+import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
+import { skillMods } from './progression';
+import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
 /** 落ち影と側面を持つ「高い」建築物 */
@@ -43,6 +56,10 @@ export interface RenderOptions {
   /** ゲスト自機は射撃/近接アニメをローカルで発生させるので、カウンタ検出をしない */
   skipAnimDetectId: number | null;
   localTool: number;
+  /** 全体地図を開いているか（B キー） */
+  mapOpen?: boolean;
+  /** 持ち物・作業台などのパネルを開いているか（照準や大きな通知を出さない） */
+  panelOpen?: boolean;
   reviveHint: boolean;
   interactHint: string | null;
   syncMs?: number;
@@ -113,10 +130,9 @@ export class Renderer {
   cam = { x: WORLD_W / 2, y: WORLD_H / 2 };
   private camInit = false;
   private time = 0;
-  private terrainCanvas: HTMLCanvasElement | null = null;
+  private terrain: TerrainCache | null = null;
   private miniCanvas: HTMLCanvasElement | null = null;
   private vision = new Vision();
-  private grain: CanvasPattern | null = null;
   private lightCanvas = document.createElement('canvas');
   private lightCtx = this.lightCanvas.getContext('2d')!;
   private pAnim = new Map<number, PlayerAnim>();
@@ -129,23 +145,131 @@ export class Renderer {
   private bloom = 0;
   private forest: CanvasPattern | null = null;
   private curLoc: string | null = null;
-  private locToast: { text: string; sub: string; color: string; life: number } | null = null;
+  private locToast: { text: string; sub: string; sub2?: string; color: string; life: number; kicker?: string } | null = null;
+
+  // ---- 軽量化 ----
+  /** HUD のパネル類（時計・チーム・ステータス・ホットバー・ミニマップ）は別キャンバスに描き、約15Hzで更新 */
+  private hudCanvas: HTMLCanvasElement;
+  /** 毎フレーム描き直す HUD（照準・バナー・ヒント・矢印・ログ） */
+  private fastCanvas: HTMLCanvasElement;
+  private fastCtx: CanvasRenderingContext2D;
+  private hudCtx: CanvasRenderingContext2D;
+  private hudT = 0;
+  private hudKey = '';
+  /** 画面の色調とフィルムグレインは CSS（GPUで合成）で行う */
+  private grainEl: HTMLDivElement;
+  /** 描画解像度の倍率（重いPCでは自動で下げる） */
+  renderScale = 1;
+  /** CSS の重ね合わせ（色温度の乗算・周辺減光・追跡時の赤・被弾の赤） */
+  private ov: Record<'tint' | 'vig' | 'alert' | 'hurt' | 'tox', HTMLDivElement>;
+  private ovCache: Record<string, string> = {};
+  private baseDpr = 1;
+  private fpsAvg = 60;
+  /** 直前のフレームの描画時間の内訳（ms）と描画数（パフォーマンス表示用） */
+  perfT = { world: 0, light: 0, over: 0, hud: 0 };
+  perfN = { objects: 0, zombiesDrawn: 0, particles: 0 };
+  private qTimer = 0;
 
   constructor(
     private canvas: HTMLCanvasElement,
     private world: TileWorld,
   ) {
     this.ctx = canvas.getContext('2d')!;
+    this.hudCanvas = (document.getElementById('hud') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    if (!this.hudCanvas.id) {
+      this.hudCanvas.id = 'hud';
+      document.body.insertBefore(this.hudCanvas, canvas.nextSibling);
+    }
+    this.hudCtx = this.hudCanvas.getContext('2d')!;
+    this.fastCanvas = (document.getElementById('hud-fx') as HTMLCanvasElement | null) ?? document.createElement('canvas');
+    if (!this.fastCanvas.id) {
+      this.fastCanvas.id = 'hud-fx';
+      document.body.insertBefore(this.fastCanvas, this.hudCanvas.nextSibling);
+    }
+    this.fastCtx = this.fastCanvas.getContext('2d')!;
+    this.grainEl = (document.getElementById('fx-grain') as HTMLDivElement | null) ?? document.createElement('div');
+    if (!this.grainEl.id) {
+      this.grainEl.id = 'fx-grain';
+      document.body.insertBefore(this.grainEl, this.hudCanvas);
+    }
+    this.grainEl.style.backgroundImage = `url(${makeGrainURL()})`;
+    const mk = (id: string) => {
+      let el = document.getElementById(id) as HTMLDivElement | null;
+      if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        el.className = 'fx-ov';
+        document.body.insertBefore(el, this.grainEl);
+      }
+      return el;
+    };
+    this.ov = { tint: mk('fx-tint'), vig: mk('fx-vig'), alert: mk('fx-alert'), hurt: mk('fx-hurt'), tox: mk('fx-tox') };
+    this.setActive(true);
     this.resize();
     this.bakeTerrain();
   }
 
+  /** ゲーム中だけ HUD キャンバス・色調フィルター・グレインを有効にする */
+  setActive(on: boolean): void {
+    for (const el of Object.values(this.ov ?? {})) el.classList.toggle('hidden', !on);
+    this.hudCanvas.classList.toggle('hidden', !on);
+    this.fastCanvas.classList.toggle('hidden', !on);
+    this.grainEl.classList.toggle('hidden', !on);
+    this.canvas.classList.toggle('fx', on);
+  }
+
+  destroy(): void {
+    this.setActive(false);
+    this.hudCtx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+    this.fastCtx.clearRect(0, 0, this.fastCanvas.width, this.fastCanvas.height);
+  }
+
+  /** CSS の重ね合わせのスタイルを（変わったときだけ）更新 */
+  private setOv(k: 'tint' | 'vig' | 'alert' | 'hurt' | 'tox', prop: 'opacity' | 'backgroundColor', v: string): void {
+    const key = k + prop;
+    if (this.ovCache[key] === v) return;
+    this.ovCache[key] = v;
+    this.ov[k].style[prop] = v;
+  }
+
+  /** フレームレートを見て描画解像度を自動調整（落ち続けたら下げ、余裕が続けば戻す） */
+  private autoQuality(dt: number): void {
+    if (dt <= 0 || dt > 0.5) return;
+    this.fpsAvg += (1 / dt - this.fpsAvg) * Math.min(1, dt * 2);
+    this.qTimer += dt;
+    if (this.fpsAvg < 45 && this.qTimer > 2.5 && this.renderScale > 0.6) {
+      this.renderScale = Math.max(0.6, this.renderScale - 0.15);
+      this.qTimer = 0;
+      this.resize();
+    } else if (this.fpsAvg > 57 && this.qTimer > 6 && this.renderScale < 1) {
+      this.renderScale = Math.min(1, this.renderScale + 0.15);
+      this.qTimer = 0;
+      this.resize();
+    } else if (this.qTimer > 6) this.qTimer = 0;
+  }
+
+  /** パフォーマンス表示用：解像度と地形キャッシュ */
+  perfInfo(): { res: string; terrain: string } {
+    const t = this.terrain;
+    return {
+      res: `${this.canvas.width}×${this.canvas.height}（倍率 ${this.dpr.toFixed(2)} / 自動調整 ${Math.round(this.renderScale * 100)}%）`,
+      terrain: t ? `${t.size}/24 焼込 ${t.stats.baked}` : '-',
+    };
+  }
+
   resize(): void {
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+    // ゲーム画面は最大1.5倍（高解像度ディスプレイで描くピクセル数を抑える）。HUD は baseDpr のままくっきり
+    this.dpr = Math.min(this.baseDpr, 1.5) * this.renderScale;
     this.w = window.innerWidth;
     this.h = window.innerHeight;
     this.canvas.width = Math.floor(this.w * this.dpr);
     this.canvas.height = Math.floor(this.h * this.dpr);
+    this.hudCanvas.width = Math.floor(this.w * this.baseDpr);
+    this.hudCanvas.height = Math.floor(this.h * this.baseDpr);
+    this.fastCanvas.width = this.hudCanvas.width;
+    this.fastCanvas.height = this.hudCanvas.height;
+    this.hudKey = '';
     this.canvas.style.width = `${this.w}px`;
     this.canvas.style.height = `${this.h}px`;
     // ライトマップは半解像度で十分（ぼかし効果も兼ねる）
@@ -157,7 +281,7 @@ export class Renderer {
   /** 地形をオフスクリーンキャンバスに一度だけ描き込む */
   private bakeTerrain(): void {
     const baked = this.art.bakeTerrain(this.world);
-    this.terrainCanvas = baked.canvas;
+    this.terrain = baked.cache;
     this.miniCanvas = baked.mini;
   }
 
@@ -182,10 +306,19 @@ export class Renderer {
     a.flashSeed = Math.random();
     if (this.fx && x !== undefined && y !== undefined && aim !== undefined) {
       this.fx.casing(x, y, aim, w);
+      // 銃口の火花と煙（重い銃ほど大きい）
+      const heavy = w === 'shotgun' || w === 'hunting' || w === 'dmr';
+      const mx = x + Math.cos(aim) * 28;
+      const my = y + Math.sin(aim) * 28;
+      this.fx.burst(mx, my, '#ffd890', heavy ? 6 : 3, heavy ? 420 : 320, 0.09, 1.6, 'spark', true, aim, 0.5);
+      this.fx.burst(mx, my, '#8a8880', heavy ? 4 : 2, 50, heavy ? 0.9 : 0.6, heavy ? 7 : 5, 'smoke', false, aim, 0.9);
       if (id === this.localId) {
         this.fx.kick(aim, WEAPONS[w].kick);
-        this.bloom = Math.min(1, this.bloom + (w === 'shotgun' ? 0.8 : 0.28));
-        if (w === 'shotgun') this.fx.shake(0.18);
+        // 照準の広がり：連射武器は小さく何度も、単発の重い銃は大きく一度
+        const bloom: Record<WeaponId, number> = { pistol: 0.3, smg: 0.16, rifle: 0.24, shotgun: 0.8, hunting: 0.9, dmr: 0.5 };
+        this.bloom = Math.min(1, this.bloom + bloom[w]);
+        const shake: Partial<Record<WeaponId, number>> = { shotgun: 0.18, hunting: 0.14, dmr: 0.08, rifle: 0.03 };
+        if (shake[w]) this.fx.shake(shake[w]!);
       }
     }
   }
@@ -195,14 +328,29 @@ export class Renderer {
   }
 
   // ============================================================
+  private hudHidden = false;
+  private hudDimmed = false;
+
   render(view: ViewState, o: RenderOptions): void {
     const { ctx } = this;
+    // 全体地図を開いている間は、パネル類の HUD キャンバスを丸ごと隠す（地図の後ろに透けない）
+    if (this.hudHidden !== !!o.mapOpen) {
+      this.hudHidden = !!o.mapOpen;
+      this.hudCanvas.style.visibility = this.hudHidden ? 'hidden' : '';
+    }
+    // 持ち物・作業台を開いている間は、パネルの後ろの HUD を薄くして文字が重ならないようにする
+    const dimHud = !!o.panelOpen && !o.mapOpen;
+    if (this.hudDimmed !== dimHud) {
+      this.hudDimmed = dimHud;
+      this.hudCanvas.style.opacity = dimHud ? '0.15' : '';
+    }
     const dt = o.dt;
     this.time += dt;
     const fx = o.effects;
 
     this.fx = fx;
     this.localId = o.localId;
+    for (const p of view.players) this.pingNames.set(p.id, p.name);
     // ヒットストップ中は世界の動き（アニメ・パーティクル）をほぼ止める
     const wdt = fx.hitstop > 0 ? dt * 0.06 : dt;
     fx.hitstop = Math.max(0, fx.hitstop - dt);
@@ -236,14 +384,19 @@ export class Renderer {
     const ox = Math.round(this.w / 2 - this.cam.x + shake.x);
     const oy = Math.round(this.h / 2 - this.cam.y + shake.y);
 
+    const t0 = performance.now();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     // マップの外側は深い森
-    if (!this.forest) this.forest = makeForestPattern(ctx);
-    ctx.save();
-    ctx.translate(Math.round(this.w / 2 - this.cam.x), Math.round(this.h / 2 - this.cam.y));
-    ctx.fillStyle = this.forest;
-    ctx.fillRect(this.cam.x - this.w / 2 - 20, this.cam.y - this.h / 2 - 20, this.w + 40, this.h + 40);
-    ctx.restore();
+    // （画面がマップの外にはみ出しているときだけ塗る）
+    const outside = this.cam.x - this.w / 2 < 0 || this.cam.y - this.h / 2 < 0 || this.cam.x + this.w / 2 > WORLD_W || this.cam.y + this.h / 2 > WORLD_H;
+    if (outside) {
+      if (!this.forest) this.forest = makeForestPattern(ctx);
+      ctx.save();
+      ctx.translate(Math.round(this.w / 2 - this.cam.x), Math.round(this.h / 2 - this.cam.y));
+      ctx.fillStyle = this.forest;
+      ctx.fillRect(this.cam.x - this.w / 2 - 20, this.cam.y - this.h / 2 - 20, this.w + 40, this.h + 40);
+      ctx.restore();
+    }
 
     // ---- ワールド ----
     ctx.save();
@@ -252,33 +405,16 @@ export class Renderer {
     const vy0 = this.cam.y - this.h / 2 - TILE * 2;
     const vx1 = vx0 + this.w + TILE * 4;
     const vy1 = vy0 + this.h + TILE * 4;
-    if (this.terrainCanvas) {
-      const sx = clamp(Math.floor(vx0), 0, WORLD_W);
-      const sy = clamp(Math.floor(vy0), 0, WORLD_H);
-      const sw = clamp(Math.ceil(vx1), 0, WORLD_W) - sx;
-      const sh = clamp(Math.ceil(vy1), 0, WORLD_H) - sy;
-      if (sw > 0 && sh > 0) ctx.drawImage(this.terrainCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
-    }
+    this.drawTerrainChunks(vx0, vy0, vx1, vy1);
+    this.drawWaterShimmer(vx0, vy0, vx1, vy1);
 
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
-    // 森との境界（柵と影）
-    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-    ctx.lineWidth = 10;
-    ctx.strokeRect(-5, -5, WORLD_W + 10, WORLD_H + 10);
-    ctx.strokeStyle = '#5a4630';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([14, 6]);
-    ctx.strokeRect(-1, -1, WORLD_W + 2, WORLD_H + 2);
-    ctx.setLineDash([]);
-    const visible: ObjSnap[] = [];
-    for (const ob of this.world.objects.values()) {
-      const x = ob.tx * TILE;
-      const y = ob.ty * TILE;
-      if (x < vx0 || y < vy0 || x > vx1 || y > vy1) continue;
-      visible.push(ob);
-    }
+    // （地図の端は柵で塞がず、外側の遠景と汚染の霞につなげる）
+    // 画面内のオブジェクトはタイルの格子から引く（ワールドが広くても一定の負荷）
+    this.vrect = [vx0, vy0, vx1, vy1];
+    const visible = this.objsIn(Math.ceil(vx0 / TILE), Math.ceil(vy0 / TILE), Math.floor(vx1 / TILE), Math.floor(vy1 / TILE));
     // 壁の落ち影（重なっても濃くならないよう1つのパスでまとめて塗る）
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
@@ -302,35 +438,84 @@ export class Renderer {
     this.drawSearch(view, me);
     this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
+    for (const p of view.players) this.drawPlayerMarker(p, p.id === o.localId);
     for (const p of view.players) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
     this.drawCloudShadows(view.minute, vx0, vy0, vx1, vy1);
+    this.drawEdgeHaze(vx0, vy0, vx1, vy1);
     this.drawStructureBars(visible);
     // ---- 屋根と霧（見えていない場所を隠す） ----
     // 外壁が見えている建物の屋根は霧の上に（外から屋根として見える）、それ以外は記憶として霧の下に
     this.drawRoofs(me, vx0, vy0, vx1, vy1, false);
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(vis.fog, 0, 0, WORLD_W, WORLD_H);
+    {
+      // 霧は画面に映る範囲だけ切り出して描く（ワールド全体を毎フレーム拡大しない）
+      const k = vis.fog.width / WORLD_W;
+      const fx0 = clamp(Math.floor(vx0 / TILE) * TILE, 0, WORLD_W);
+      const fy0 = clamp(Math.floor(vy0 / TILE) * TILE, 0, WORLD_H);
+      const fx1 = clamp(Math.ceil(vx1 / TILE) * TILE, 0, WORLD_W);
+      const fy1 = clamp(Math.ceil(vy1 / TILE) * TILE, 0, WORLD_H);
+      if (fx1 > fx0 && fy1 > fy0) ctx.drawImage(vis.fog, fx0 * k, fy0 * k, (fx1 - fx0) * k, (fy1 - fy0) * k, fx0, fy0, fx1 - fx0, fy1 - fy0);
+    }
     this.drawRoofs(me, vx0, vy0, vx1, vy1, true);
     ctx.restore();
 
-    // ---- ライティング ----
+    const t1 = performance.now();
+    this.perfN.objects = visible.length;
+    this.perfN.zombiesDrawn = zombiesSeen.length;
+    this.perfN.particles = fx.particles.length;
+    // ---- ライティング・天候 ----
     this.drawLighting(view, dark, ox, oy);
+    this.drawWeather(view, dark, o.dt);
 
+    const t2 = performance.now();
     // ---- 光る要素・オーバーレイ ----
     ctx.save();
     ctx.translate(ox, oy);
     this.drawParticles(fx, true);
     this.drawGlows(view, dark);
-    for (const p of view.players) this.drawPlayerOverlay(p, p.id === o.localId);
+    // 仲間と隣り合うと名前が重なるので、重なる分だけ上にずらして積む
+    {
+      ctx.font = 'bold 12px "Noto Sans JP", "Segoe UI", sans-serif';
+      const placed: { x: number; y: number; w: number }[] = [];
+      for (const p of [...view.players].sort((a, b) => b.y - a.y)) {
+        const label = p.id === o.localId ? `${p.name} (YOU)` : p.name;
+        const lw = ctx.measureText(label).width;
+        let off = p.status === 'down' ? 16 : 0;
+        while (placed.some((q) => Math.abs(q.x - p.x) < (q.w + lw) / 2 + 4 && Math.abs(q.y - (p.y - off)) < 15) && off < 60) off += 15;
+        placed.push({ x: p.x, y: p.y - off, w: lw });
+        this.drawPlayerOverlay(p, p.id === o.localId, p.status === 'down' ? off - 16 : off);
+      }
+    }
     this.drawZombieOverlays(zombiesSeen, dark, me);
-    this.drawPingMarkers(fx);
+    this.drawPingMarkers(fx, me);
+    this.drawDropBeacon(view);
+    this.drawLandmarks(vx0, vy0, vx1, vy1);
     this.drawPopups(fx);
     ctx.restore();
 
-    this.drawPostFx();
-    this.drawHUD(view, o, me, dark);
+    const t3 = performance.now();
+    // 色調・グレインは CSS（#game.fx / #fx-grain）で行う
+    // 照準・バナー・ヒントなど毎フレーム変わる HUD は、色調フィルターのかからない透明キャンバスへ
+    {
+      const main = this.ctx;
+      const f = this.fastCtx;
+      f.setTransform(1, 0, 0, 1, 0, 0);
+      f.clearRect(0, 0, this.fastCanvas.width, this.fastCanvas.height);
+      f.setTransform(this.baseDpr, 0, 0, this.baseDpr, 0, 0);
+      this.ctx = f;
+      try {
+        this.drawHUD(view, o, me, dark);
+      } finally {
+        this.ctx = main;
+      }
+    }
+    const t4 = performance.now();
+    this.perfT.world = t1 - t0;
+    this.perfT.light = t2 - t1;
+    this.perfT.over = t3 - t2;
+    this.perfT.hud = t4 - t3;
   }
 
   /** 視界の計算（昼は広く、夜は懐中電灯の届く範囲だけ） */
@@ -339,16 +524,102 @@ export class Renderer {
     for (const p of view.players) {
       if (p.status === 'dead') continue;
       const down = p.status === 'down';
+      // 霧・嵐は見通しが悪い。スコープ付きの銃を構えていると照準方向の視界が伸びる
+      const wfog = view.weather === 'fog' ? 0.45 : view.weather === 'storm' ? 0.3 : view.weather === 'rain' ? 0.15 : 0;
+      const wmul = 1 - wfog * view.wx;
+      const held = heldWeapon(p);
+      const scope = held?.w.scope ? 1.3 : 1;
       viewers.push({
         x: p.x,
         y: p.y,
         aim: p.aim,
-        near: down ? 100 : 330 - dark * 180,
-        cone: down ? 0 : 820 - dark * 300,
-        half: down ? 0 : 0.72 - dark * 0.28,
+        near: down ? 100 : (330 - dark * 180) * (1 - wfog * 0.5 * view.wx),
+        cone: down ? 0 : (820 - dark * 300) * wmul * scope,
+        half: down ? 0 : (0.72 - dark * 0.28) * (scope > 1 ? 0.85 : 1),
       });
     }
     this.vision.update(this.world, viewers);
+  }
+
+  /** 水面の揺らぎ：映っている水のタイルに、ゆっくり流れる光の筋（毎フレーム・軽量） */
+  private drawWaterShimmer(vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const { ctx } = this;
+    const tx0 = Math.max(0, Math.floor(vx0 / TILE));
+    const ty0 = Math.max(0, Math.floor(vy0 / TILE));
+    const tx1 = Math.min(MAP_W - 1, Math.floor(vx1 / TILE));
+    const ty1 = Math.min(MAP_H - 1, Math.floor(vy1 / TILE));
+    const T = this.time;
+    const paths = [new Path2D(), new Path2D(), new Path2D()];
+    let any = false;
+    for (let ty = ty0; ty <= ty1; ty++)
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const t = this.world.terrain[ty * MAP_W + tx];
+        if (t !== T_WATER && t !== T_SHALLOW) continue;
+        any = true;
+        const h = ((tx * 73856093) ^ (ty * 19349663)) >>> 0;
+        const ph = (h % 1000) / 1000;
+        const bucket = Math.floor(((Math.sin(T * 1.3 + ph * 6.28) + 1) / 2) * 2.99);
+        const ox = ((T * 9 + ph * 40) % 44) - 2;
+        const oy = (h >> 10) % 30 + 5;
+        const x = tx * TILE + ox;
+        const y = ty * TILE + oy;
+        const p = paths[bucket];
+        p.moveTo(x - 6, y);
+        p.quadraticCurveTo(x, y - 2.5, x + 6, y);
+        if (t === T_WATER && ph > 0.5) {
+          const y2 = ty * TILE + ((oy + 17) % 34) + 3;
+          const x2 = tx * TILE + ((ox + 21) % 40);
+          p.moveTo(x2 - 4, y2);
+          p.quadraticCurveTo(x2, y2 - 2, x2 + 4, y2);
+        }
+      }
+    if (!any) return;
+    ctx.lineWidth = 1.4;
+    const alphas = [0.06, 0.13, 0.22];
+    for (let i = 0; i < 3; i++) {
+      ctx.strokeStyle = `rgba(200,220,215,${alphas[i]})`;
+      ctx.stroke(paths[i]);
+    }
+  }
+
+  /** 自機・仲間の足元の目印：色つきの輪と、向いている方向の矢印（地形に埋もれないように） */
+  private drawPlayerMarker(p: PlayerSnap, isLocal: boolean): void {
+    if (p.status === 'dead') return;
+    const { ctx } = this;
+    const col = PLAYER_COLORS[p.id] ?? '#fff';
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    // 暗い縁取りで背景から浮かせる
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath();
+    ctx.ellipse(0, 4, 24, 20, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.ellipse(0, 3, 22, 18, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = isLocal ? 0.85 : 0.6;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // 向き（照準方向）の矢印
+    if (p.status === 'alive') {
+      const a = p.aim;
+      ctx.rotate(a);
+      ctx.globalAlpha = isLocal ? 0.95 : 0.7;
+      ctx.fillStyle = col;
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(30, 0);
+      ctx.lineTo(23, -5);
+      ctx.lineTo(23, 5);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   /** 屋根：プレイヤーが中に入っていない建物の、見えていない部分を覆う */
@@ -356,12 +627,6 @@ export class Renderer {
     const { ctx } = this;
     const mtx = me ? Math.floor(me.x / TILE) : -1;
     const mty = me ? Math.floor(me.y / TILE) : -1;
-    const cols = [
-      ['#4a4038', '#55493f'],
-      ['#3e4044', '#46484c'],
-      ['#4a5040', '#535946'],
-      ['#5a5248', '#625a4f'],
-    ];
     for (const b of this.world.buildings) {
       if (b.x * TILE > x1 || b.y * TILE > y1 || (b.x + b.w) * TILE < x0 || (b.y + b.h) * TILE < y0) continue;
       const inside = mtx > b.x && mty > b.y && mtx < b.x + b.w - 1 && mty < b.y + b.h - 1;
@@ -372,49 +637,40 @@ export class Renderer {
       for (let ty = b.y; ty < b.y + b.h && !seen; ty++) seen = this.vision.tileVisible(b.x, ty) || this.vision.tileVisible(b.x + b.w - 1, ty);
       if (seen !== seenPass) continue;
       if (seen) this.vision.markExplored(b.x, b.y, b.w, b.h);
-      const [c0, c1] = cols[b.roof % cols.length];
-      for (let ty = b.y; ty < b.y + b.h; ty++)
-        for (let tx = b.x; tx < b.x + b.w; tx++) {
-          const edge = tx === b.x || ty === b.y || tx === b.x + b.w - 1 || ty === b.y + b.h - 1;
-          if (this.vision.tileVisible(tx, ty) && (edge || !seenPass)) continue;
-          if (this.vision.tileVisible(tx, ty) && seenPass && !edge) continue;
-          // 波板の屋根（列ごとに明暗）
-          ctx.fillStyle = (tx + ty * 0) % 2 === 0 ? c0 : c1;
-          ctx.fillRect(tx * TILE, ty * TILE, TILE, TILE);
-          ctx.fillStyle = 'rgba(0,0,0,0.12)';
-          ctx.fillRect(tx * TILE, ty * TILE + 36, TILE, 4);
+      // 建物ごとに焼き込んだ屋根テクスチャを、見えていないタイルの分だけ切り出して描く
+      const roof = roofCanvas(b);
+      let all = true;
+      for (let ty = b.y; ty < b.y + b.h && all; ty++) for (let tx = b.x; tx < b.x + b.w && all; tx++) if (this.vision.tileVisible(tx, ty)) all = false;
+      if (all) {
+        ctx.drawImage(roof, b.x * TILE, b.y * TILE);
+        continue;
+      }
+      // 見えていないタイルを横方向の帯にまとめてクリップし、屋根は1回で描く（drawImage の回数を減らす）
+      ctx.save();
+      ctx.beginPath();
+      let any = false;
+      for (let ty = b.y; ty < b.y + b.h; ty++) {
+        let run = -1;
+        for (let tx = b.x; tx <= b.x + b.w; tx++) {
+          const hidden = tx < b.x + b.w && !this.vision.tileVisible(tx, ty);
+          if (hidden && run < 0) run = tx;
+          else if (!hidden && run >= 0) {
+            ctx.rect(run * TILE, ty * TILE, (tx - run) * TILE, TILE);
+            run = -1;
+            any = true;
+          }
         }
-      // 屋根の縁と錆
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(b.x * TILE + 1, b.y * TILE + 1, b.w * TILE - 2, b.h * TILE - 2);
+      }
+      if (any) {
+        ctx.clip();
+        ctx.drawImage(roof, b.x * TILE, b.y * TILE);
+      }
+      ctx.restore();
     }
   }
 
   /** フィルムグレイン＋彩度を落とす色調補正 */
-  private drawPostFx(): void {
-    const { ctx, w, h } = this;
-    ctx.save();
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    // 彩度ダウン（全体をくすんだ色調に）
-    ctx.globalCompositeOperation = 'saturation';
-    ctx.globalAlpha = 0.32;
-    ctx.fillStyle = 'hsl(0,0%,50%)';
-    ctx.fillRect(0, 0, w, h);
-    // ほんのり暖色の色かぶり
-    ctx.globalCompositeOperation = 'soft-light';
-    ctx.globalAlpha = 0.12;
-    ctx.fillStyle = '#8a7a5a';
-    ctx.fillRect(0, 0, w, h);
-    // フィルムグレイン
-    if (!this.grain) this.grain = makeGrain(ctx);
-    ctx.globalCompositeOperation = 'overlay';
-    ctx.globalAlpha = 0.09;
-    ctx.translate(-Math.floor(Math.random() * 128), -Math.floor(Math.random() * 128));
-    ctx.fillStyle = this.grain;
-    ctx.fillRect(0, 0, w + 128, h + 128);
-    ctx.restore();
-  }
+
 
   /** 隣のタイルに高い壁（廃墟の壁・建築壁）があるか */
   private tallQuery(tx: number, ty: number): TallQuery {
@@ -429,27 +685,46 @@ export class Renderer {
   }
 
   /** 昼間にゆっくり流れる雲の影 */
+  private cloudCanvas = document.createElement('canvas');
+
+  /** 流れる雲の影：1/4解像度の小さなキャンバスに描いて、1回だけ拡大して重ねる（全画面の大きなグラデーションを何枚も塗らない） */
   private drawCloudShadows(minute: number, x0: number, y0: number, x1: number, y1: number): void {
     const amb = ambientAt(minute);
     const k = 1 - Math.min(1, amb.dark * 2.5);
     if (k <= 0.02) return;
-    const { ctx } = this;
+    const Q = 4;
+    const cw = Math.ceil((x1 - x0) / Q);
+    const ch = Math.ceil((y1 - y0) / Q);
+    const cc = this.cloudCanvas;
+    if (cc.width !== cw || cc.height !== ch) {
+      cc.width = cw;
+      cc.height = ch;
+    }
+    const g2 = cc.getContext('2d')!;
+    g2.clearRect(0, 0, cw, ch);
     const span = WORLD_W + 1200;
+    let any = false;
     for (let i = 0; i < 7; i++) {
       const cx = ((i * 977 + this.time * (10 + i * 2)) % span) - 600;
       const cy = (i * 541) % WORLD_H;
       const r = 260 + (i % 3) * 120;
-      if (cx + r < x0 || cx - r > x1 || cy + r < y0 || cy - r > y1) continue;
-      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      if (cx + r * 1.4 < x0 || cx - r * 1.4 > x1 || cy + r < y0 || cy - r > y1) continue;
+      any = true;
+      const lx = (cx - x0) / Q;
+      const ly = (cy - y0) / Q;
+      const lr = r / Q;
+      const g = g2.createRadialGradient(lx, ly, 0, lx, ly, lr);
       g.addColorStop(0, `rgba(10,20,30,${0.14 * k})`);
       g.addColorStop(0.6, `rgba(10,20,30,${0.08 * k})`);
       g.addColorStop(1, 'rgba(10,20,30,0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.ellipse(cx, cy, r * 1.4, r, 0.3, 0, Math.PI * 2);
-      ctx.fill();
+      g2.fillStyle = g;
+      g2.beginPath();
+      g2.ellipse(lx, ly, lr * 1.4, lr, 0.3, 0, Math.PI * 2);
+      g2.fill();
     }
+    if (any) this.ctx.drawImage(cc, x0, y0, cw * Q, ch * Q);
   }
+
 
   private getZAnim(z: ZombieSnap): ZombieAnim {
     let a = this.zAnim.get(z.id);
@@ -482,8 +757,14 @@ export class Renderer {
       this.lastReload.set(p.id, p.reloadT);
       a.lastShots = p.shots;
       a.lastSwings = p.swings;
-      a.recoilV += (-900 * a.recoil - 26 * a.recoilV) * dt;
-      a.recoil += a.recoilV * dt;
+      // リコイルのばね：低FPSでも発散しないよう細かく分けて積分し、範囲も制限する
+      const sub = Math.max(1, Math.ceil(dt / (1 / 240)));
+      const sdt = dt / sub;
+      for (let k = 0; k < sub; k++) {
+        a.recoilV += (-900 * a.recoil - 26 * a.recoilV) * sdt;
+        a.recoil += a.recoilV * sdt;
+      }
+      a.recoil = clamp(a.recoil, -12, 4);
       a.flash = Math.max(0, a.flash - dt);
       a.swing = Math.max(0, a.swing - dt * 3.2);
       if (!Number.isNaN(a.lastX)) {
@@ -515,6 +796,13 @@ export class Renderer {
         a.lastAtk = z.atk;
       }
       a.lunge = Math.max(0, a.lunge - dt * 4);
+      // 予備動作：追跡中に近くのプレイヤーへ迫ると腕を振り上げる
+      let nd = Infinity;
+      if (z.alert === 2) for (const p of view.players) if (p.status === 'alive') nd = Math.min(nd, Math.hypot(p.x - z.x, p.y - z.y));
+      const target = nd < 110 ? 1 - Math.max(0, nd - 35) / 75 : 0;
+      a.near = (a.near ?? 0) + (target - (a.near ?? 0)) * Math.min(1, dt * 10);
+      // 被弾ののけぞり
+      a.hit = z.flash > 0 ? 1 : Math.max(0, (a.hit ?? 0) - dt * 6);
       const zm = Math.hypot(z.x - a.lastX, z.y - a.lastY);
       a.walk += zm * 0.2;
       a.move += (Math.min(1, zm / Math.max(1e-3, dt) / 60) - a.move) * Math.min(1, dt * 8);
@@ -570,7 +858,7 @@ export class Renderer {
 
   private worldLabel(x: number, y: number, text: string, color: string): void {
     const { ctx } = this;
-    ctx.font = 'bold 11px "Segoe UI", sans-serif';
+    ctx.font = 'bold 11px "Noto Sans JP", "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 3;
@@ -725,7 +1013,7 @@ export class Renderer {
     for (const p of fx.popups) {
       const t = p.life / p.maxLife;
       ctx.globalAlpha = Math.min(1, t * 2.5);
-      ctx.font = `800 ${p.size}px "Segoe UI", sans-serif`;
+      ctx.font = `800 ${p.size}px "Noto Sans JP", "Segoe UI", sans-serif`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(0,0,0,0.85)';
       ctx.strokeText(p.text, p.x, p.y);
@@ -737,9 +1025,29 @@ export class Renderer {
 
   // ---------------- ライティング ----------------
 
+  /** 画面の範囲（ワールド座標）。光源などの検索に使う */
+  private vrect = [0, 0, 0, 0];
+
+  /** タイルの矩形の中にあるオブジェクト（上の行から順に） */
+  private objsIn(tx0: number, ty0: number, tx1: number, ty1: number): ObjSnap[] {
+    const out: ObjSnap[] = [];
+    const x0 = Math.max(0, tx0);
+    const y0 = Math.max(0, ty0);
+    const x1 = Math.min(MAP_W - 1, tx1);
+    const y1 = Math.min(MAP_H - 1, ty1);
+    for (let ty = y0; ty <= y1; ty++)
+      for (let tx = x0; tx <= x1; tx++) {
+        const ob = this.world.objAt(tx, ty);
+        if (ob) out.push(ob);
+      }
+    return out;
+  }
+
   private lightSources(): { x: number; y: number; r: number; warm: number }[] {
     const out: { x: number; y: number; r: number; warm: number }[] = [];
-    for (const ob of this.world.objects.values()) {
+    // 画面の外でも光が届く範囲（約10タイル）までの焚き火・松明
+    const [vx0, vy0, vx1, vy1] = this.vrect;
+    for (const ob of this.objsIn(Math.floor(vx0 / TILE) - 10, Math.floor(vy0 / TILE) - 10, Math.ceil(vx1 / TILE) + 10, Math.ceil(vy1 / TILE) + 10)) {
       if (ob.kind === 'campfire') {
         const flick = 1 + Math.sin(this.time * 11) * 0.03 + Math.sin(this.time * 7.3 + 1) * 0.04;
         out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 300 * flick, warm: 1 });
@@ -763,14 +1071,10 @@ export class Renderer {
       amb.a = 0.16;
     }
     // ---- 色温度（乗算で全体に色味をつける） ----
-    if (amb.a > 0.005) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'multiply';
-      const mix = (c: number) => Math.round(255 + (c - 255) * amb.a * 2.2);
-      ctx.fillStyle = `rgb(${mix(amb.r)},${mix(amb.g)},${mix(amb.b)})`;
-      ctx.fillRect(0, 0, this.w, this.h);
-      ctx.restore();
-    }
+    // （CSS の multiply 重ね合わせで行う：キャンバスに全画面の乗算をしない）
+    // 以前は暗闇より先に乗算していたので、夜は弱めて同じ見た目に合わせる
+    const mix = (c: number) => Math.round(255 + (c - 255) * Math.min(1, amb.a * 2.2 * (1 - dark * 0.65)));
+    this.setOv('tint', 'backgroundColor', amb.a > 0.005 ? `rgb(${mix(amb.r)},${mix(amb.g)},${mix(amb.b)})` : 'rgb(255,255,255)');
     if (dark > 0.01) {
       const l = this.lightCtx;
       const s = 0.5; // ライトマップの縮尺
@@ -830,15 +1134,242 @@ export class Renderer {
       ctx.drawImage(this.lightCanvas, 0, 0, this.w, this.h);
       ctx.restore();
     }
-    // ---- 周辺減光（常時うっすら＋夜は強め） ----
-    const v = ctx.createRadialGradient(this.w / 2, this.h / 2, Math.min(this.w, this.h) * 0.42, this.w / 2, this.h / 2, Math.max(this.w, this.h) * 0.78);
-    v.addColorStop(0, 'rgba(0,0,0,0)');
-    v.addColorStop(1, `rgba(0,0,0,${0.28 + dark * 0.25})`);
-    ctx.fillStyle = v;
-    ctx.fillRect(0, 0, this.w, this.h);
+    // ---- 周辺減光（常時うっすら＋夜は強め）：CSS の重ね合わせ ----
+    this.setOv('vig', 'opacity', (0.28 + dark * 0.25).toFixed(2));
   }
 
   /** 暗闇の上に重ねる光の色（焚き火・松明の暖色、懐中電灯の白色） */
+  // ---------------- 地形（チャンク） ----------------
+
+  /** 画面に映るチャンクの焼き込み済み地形を描く。少し先のチャンクも予約して、少しずつ焼き込む */
+  private drawTerrainChunks(vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const cache = this.terrain;
+    if (!cache) return;
+    const CW = CHUNK * TILE;
+    const cx0 = Math.floor(vx0 / CW);
+    const cy0 = Math.floor(vy0 / CW);
+    const cx1 = Math.floor(vx1 / CW);
+    const cy1 = Math.floor(vy1 / CW);
+    const ccx = this.cam.x / CW;
+    const ccy = this.cam.y / CW;
+    const wants: { cx: number; cy: number; pri: number }[] = [];
+    // 画面の外側1チャンク分まで先読み（見えているものを最優先）
+    for (let cy = cy0 - 1; cy <= cy1 + 1; cy++)
+      for (let cx = cx0 - 1; cx <= cx1 + 1; cx++) {
+        const vis = cx >= cx0 && cx <= cx1 && cy >= cy0 && cy <= cy1;
+        wants.push({ cx, cy, pri: (vis ? 0 : 100) + Math.hypot(cx + 0.5 - ccx, cy + 0.5 - ccy) });
+      }
+    cache.want(wants);
+    // 見えているのに未完成のチャンクがあれば多めに時間を使う
+    let missing = 0;
+    for (let cy = cy0; cy <= cy1; cy++)
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const c = cache.get(cx, cy);
+        if (c) this.ctx.drawImage(c, cx * CW, cy * CW, CW, CW);
+        else {
+          missing++;
+          this.drawChunkPlaceholder(cx, cy);
+        }
+      }
+    cache.pump(missing ? 10 : 4);
+  }
+
+  /** 焼き込み前のチャンク：ミニマップの色を拡大して仮に描く */
+  private drawChunkPlaceholder(cx: number, cy: number): void {
+    const CW = CHUNK * TILE;
+    const ctx = this.ctx;
+    if (this.miniCanvas && cx >= 0 && cy >= 0 && cx < CHUNKS_X && cy < CHUNKS_Y) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(this.miniCanvas, cx * CHUNK * 2, cy * CHUNK * 2, CHUNK * 2, CHUNK * 2, cx * CW, cy * CW, CW, CW);
+    } else {
+      ctx.fillStyle = '#2a2e20';
+      ctx.fillRect(cx * CW, cy * CW, CW, CW);
+    }
+  }
+
+  /** 外縁の汚染帯：地図の端に近いほど黄緑がかった霞を重ねる（地図の外の遠景につながる） */
+  private drawEdgeHaze(vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const B = EDGE_BAND * TILE;
+    const ctx = this.ctx;
+    const band = (x: number, y: number, w: number, h: number, gx0: number, gy0: number, gx1: number, gy1: number) => {
+      if (x > vx1 || y > vy1 || x + w < vx0 || y + h < vy0) return;
+      const g = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
+      g.addColorStop(0, 'rgba(70,78,40,0.55)');
+      g.addColorStop(0.5, 'rgba(70,78,40,0.2)');
+      g.addColorStop(1, 'rgba(70,78,40,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(x, y, w, h);
+    };
+    band(0, 0, B, WORLD_H, 0, 0, B, 0);
+    band(WORLD_W - B, 0, B, WORLD_H, WORLD_W, 0, WORLD_W - B, 0);
+    band(0, 0, WORLD_W, B, 0, 0, 0, B);
+    band(0, WORLD_H - B, WORLD_W, B, 0, WORLD_H, 0, WORLD_H - B);
+  }
+
+  // ---------------- 天候 ----------------
+
+  private rain: { x: number; y: number; s: number }[] = [];
+  private lightning = 0;
+
+  /** 霧（白いもや）・雨（斜めの雨筋）・嵐（雨＋雷光）を画面に重ねる */
+  private drawWeather(view: ViewState, dark: number, dt: number): void {
+    const { ctx, w, h } = this;
+    const k = view.wx;
+    if (k <= 0.01) {
+      this.lightning = 0;
+      return;
+    }
+    if (view.weather === 'fog') {
+      // 流れるもや
+      const t = this.time * 0.03;
+      ctx.save();
+      for (let i = 0; i < 5; i++) {
+        const fx = ((i * 0.27 + t * (0.6 + i * 0.15)) % 1.4) - 0.2;
+        const fy = 0.15 + ((i * 0.37) % 0.8);
+        const g = ctx.createRadialGradient(fx * w, fy * h, 0, fx * w, fy * h, Math.max(w, h) * 0.45);
+        const a = (0.16 - dark * 0.08) * k;
+        g.addColorStop(0, `rgba(190,196,190,${a})`);
+        g.addColorStop(1, 'rgba(190,196,190,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+      }
+      ctx.fillStyle = `rgba(150,158,152,${(0.16 - dark * 0.1) * k})`;
+      ctx.fillRect(0, 0, w, h);
+      ctx.restore();
+      return;
+    }
+    // 雨・嵐
+    const storm = view.weather === 'storm';
+    ctx.fillStyle = `rgba(20,26,34,${(storm ? 0.22 : 0.12) * k})`;
+    ctx.fillRect(0, 0, w, h);
+    const want = Math.floor((storm ? 420 : 240) * k);
+    while (this.rain.length < want) this.rain.push({ x: Math.random() * w, y: Math.random() * h, s: 0.6 + Math.random() * 0.8 });
+    if (this.rain.length > want) this.rain.length = want;
+    const vx = storm ? -260 : -120;
+    const vy = 1100;
+    ctx.strokeStyle = `rgba(190,205,220,${0.28 * k})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const r of this.rain) {
+      r.x += vx * r.s * dt;
+      r.y += vy * r.s * dt;
+      if (r.y > h || r.x < -20) {
+        r.x = Math.random() * (w + 200);
+        r.y = -10;
+      }
+      ctx.moveTo(r.x, r.y);
+      ctx.lineTo(r.x + vx * 0.018 * r.s, r.y + vy * 0.018 * r.s);
+    }
+    ctx.stroke();
+    if (storm) {
+      this.lightning = Math.max(0, this.lightning - dt * 3);
+      if (Math.random() < dt * 0.12 * k) this.lightning = 1;
+      if (this.lightning > 0) {
+        ctx.fillStyle = `rgba(220,228,255,${this.lightning * 0.35 * (0.4 + dark)})`;
+        ctx.fillRect(0, 0, w, h);
+      }
+    }
+  }
+
+  // ---------------- 補給物資 ----------------
+
+  /** 投下地点の赤い発煙（霧の上に描くので遠くからでも見える） */
+  private drawDropBeacon(view: ViewState): void {
+    if (!view.drop) return;
+    const { ctx } = this;
+    const { x, y } = view.drop;
+    for (let i = 0; i < 9; i++) {
+      const ph = (this.time * 0.35 + i / 9) % 1;
+      const r = 8 + ph * 34;
+      ctx.fillStyle = `rgba(200,70,50,${0.32 * (1 - ph)})`;
+      ctx.beginPath();
+      ctx.arc(x + Math.sin(i * 2.1 + this.time) * 10 * ph + ph * 30, y - ph * 150, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const pulse = 0.6 + Math.sin(this.time * 9) * 0.4;
+    ctx.fillStyle = `rgba(255,90,60,${pulse})`;
+    ctx.beginPath();
+    ctx.arc(x, y - 4, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** 画面外の補給物資の方向 */
+  private drawDropIndicator(view: ViewState, me: PlayerSnap | undefined): void {
+    if (!view.drop || !me) return;
+    const { ctx, w, h } = this;
+    const sx = view.drop.x - this.cam.x + w / 2;
+    const sy = view.drop.y - this.cam.y + h / 2;
+    if (sx > 40 && sy > 40 && sx < w - 40 && sy < h - 40) return;
+    const cx = w / 2;
+    const cy = h / 2;
+    const ang = Math.atan2(sy - cy, sx - cx);
+    const rx = w / 2 - 70;
+    const ry = h / 2 - 150;
+    const k = Math.min(rx / Math.max(1e-3, Math.abs(Math.cos(ang))), ry / Math.max(1e-3, Math.abs(Math.sin(ang))));
+    const ex = cx + Math.cos(ang) * k;
+    const ey = cy + Math.sin(ang) * k;
+    ctx.save();
+    ctx.translate(ex, ey);
+    ctx.rotate(ang);
+    ctx.fillStyle = '#d0603e';
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(0, -7);
+    ctx.lineTo(0, 7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    const dist = Math.round(Math.hypot(view.drop.x - me.x, view.drop.y - me.y) / TILE);
+    ctx.font = 'bold 10px "Noto Sans JP", "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.strokeText(`補給物資 ${dist}m`, ex - Math.cos(ang) * 30, ey - Math.sin(ang) * 18);
+    ctx.fillStyle = '#e8a080';
+    ctx.fillText(`補給物資 ${dist}m`, ex - Math.cos(ang) * 30, ey - Math.sin(ang) * 18);
+  }
+
+  // ---------------- イベントログ ----------------
+
+  /** 左上（チーム一覧の下）に最近の出来事を表示 */
+  private drawFeed(fx: Effects, players: number): void {
+    if (!fx.feed.length) return;
+    const { ctx } = this;
+    const x = 12;
+    let y = 12 + 22 + 36 * players + 10;
+    const CAT: Record<string, [string, string]> = {
+      danger: ['危険', '#d0583e'],
+      loot: ['入手', '#e0a33a'],
+      up: ['強化', '#93b77c'],
+      ally: ['仲間', '#7fa2bf'],
+      info: ['情報', '#8c8872'],
+    };
+    ctx.textBaseline = 'middle';
+    for (const f of fx.feed) {
+      const [tag, col] = CAT[f.cat] ?? CAT.info;
+      const a = Math.min(1, f.life / 1.2, (9 - f.life) * 5);
+      ctx.globalAlpha = a;
+      ctx.font = `bold 11px ${UI}`;
+      const tw = Math.min(430, ctx.measureText(f.t).width) + 56;
+      ctx.fillStyle = f.cat === 'danger' ? 'rgba(48,16,10,0.82)' : 'rgba(14,15,11,0.8)';
+      ctx.fillRect(x, y, tw, 20);
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y, 2, 20);
+      chipBox(ctx, x + 7, y + 3, 34, 14, col, true);
+      ctx.font = `bold 9px ${UI}`;
+      ctx.fillStyle = '#15170f';
+      ctx.textAlign = 'center';
+      ctx.fillText(tag, x + 24, y + 10.5);
+      ctx.textAlign = 'left';
+      ctx.font = `bold 11px ${UI}`;
+      ctx.fillStyle = f.cat === 'danger' ? '#f4b4a2' : '#e6e1cc';
+      ctx.fillText(f.t, x + 48, y + 10.5, 430);
+      y += 23;
+    }
+    ctx.globalAlpha = 1;
+  }
+
   private drawGlows(view: ViewState, dark: number): void {
     if (dark < 0.05) return;
     const { ctx } = this;
@@ -892,19 +1423,21 @@ export class Renderer {
 
   // ---------------- オーバーレイ ----------------
 
-  private drawPlayerOverlay(p: PlayerSnap, isLocal: boolean): void {
+  private drawPlayerOverlay(p: PlayerSnap, isLocal: boolean, nameOff = 0): void {
     const { ctx } = this;
     const color = PLAYER_COLORS[p.id] ?? '#fff';
     const y = p.y - 32;
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+    ctx.font = 'bold 12px "Noto Sans JP", "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.8)';
     const label = isLocal ? `${p.name} (YOU)` : p.name;
-    ctx.strokeText(label, p.x, y - 10);
+    // ダウン中は残り時間の丸い表示があるので、名前はその上に出す
+    if (p.status === 'down') nameOff += 16;
+    ctx.strokeText(label, p.x, y - 10 - nameOff);
     ctx.fillStyle = color;
-    ctx.fillText(label, p.x, y - 10);
+    ctx.fillText(label, p.x, y - 10 - nameOff);
 
     if (p.status === 'alive') {
       const w = 32;
@@ -922,6 +1455,9 @@ export class Renderer {
       }
     } else if (p.status === 'down') {
       const r = clamp(p.downTimer / PLAYER.downTime, 0, 1);
+      // 救助中は進み具合の輪だけにする（残り秒数と DOWN の文字は出さない）
+      const reviving = p.reviveProgress > 0;
+      if (!reviving) {
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0,0,0,0.6)';
       ctx.beginPath();
@@ -937,7 +1473,8 @@ export class Renderer {
       ctx.font = 'bold 11px sans-serif';
       ctx.fillStyle = Math.sin(this.time * 8) > 0 ? '#c0573e' : '#c9a09a';
       ctx.fillText('DOWN', p.x, p.y + 28);
-      if (p.reviveProgress > 0) {
+      }
+      if (reviving) {
         const rp = clamp(p.reviveProgress / PLAYER.reviveTime, 0, 1);
         ctx.lineWidth = 5;
         ctx.strokeStyle = 'rgba(125,255,176,0.25)';
@@ -982,7 +1519,7 @@ export class Renderer {
       if (z.alert > 0) {
         const t = z.alert === 2 ? '!' : '?';
         const by = z.y - r - (z.hp < z.maxHp ? 22 : 14) + Math.sin(this.time * 6 + z.id) * 1.5;
-        ctx.font = '900 15px "Segoe UI", sans-serif';
+        ctx.font = '900 15px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.lineWidth = 3;
@@ -1016,101 +1553,109 @@ export class Renderer {
     const horde = !!me && me.status === 'alive' && view.zombies.some((z) => z.alert === 2 && Math.hypot(z.x - me.x, z.y - me.y) < 420 && this.vision.isVisible(z.x, z.y));
 
     // 大襲撃：赤い空と画面端
-    if (horde) {
-      const pulse = 0.55 + Math.sin(this.time * 2.4) * 0.15;
-      const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
-      g.addColorStop(0, 'rgba(180,0,0,0)');
-      g.addColorStop(1, `rgba(200,0,0,${0.38 * pulse})`);
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-    }
-    if (fx.hurt > 0) {
-      const g = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.max(w, h) * 0.7);
-      g.addColorStop(0, 'rgba(255,0,40,0)');
-      g.addColorStop(1, `rgba(255,0,40,${0.35 * fx.hurt})`);
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-    }
+    // 追われているときの赤い縁・被弾の赤：CSS の重ね合わせ（不透明度だけ毎フレーム変える）
+    this.setOv('alert', 'opacity', horde ? (0.38 * (0.55 + Math.sin(this.time * 2.4) * 0.15)).toFixed(2) : '0');
+    this.setOv('hurt', 'opacity', fx.hurt > 0 ? (0.35 * fx.hurt).toFixed(2) : '0');
+    // 汚染度が高いと視界の縁が黄緑にかすむ
+    const tx2 = me && me.status === 'alive' ? me.tox ?? 0 : 0;
+    this.setOv('tox', 'opacity', tx2 > 10 ? Math.min(0.75, (tx2 - 10) / 90).toFixed(2) : '0');
 
-    this.drawClock(view, me);
-    this.drawLocationToast(me, o.dt);
-    this.drawAllyIndicators(view, o.localId, o.effects);
-    this.drawTeam(view, o.localId);
-    if (me) this.drawSelfPanel(view, me);
-    this.drawHotbar(o, view);
-    this.drawMinimap(view, o.localId);
-
-    // モード表示
-    ctx.font = '11px "Segoe UI", sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = 'rgba(200,210,225,0.55)';
-    const modeLabel = o.mode === 'solo' ? 'SOLO' : `${o.mode.toUpperCase()}  ROOM: ${o.roomCode ?? ''}`;
-    ctx.fillText(
-      modeLabel + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : '') + (o.muted ? '   ♪ OFF [M]' : '   ♪ ON [M]') + '   ピン [G]/中クリック',
-      14,
-      h - 18,
-    );
+    this.updateExplored(o.dt);
+    if (!o.panelOpen) this.drawCompass(view, me, o.localId);
+    // パネルを開いている間は入場通知を出さない（閉じたあとに古い通知が出ないよう捨てる）
+    if (o.panelOpen) this.locToast = null;
+    // 補給物資などの通知は、入場通知と同じ上部の細い帯で（入場通知が出ていなければすぐ）
+    if (fx.notice && !this.locToast && !o.panelOpen) {
+      this.locToast = { text: fx.notice.text, sub: fx.notice.sub, color: fx.notice.color, life: 4, kicker: 'NOTICE' };
+      fx.notice = null;
+    }
+    this.toastDim = horde ? 0.4 : 1;
+    this.drawLocationToast(me, o.dt, !!fx.banner);
+    if (!o.panelOpen) {
+      this.drawAllyIndicators(view, o.localId, o.effects);
+      this.drawDropIndicator(view, me);
+      this.drawFeed(fx, view.players.length);
+    }
+    this.drawHudLayer(view, o, me);
+    this.autoQuality(o.dt);
 
     // ---- 中央メッセージ ----
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     if (me && me.status === 'down') {
-      ctx.font = '900 28px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#c0573e';
-      ctx.fillText('ダウン中！', w / 2, h * 0.3);
-      ctx.font = '15px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#ffd0d5';
-      ctx.fillText(`味方の蘇生を待て（残り ${Math.ceil(me.downTimer)} 秒）`, w / 2, h * 0.3 + 30);
+      const rp = me.reviveProgress > 0 ? Math.round((me.reviveProgress / PLAYER.reviveTime) * 100) : 0;
+      centerCard(ctx, w / 2, h * 0.3, 'DOWN — ダウン中', rp > 0 ? `仲間が救助中… ${rp}%　そのまま待て` : `味方の救助を待て　残り ${Math.ceil(me.downTimer)} 秒`, rp > 0 ? '#93d07c' : '#d0583e', this.time);
     } else if (me && me.status === 'dead') {
-      ctx.font = '900 26px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#9aa3b5';
-      ctx.fillText('戦闘不能', w / 2, h * 0.3);
-      ctx.font = '15px "Segoe UI", sans-serif';
-      ctx.fillText('仲間が朝（6:00）まで生き延びれば復帰します', w / 2, h * 0.3 + 30);
-    } else {
+      centerCard(ctx, w / 2, h * 0.3, 'K.I.A. — 戦闘不能', '仲間が朝（6:00）まで生き延びれば拠点で復帰する', '#8c8872', this.time);
+    } else if (!o.panelOpen) {
       let hint: string | null = null;
-      if (o.reviveHint) hint = '[E] 長押しで蘇生';
+      const reviving = !!me && view.players.some((p) => p.status === 'down' && p.reviveProgress > 0 && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange + 20);
+      if (o.reviveHint && !reviving) hint = '[E] 長押しで蘇生';
       else if (o.interactHint) hint = o.interactHint;
-      if (hint) {
-        const pulse = 0.75 + Math.sin(this.time * 6) * 0.25;
-        ctx.font = 'bold 16px "Segoe UI", sans-serif';
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-        ctx.strokeText(hint, w / 2, h * 0.64);
-        ctx.fillStyle = o.reviveHint ? `rgba(125,255,176,${pulse})` : `rgba(255,230,150,${pulse})`;
-        ctx.fillText(hint, w / 2, h * 0.64);
-      }
+      if (hint) keyHint(ctx, w / 2, h * 0.64, hint, o.reviveHint ? '#93b77c' : '#e0a33a', this.time);
     }
 
-    if (fx.banner) {
+    if (fx.banner && !o.panelOpen) {
       const b = fx.banner;
       const t = b.life / b.maxLife;
       const appear = clamp((1 - t) * 8, 0, 1);
       const fade = clamp(t * 4, 0, 1);
-      ctx.globalAlpha = Math.min(appear, fade);
+      // 追われている最中は薄く（敵や地形を隠さない）
+      ctx.globalAlpha = Math.min(appear, fade) * (horde ? 0.4 : 1);
       ctx.save();
-      ctx.translate(w / 2, h * 0.24);
-      const sc = 1 + (1 - appear) * 0.4;
+      // 画面の上寄り・小さめに表示（視界の中央を空ける）
+      ctx.translate(w / 2, Math.max(150, h * 0.19));
+      const sc = (1 + (1 - appear) * 0.3) * 0.82;
       ctx.scale(sc, sc);
-      ctx.font = '900 40px "Segoe UI", sans-serif';
-      ctx.lineWidth = 7;
-      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+      // 横帯＋見出し
+      ctx.font = `bold 15px ${UI}`;
+      const bw = Math.max(420, ctx.measureText(b.sub).width + 80);
+      const grd = ctx.createLinearGradient(-bw / 2, 0, bw / 2, 0);
+      grd.addColorStop(0, 'rgba(12,13,10,0)');
+      grd.addColorStop(0.2, 'rgba(12,13,10,0.78)');
+      grd.addColorStop(0.8, 'rgba(12,13,10,0.78)');
+      grd.addColorStop(1, 'rgba(12,13,10,0)');
+      ctx.fillStyle = grd;
+      ctx.fillRect(-bw / 2, -34, bw, 84);
+      ctx.fillStyle = b.color;
+      ctx.fillRect(-bw * 0.3, -34, bw * 0.6, 1);
+      ctx.fillRect(-bw * 0.3, 49, bw * 0.6, 1);
+      ctx.font = `bold 36px ${HEAD}`;
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
       ctx.strokeText(b.text, 0, 0);
       ctx.fillStyle = b.color;
       ctx.fillText(b.text, 0, 0);
-      ctx.font = 'bold 15px "Segoe UI", sans-serif';
-      ctx.lineWidth = 4;
-      ctx.strokeText(b.sub, 0, 36);
-      ctx.fillStyle = '#e6ebf5';
-      ctx.fillText(b.sub, 0, 36);
+      ctx.font = `bold 14px ${UI}`;
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(b.sub, 0, 32);
       ctx.restore();
       ctx.globalAlpha = 1;
     }
 
+    // 地図を開いている間は照準・弾数を描かない（地図の上に重ねない）
+    if (o.mapOpen) {
+      this.drawWorldMap(view, o.localId);
+      return;
+    }
+    // パネルを開いている間はマウスカーソルで操作するので照準は出さない
+    if (o.panelOpen) return;
+
     // ---- クロスヘア（連射で広がる） ----
     const cx = o.mouseX;
     const cy = o.mouseY;
+    // HUD パネルの上では、文字に重ならない小さなカーソルだけにする
+    if (this.hudRects.some((r) => cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h)) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = '#e6e1cc';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      return;
+    }
     const alive = me && me.status === 'alive';
     const held = me ? heldWeapon({ ...me, tool: o.localTool }) : null;
     const isGun = !!held;
@@ -1120,8 +1665,8 @@ export class Renderer {
     const drawCross = () => {
       ctx.beginPath();
       if (isGun) {
-        const sg = held?.id === 'shotgun';
-        const g = (sg ? 12 : 4) + (held ? effectiveStats(held.id, held.w).spread * 60 : 0) + this.bloom * 12;
+        const sg = held?.id === 'shotgun' && !held.w.ap;
+        const g = (sg && !held?.w.ap ? 12 : 4) + (held ? (effectiveStats(held.id, held.w).spread + (me?.heat ?? 0)) * 60 : 0) + this.bloom * 8;
         const len = 8;
         ctx.moveTo(cx - g - len, cy);
         ctx.lineTo(cx - g, cy);
@@ -1147,37 +1692,152 @@ export class Renderer {
     drawCross();
     ctx.fillStyle = '#fff';
     ctx.fillRect(cx - 1, cy - 1, 2, 2);
+    // 命中・撃破の×印
+    const hm = o.effects.hitMark;
+    if (hm.t > 0) {
+      const k = hm.kill ? hm.t / 0.32 : hm.t / 0.14;
+      const r0 = hm.kill ? 7 : 6;
+      const r1 = r0 + (hm.kill ? 9 : 6) * (0.6 + 0.4 * k);
+      ctx.globalAlpha = Math.min(1, k * 1.6);
+      for (const [col, lw] of [
+        ['rgba(0,0,0,0.6)', 4],
+        [hm.kill ? '#ff5a3c' : '#ffffff', 2],
+      ] as [string, number][]) {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = lw;
+        ctx.beginPath();
+        for (const [sx, sy] of [
+          [1, 1],
+          [1, -1],
+          [-1, 1],
+          [-1, -1],
+        ]) {
+          ctx.moveTo(cx + sx * r0, cy + sy * r0);
+          ctx.lineTo(cx + sx * r1, cy + sy * r1);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // リロードの進み具合（照準のまわりの輪）
+    if (me && held && alive && me.reloadT > 0) {
+      const total = effectiveStats(held.id, held.w).reloadTime * skillMods(me.xp).reloadMul;
+      const f = clamp(1 - me.reloadT / Math.max(0.01, total), 0, 1);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.beginPath();
+      ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = '#e0a33a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 20, -Math.PI / 2, -Math.PI / 2 + f * Math.PI * 2);
+      ctx.stroke();
+    }
     if (me && held && alive) {
-      ctx.font = 'bold 11px "Segoe UI", sans-serif';
+      ctx.font = `12px ${MONO}`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       const st = effectiveStats(held.id, held.w);
       const mag = held.w.mag;
       const res = countItem(me.bag, st.ammo);
-      ctx.fillStyle = mag === 0 ? '#c06050' : '#e6ebf5';
-      const txt = me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}`;
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-      ctx.strokeText(txt, cx + 16, cy + 16);
-      ctx.fillText(txt, cx + 16, cy + 16);
+      // 残りわずかは黄色、空は赤
+      ctx.fillStyle = mag === 0 ? '#e06050' : mag <= Math.ceil(st.magSize * 0.25) ? '#e0b040' : '#e6ebf5';
+      const txt = me.reloadT > 0 ? 'RELOAD…' : `${mag}/${res}${held.w.ap ? ' AP' : ''}`;
+      // HUD パネルや画面の端に重ならない位置を選ぶ（右下→左下→右上→左上）。どこも重なるなら出さない
+      const tw = ctx.measureText(txt).width;
+      const hit = (x: number, y: number) =>
+        x < 4 || y < 4 || x + tw > this.w - 4 || y + 14 > this.h - 4 || this.hudRects.some((r) => x < r.x + r.w && x + tw > r.x && y < r.y + r.h && y + 14 > r.y);
+      const spots: [number, number][] = [
+        [cx + 16, cy + 9],
+        [cx - 16 - tw, cy + 9],
+        [cx + 16, cy - 23],
+        [cx - 16 - tw, cy - 23],
+      ];
+      const spot = spots.find(([x, y]) => !hit(x, y));
+      if (spot) {
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.strokeText(txt, spot[0], spot[1] + 7);
+        ctx.fillText(txt, spot[0], spot[1] + 7);
+      }
     }
     void dark;
   }
 
+  /** HUD のパネル類を別キャンバスに描く。約15Hz、または持ち替え・状態変化のときだけ描き直す */
+  /** HUD パネルの矩形（最後に HUD レイヤーを描いたとき） */
+  private hudRects: { x: number; y: number; w: number; h: number }[] = [];
+
+  private drawHudLayer(view: ViewState, o: RenderOptions, me: PlayerSnap | undefined): void {
+    this.hudT -= o.dt;
+    const key = `${o.localTool}|${me?.status}|${this.w}x${this.h}|${view.players.length}|${o.panelOpen ? 1 : 0}`;
+    if (this.hudT > 0 && key === this.hudKey) return;
+    this.hudT = 1 / 15;
+    this.hudKey = key;
+    const main = this.ctx;
+    const ctx = this.hudCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.hudCanvas.width, this.hudCanvas.height);
+    ctx.setTransform(this.baseDpr, 0, 0, this.baseDpr, 0, 0);
+    this.ctx = ctx;
+    panelLog = [];
+    try {
+      this.drawClock(view, me);
+      this.drawTeam(view, o.localId);
+      if (me) this.drawSelfPanel(view, me);
+      this.drawHotbar(o, view);
+      this.drawMinimap(view, o.localId);
+      // モード表示
+      ctx.font = `10px ${MONO}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(189,183,158,0.6)';
+      const modeLabel = o.mode === 'solo' ? 'SOLO OPS' : `${o.mode.toUpperCase()} / ROOM ${o.roomCode ?? ''}`;
+      const q = this.renderScale < 1 ? `  RES ${Math.round(this.renderScale * 100)}%` : '';
+      ctx.fillText(
+        `● ${modeLabel}` + (o.syncMs ? `  SYNC ${Math.round(o.syncMs)}ms` : '') + (o.muted ? '  SND OFF [M]' : '  SND ON [M]') + '  PING [G]' + q,
+        14,
+        this.h - 14,
+      );
+    } finally {
+      this.ctx = main;
+      // 上部中央のコンパスも避ける領域に含める
+      const cw = Math.max(260, Math.min(460, this.w - 640));
+      this.hudRects = [...(panelLog ?? []), { x: this.w / 2 - cw / 2, y: 0, w: cw, h: 48 }];
+      panelLog = null;
+    }
+  }
+
   /** ロケーションに入ったときの表示（例：「警察署 ★★★ 危険」） */
-  private drawLocationToast(me: PlayerSnap | undefined, dt: number): void {
+  private curDist: string | null = null;
+  private toastDim = 1;
+
+  private drawLocationToast(me: PlayerSnap | undefined, dt: number, bannerShown: boolean): void {
     if (me) {
       const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
       const key = loc ? `${loc.name}${loc.x},${loc.y}` : null;
       if (key !== this.curLoc) {
         this.curLoc = key;
         if (loc) {
-          const danger = loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
-          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
+          const danger = loc.hot ? '汚染地帯：手強い個体が多いが、レア物資が眠っている' : loc.tier >= 4 ? '最深部：重装の感染兵士が群れる。最高級の物資と、帰り道の危険' : loc.tier >= 3 ? '危険：感染兵士が多数・武器や軍用物資' : loc.tier === 2 ? 'やや危険：弾薬・薬品・パーツが見つかる' : loc.kind === 'base' ? '安全地帯：倉庫・作業台・焚き火' : '比較的安全：食料・布・日用品';
+          this.locToast = { text: `${loc.name}  ${'★'.repeat(loc.tier)}`, sub: danger, color: loc.hot ? '#d090c8' : loc.tier >= 4 ? '#e05a40' : loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8c48a' : '#a9c79c', life: 3.5 };
+        } else this.locToast = null; // その場所を出たら古い表示は出さない
+      }
+      // 地区（住宅街・工業地区など）が変わったら、屋外にいるときだけ知らせる
+      const dist = districtAt(this.world.districts, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
+      const dkey = dist?.name ?? null;
+      if (dkey !== this.curDist) {
+        this.curDist = dkey;
+        if (dist && !loc) {
+          const info = DISTRICT_INFO[dist.kind];
+          this.locToast = { text: `${dist.name}  ${'★'.repeat(dist.tier)}`, sub: `物資：${info.loot}　脅威：${info.threat}`, sub2: `推奨：${info.advice}`, color: info.color, life: 4 };
         }
       }
     }
     if (!this.locToast) return;
+    // 「DAY 1」などの大きな表示と重ならないよう、それが消えるまで待ってから出す
+    if (bannerShown) return;
     const t = this.locToast;
     t.life -= dt;
     if (t.life <= 0) {
@@ -1185,25 +1845,38 @@ export class Renderer {
       return;
     }
     const { ctx, w } = this;
-    ctx.globalAlpha = Math.min(1, t.life, (3.5 - t.life) * 4);
+    ctx.globalAlpha = Math.min(1, t.life, (4.5 - t.life) * 4) * this.toastDim;
+    // 場所に入ったときの表示：上部中央の細い帯
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.font = '900 22px "Segoe UI", sans-serif';
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-    ctx.strokeText(t.text, w / 2, 90);
+    ctx.textBaseline = 'middle';
+    ctx.font = `bold 12px ${UI}`;
+    const bw = Math.max(300, ctx.measureText(t.sub).width + 60, t.sub2 ? ctx.measureText(t.sub2).width + 60 : 0);
+    const y = 96;
+    const bh = t.sub2 ? 64 : 50;
+    ctx.fillStyle = 'rgba(12,13,10,0.78)';
+    ctx.fillRect(w / 2 - bw / 2, y - 22, bw, bh);
+    brackets(ctx, w / 2 - bw / 2, y - 22, bw, bh, t.color, 8, 1.5);
+    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = 'rgba(189,183,158,0.7)';
+    ctx.fillText(t.kicker ?? 'ENTERING AREA', w / 2, y - 12);
+    ctx.font = `bold 18px ${UI}`;
     ctx.fillStyle = t.color;
-    ctx.fillText(t.text, w / 2, 90);
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
-    ctx.lineWidth = 4;
-    ctx.strokeText(t.sub, w / 2, 118);
-    ctx.fillStyle = '#e6ebf5';
-    ctx.fillText(t.sub, w / 2, 118);
+    ctx.fillText(t.text, w / 2, y + 4);
+    ctx.font = `bold 11px ${UI}`;
+    ctx.fillStyle = '#d8d2b8';
+    ctx.fillText(t.sub, w / 2, y + 19);
+    if (t.sub2) {
+      ctx.fillStyle = '#e0b862';
+      ctx.fillText(t.sub2, w / 2, y + 33);
+    }
     ctx.globalAlpha = 1;
   }
 
   /** ピンの目印（世界座標） */
-  private drawPingMarkers(fx: Effects): void {
+  /** ピンを立てた人の名前（id → 名前） */
+  private pingNames = new Map<number, string>();
+
+  private drawPingMarkers(fx: Effects, me?: PlayerSnap): void {
     const { ctx } = this;
     for (const p of fx.pings) {
       const col = p.t === 'enemy' ? '#c0573e' : p.t === 'loot' ? '#c9a85a' : (PLAYER_COLORS[p.id] ?? '#fff');
@@ -1228,6 +1901,16 @@ export class Renderer {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(p.t === 'enemy' ? '!' : p.t === 'loot' ? '$' : '▼', p.x, py);
+      // 何のピンか・誰が立てたか・どれくらい離れているか
+      const who = this.pingNames.get(p.id) ?? '';
+      const dist = me ? `${Math.round(Math.hypot(p.x - me.x, p.y - me.y) / TILE)}m` : '';
+      const label = `${p.t === 'enemy' ? '敵！' : p.t === 'loot' ? '物資' : 'ここへ'}${who ? `（${who}）` : ''} ${dist}`;
+      ctx.font = `bold 11px ${UI}`;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+      ctx.strokeText(label, p.x, py - 18);
+      ctx.fillStyle = col;
+      ctx.fillText(label, p.x, py - 18);
       ctx.globalAlpha = 1;
     }
   }
@@ -1282,30 +1965,35 @@ export class Renderer {
         ctx.strokeStyle = down ? '#b03a2e' : col;
         ctx.lineWidth = 2;
         ctx.stroke();
-        ctx.font = 'bold 11px "Segoe UI", sans-serif';
+        ctx.font = 'bold 11px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = down ? '#c98070' : col;
         ctx.fillText(down ? 'SOS' : p.name.slice(0, 2), e.x, e.y);
-        ctx.font = 'bold 10px "Segoe UI", sans-serif';
+        ctx.font = 'bold 10px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.lineWidth = 3;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        const label = down ? `${p.name} 助けて！ ${Math.ceil(p.downTimer)}s` : `${p.name} ${dist}m`;
+        const label = down ? `${p.name} 助けて！ ${dist}m・残り${Math.ceil(p.downTimer)}s` : `${p.name} ${dist}m`;
         ctx.strokeText(label, e.x, e.y + 24);
         ctx.fillStyle = '#fff';
         ctx.fillText(label, e.x, e.y + 24);
       } else {
         // 画面内のダウン中の仲間：頭上に大きな SOS
         const sx = p.x - this.cam.x + w / 2;
-        const sy = p.y - this.cam.y + h / 2 - 60;
+        const sy = p.y - this.cam.y + h / 2 - 84;
+        // すぐそばにいるときは画面下の「[E] 長押しで蘇生」と重複するので進捗だけ出す
+        if (me && Math.hypot(p.x - me.x, p.y - me.y) <= PLAYER.reviveRange && p.reviveProgress <= 0) continue;
+        // 救助中は足元の輪が進み具合を示すので、頭上の文字は出さない（情報を詰め込みすぎない）
+        if (p.reviveProgress > 0) continue;
         const pulse = 0.7 + Math.sin(this.time * 8) * 0.3;
-        ctx.font = '900 16px "Segoe UI", sans-serif';
+        ctx.font = '900 16px "Noto Sans JP", "Segoe UI", sans-serif';
         ctx.textAlign = 'center';
         ctx.lineWidth = 4;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        ctx.strokeText('SOS [E]で蘇生', sx, sy);
-        ctx.fillStyle = `rgba(255,90,90,${pulse})`;
-        ctx.fillText('SOS [E]で蘇生', sx, sy);
+        const txt = p.reviveProgress > 0 ? `救助中… ${Math.round((p.reviveProgress / PLAYER.reviveTime) * 100)}%` : `SOS [E]長押しで蘇生 ${dist}m`;
+        ctx.strokeText(txt, sx, sy);
+        ctx.fillStyle = p.reviveProgress > 0 ? '#9fe08a' : `rgba(255,90,90,${pulse})`;
+        ctx.fillText(txt, sx, sy);
       }
     }
     // 画面外のピン
@@ -1325,7 +2013,7 @@ export class Renderer {
       ctx.lineTo(4, 7);
       ctx.stroke();
       ctx.restore();
-      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      ctx.font = 'bold 10px "Noto Sans JP", "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = col;
@@ -1337,95 +2025,174 @@ export class Renderer {
   private drawClock(view: ViewState, me?: PlayerSnap): void {
     const { ctx, w } = this;
     const pw = 300;
+    const ph = 62;
     const x = w - pw - 12;
-    const cxm = x + pw / 2;
-    panel(ctx, x, 10, pw, 66);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    const icon = view.phase === 'day' ? '☀' : '☾';
-    const label = view.phase === 'day' ? '昼' : '夜';
-    ctx.font = '900 22px "Segoe UI", sans-serif';
-    ctx.fillStyle = view.phase === 'night' ? '#aab4c8' : '#e0cfa8';
-    ctx.fillText(`Day ${view.day} - ${formatClock(view.minute)}  ${icon} ${label}`, cxm, 16);
+    const y = 12;
+    panel(ctx, x, y, pw, ph);
+    // 時刻（等幅）と昼夜
+    const night = view.phase === 'night';
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    ctx.font = `22px ${MONO}`;
+    ctx.fillStyle = night ? '#b4c0d4' : '#efe6c4';
+    ctx.fillText(formatClock(view.minute), x + 12, y + 28);
+    ctx.font = `11px ${MONO}`;
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText(`DAY ${String(view.day).padStart(2, '0')}`, x + 84, y + 27);
+    // 右上のバッジ：昼夜・天候
+    let bx = x + pw - 10;
+    const badge = (t: string, c: string, fill = false) => {
+      ctx.font = `bold 10px ${UI}`;
+      const tw = ctx.measureText(t).width + 12;
+      bx -= tw;
+      chipBox(ctx, bx, y + 11, tw, 17, c, fill);
+      ctx.fillStyle = fill ? '#15170f' : c;
+      ctx.textAlign = 'center';
+      ctx.fillText(t, bx + tw / 2, y + 23);
+      ctx.textAlign = 'left';
+      bx -= 4;
+    };
+    if (view.wx > 0.3 && view.weather !== 'clear') badge({ fog: '霧', rain: '雨', storm: '嵐', clear: '' }[view.weather], '#9fb4c8');
+    badge(night ? '☾ 夜' : '☀ 昼', night ? '#9fb4c8' : '#e0a33a', !night);
 
-    // 時間バー（昼=黄 / 夜=青）
-    const bx = x + 16;
-    const bw = pw - 32;
-    const by = 44;
+    // 時間バー（昼=アンバー / 夜=青）＋目盛り
+    const bx0 = x + 12;
+    const bw = pw - 24;
+    const by = y + 36;
     const dayFrac = DAY_SECONDS / CYCLE_SECONDS;
-    ctx.fillStyle = '#6b5a2a';
-    ctx.fillRect(bx, by, bw * dayFrac, 4);
-    ctx.fillStyle = '#26305a';
-    ctx.fillRect(bx + bw * dayFrac, by, bw * (1 - dayFrac), 4);
+    ctx.fillStyle = 'rgba(224,163,58,0.35)';
+    ctx.fillRect(bx0, by, bw * dayFrac, 3);
+    ctx.fillStyle = 'rgba(110,140,190,0.4)';
+    ctx.fillRect(bx0 + bw * dayFrac, by, bw * (1 - dayFrac), 3);
+    ctx.fillStyle = 'rgba(230,225,204,0.3)';
+    for (let k = 0; k <= 12; k++) ctx.fillRect(bx0 + (bw * k) / 12, by + 4, 1, k % 3 === 0 ? 3 : 2);
     const m = view.minute;
     const cyc = m >= 360 && m < 1200 ? ((m - 360) / 840) * dayFrac : dayFrac + (((m - 1200 + 1440) % 1440) / 600) * (1 - dayFrac);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(bx + bw * clamp(cyc, 0, 1) - 1, by - 3, 3, 10);
+    const px = bx0 + bw * clamp(cyc, 0, 1);
+    ctx.fillStyle = '#efe6c4';
+    ctx.beginPath();
+    ctx.moveTo(px, by - 1);
+    ctx.lineTo(px - 4, by - 6);
+    ctx.lineTo(px + 4, by - 6);
+    ctx.closePath();
+    ctx.fill();
 
-    // 現在地の危険度
-    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+    // 現在地と危険度、拠点までの距離と方角（帰還の判断用）
     let sub = '野外';
-    let col = '#c3cbe0';
+    let col = '#bdb79e';
+    let tag = '';
     if (me) {
-      const loc = locationAt(this.world.locations, Math.floor(me.x / TILE), Math.floor(me.y / TILE));
+      const tx = Math.floor(me.x / TILE);
+      const ty = Math.floor(me.y / TILE);
+      const loc = locationAt(this.world.locations, tx, ty);
+      const d = Math.hypot(tx - BASE_TX, ty - BASE_TY);
+      const tier = loc && loc.kind !== 'base' ? loc.tier : tierAtDistance(d);
+      const edge = edgeDistance(tx, ty) < EDGE_BAND;
       if (loc?.kind === 'base') {
-        sub = '拠点（安全地帯）— 焚き火のそばで回復';
-        col = '#9fc48a';
-      } else if (loc) {
-        sub = `${loc.name}  ${'★'.repeat(loc.tier)}${loc.tier >= 3 ? ' 危険' : ''}`;
-        col = loc.tier >= 3 ? '#c98070' : loc.tier === 2 ? '#d8b870' : '#c3cbe0';
-      } else if (view.phase === 'night') {
-        sub = '野外（夜は徘徊者が増える）';
+        sub = '拠点 — 安全地帯';
+        col = '#93b77c';
+        tag = 'SAFE';
+      } else {
+        const dist = districtAt(this.world.districts, tx, ty);
+        const tt = this.world.terrainAt(tx, ty);
+        const F = this.world.features;
+        const onRoad = tt === T_ROAD;
+        const bridge = tt === T_BRIDGE ? F.bridges.find((b) => tx >= b.x && tx < b.x + b.w && ty >= b.y && ty < b.y + b.h) : undefined;
+        const hwy = onRoad || tt === T_BRIDGE ? F.highways.find((h) => (h.horiz ? ty >= h.at && ty < h.at + h.w : tx >= h.at && tx < h.at + h.w)) : undefined;
+        const stars = '★'.repeat(tier);
+        sub = loc
+          ? loc.name
+          : edge
+            ? '外縁の汚染帯'
+            : bridge
+              ? `${bridge.name}（${F.river?.name ?? '川'}）${stars}`
+              : tt === T_SHALLOW
+                ? '浅瀬 — 足が遅くなる'
+                : hwy
+                  ? `${hwy.name} ${stars}`
+                  : onRoad && this.world.vec[ty * MAP_W + tx]
+                    ? `旧道 ${stars}`
+                    : dist
+                      ? `${dist.name} ${stars}`
+                      : `${onRoad ? '幹線道路' : '野外'} ${stars}`;
+        col = edge || loc?.hot ? '#c8d070' : tier >= 4 ? '#e05a40' : tier >= 3 ? '#e07a5e' : tier === 2 ? '#e0b862' : '#bdb79e';
+        // 拠点はどっち？（拠点から見た自分の方角の逆）
+        const back = directionName(BASE_TX * 2 - tx, BASE_TY * 2 - ty);
+        tag = `⌂ ${Math.round(d)}m ${back}`;
       }
     }
+    ctx.font = `bold 11px ${UI}`;
     ctx.fillStyle = col;
-    ctx.fillText(sub, cxm, 54);
+    ctx.fillText(sub, x + 12, y + 55, pw - 80);
+    if (tag) {
+      ctx.textAlign = 'right';
+      ctx.fillText(tag, x + pw - 12, y + 55);
+      ctx.textAlign = 'left';
+    }
   }
 
   private drawTeam(view: ViewState, localId: number): void {
     const { ctx } = this;
-    const pw = 200;
-    const rowH = 40;
+    const pw = 224;
+    const rowH = 36;
     const x = 12;
     const y0 = 12;
-    panel(ctx, x, y0, pw, 10 + rowH * view.players.length);
+    panel(ctx, x, y0, pw, 22 + rowH * view.players.length);
+    ctx.font = `10px ${MONO}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// SQUAD', x + 10, y0 + 11);
+    ctx.fillStyle = '#8c8872';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${view.players.filter((p) => p.status !== 'dead').length}/${view.players.length} ACTIVE`, x + pw - 10, y0 + 11);
     view.players.forEach((p, i) => {
-      const y = y0 + 8 + i * rowH;
+      const y = y0 + 22 + i * rowH;
       const color = PLAYER_COLORS[p.id];
+      ctx.fillStyle = 'rgba(255,255,240,0.03)';
+      ctx.fillRect(x + 6, y, pw - 12, rowH - 4);
       ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(x + 14, y + 9, 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
+      ctx.fillRect(x + 6, y, 3, rowH - 4);
+      // 右側のキル数・所持数の幅を先に測り、名前と「YOU」はその手前に収める
+      const stat = `K${p.kills} ▣${p.bag.filter((b) => b).length}`;
+      ctx.font = `10px ${MONO}`;
+      const statW = ctx.measureText(stat).width;
+      ctx.font = `9px ${MONO}`;
+      const youW = p.id === localId ? ctx.measureText('YOU').width + 8 : 0;
+      const nameMax = pw - 15 - 12 - statW - 10 - youW;
       ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = '#fff';
-      ctx.fillText(p.name + (p.id === localId ? ' (YOU)' : ''), x + 24, y + 2);
+      ctx.font = `bold 12px ${UI}`;
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(p.name, x + 15, y + 9, nameMax);
+      const nameW = Math.min(nameMax, ctx.measureText(p.name).width);
+      if (p.id === localId) {
+        ctx.font = `9px ${MONO}`;
+        ctx.fillStyle = '#93b77c';
+        ctx.fillText('YOU', x + 15 + nameW + 6, y + 9.5);
+      }
       ctx.textAlign = 'right';
-      ctx.fillStyle = '#aab4c8';
-      ctx.font = '11px "Segoe UI", sans-serif';
-      ctx.fillText(`☠${p.kills}  ▣${p.bag.filter((b) => b).length}/${p.bag.length}`, x + pw - 10, y + 3);
-      const bw = pw - 36;
-      ctx.fillStyle = 'rgba(255,255,255,0.1)';
-      ctx.fillRect(x + 24, y + 19, bw, 5);
-      ctx.fillRect(x + 24, y + 27, bw, 3);
+      ctx.font = `10px ${MONO}`;
+      ctx.fillStyle = '#8c8872';
+      ctx.fillText(stat, x + pw - 12, y + 9);
+      const bw = pw - 30;
       if (p.status === 'alive') {
-        ctx.fillStyle = color;
-        ctx.fillRect(x + 24, y + 19, bw * clamp(p.hp / p.maxHp, 0, 1), 5);
+        segBar(ctx, x + 15, y + 18, bw, 5, p.hp / p.maxHp, p.hp / p.maxHp > 0.3 ? color : '#d0583e', 20);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(x + 15, y + 26, bw, 2);
         ctx.fillStyle = '#b08a50';
-        ctx.fillRect(x + 24, y + 27, bw * clamp(p.hunger / 100, 0, 1), 3);
+        ctx.fillRect(x + 15, y + 26, bw * clamp(p.hunger / 100, 0, 1), 2);
       } else if (p.status === 'down') {
-        ctx.fillStyle = '#b4483a';
-        ctx.fillRect(x + 24, y + 19, bw * clamp(p.downTimer / PLAYER.downTime, 0, 1), 5);
-        ctx.font = 'bold 10px sans-serif';
-        ctx.fillStyle = '#c98a80';
-        ctx.textAlign = 'right';
-        ctx.fillText(`DOWN ${Math.ceil(p.downTimer)}s`, x + pw - 10, y + 26);
-      } else {
-        ctx.font = 'bold 10px sans-serif';
-        ctx.fillStyle = '#9aa3b5';
+        const pulse = 0.6 + Math.sin(this.time * 8) * 0.4;
+        segBar(ctx, x + 15, y + 18, bw, 5, p.downTimer / PLAYER.downTime, `rgba(208,88,62,${pulse})`, 20);
         ctx.textAlign = 'left';
-        ctx.fillText('戦闘不能', x + 24, y + 18);
+        ctx.font = `bold 9px ${MONO}`;
+        ctx.fillStyle = '#ef8a70';
+        ctx.fillText(`DOWN ${Math.ceil(p.downTimer)}s — 救助を！`, x + 15, y + 30);
+      } else {
+        ctx.textAlign = 'left';
+        ctx.font = `bold 10px ${UI}`;
+        ctx.fillStyle = '#8c8872';
+        ctx.fillText('K.I.A. — 夜明けに拠点で復帰', x + 15, y + 22);
       }
     });
   }
@@ -1433,112 +2200,177 @@ export class Renderer {
   private drawSelfPanel(view: ViewState, me: PlayerSnap): void {
     const { ctx, h } = this;
     const x = 12;
-    const pw = 230;
-    const ph = 132;
-    const y = h - ph - 28;
-    panel(ctx, x, y, pw, ph);
-    ctx.textAlign = 'left';
+    const pw = 262;
+    const ph = 166;
+    const y = h - ph - 30;
+    const low = me.hp / me.maxHp < 0.3;
+    const hungry = me.hunger < 25;
+    const tired = me.stamina < PLAYER.dashStamina;
+    panel(ctx, x, y, pw, ph, undefined, low ? `rgba(208,88,62,${0.55 + Math.sin(this.time * 7) * 0.35})` : undefined);
     ctx.textBaseline = 'middle';
-    const bar = (label: string, by: number, ratio: number, color: string, text: string) => {
-      ctx.font = 'bold 11px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#aab4c8';
-      ctx.fillText(label, x + 10, by + 5);
-      ctx.fillStyle = 'rgba(255,255,255,0.1)';
-      ctx.fillRect(x + 46, by, pw - 58, 10);
-      ctx.fillStyle = color;
-      ctx.fillRect(x + 46, by, (pw - 58) * clamp(ratio, 0, 1), 10);
-      ctx.font = 'bold 9px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#fff';
+    // ヘッダー
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// VITALS', x + 10, y + 11);
+    // 警告チップ
+    let cx = x + pw - 10;
+    const warn = (t: string, c: string) => {
+      ctx.font = `bold 9px ${UI}`;
+      const tw = ctx.measureText(t).width + 10;
+      cx -= tw;
+      const blink = Math.sin(this.time * 7) > -0.2;
+      chipBox(ctx, cx, y + 4, tw, 14, c, blink);
+      ctx.fillStyle = blink ? '#15170f' : c;
       ctx.textAlign = 'center';
-      ctx.fillText(text, x + 46 + (pw - 58) / 2, by + 5);
+      ctx.fillText(t, cx + tw / 2, y + 11.5);
       ctx.textAlign = 'left';
+      cx -= 4;
     };
-    const hr = me.hp / me.maxHp;
-    bar('HP', y + 10, hr, hr > 0.5 ? '#7fa35e' : hr > 0.25 ? '#c9a85a' : '#c0573e', `${Math.max(0, Math.ceil(me.hp))} / ${me.maxHp}`);
-    const st = me.stamina / PLAYER.maxStamina;
-    bar('体力', y + 26, st, st >= PLAYER.dashStamina / PLAYER.maxStamina ? '#6f93b0' : '#2d5a8a', me.stamina >= PLAYER.dashStamina && me.dashCd <= 0 ? 'スタミナ  DASH OK [Shift]' : 'スタミナ');
-    // ダッシュに必要な量の目盛り
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.fillRect(x + 46 + (pw - 58) * (PLAYER.dashStamina / PLAYER.maxStamina), y + 26, 1, 10);
-    bar('空腹', y + 42, me.hunger / 100, me.hunger > 25 ? '#b08a50' : '#c0573e', `${Math.ceil(me.hunger)}%`);
+    if (low) warn('出血・HP低下', '#d0583e');
+    if (hungry) warn('空腹', '#e0a33a');
+    if (tired) warn('息切れ', '#7fa2bf');
+    if ((me.tox ?? 0) > 50) warn('汚染', '#c8d050');
+    // バッグがほぼ満杯：これ以上は拾えない＝帰還の合図
+    if (me.bag.filter((s) => s).length >= me.bag.length - 1) warn('バッグ満杯', '#93b77c');
 
-    // 装備と持ち物の要約
-    const held = heldWeapon({ ...me, tool: Tool.Primary }) ?? null;
-    const side = heldWeapon({ ...me, tool: Tool.Secondary }) ?? null;
-    const wtxt = (s: typeof held, label: string, iy: number) => {
-      ctx.font = '10px "Segoe UI", sans-serif';
-      ctx.fillStyle = '#8f9bb3';
+    // 数値の列は幅を固定して右揃え（バーの長さはどの行も同じ）
+    const VAL_W = 46;
+    const BAR_W = pw - 50 - 10 - VAL_W - 8;
+    const bar = (label: string, by: number, ratio: number, color: string, val: string, flash: boolean) => {
+      ctx.font = `bold 10px ${UI}`;
+      ctx.fillStyle = flash ? `rgba(239,138,112,${0.6 + Math.sin(this.time * 9) * 0.4})` : '#bdb79e';
+      ctx.textAlign = 'left';
+      ctx.fillText(label, x + 10, by + 5);
+      segBar(ctx, x + 50, by, BAR_W, 10, Math.max(0, Math.min(1, ratio)), color, 20);
+      ctx.font = `12px ${MONO}`;
+      // 長すぎる値は列に収まるまで縮める
+      let fs = 12;
+      while (fs > 8 && ctx.measureText(val).width > VAL_W) ctx.font = `${--fs}px ${MONO}`;
+      ctx.fillStyle = flash ? '#ef8a70' : '#e6e1cc';
+      ctx.textAlign = 'right';
+      ctx.fillText(val, x + pw - 10, by + 5.5);
+    };
+    const num = (v: number) => (v >= 10000 ? '∞' : `${Math.max(0, Math.ceil(v))}`);
+    const hr = me.hp / me.maxHp;
+    bar('HP', y + 24, hr, hr > 0.5 ? '#93b77c' : hr > 0.3 ? '#e0a33a' : '#d0583e', num(me.hp), low);
+    const smax = me.stmMax ?? PLAYER.maxStamina;
+    bar('体力', y + 40, me.stamina / smax, tired ? '#3d5a78' : '#7fa2bf', num(me.stamina), false);
+    // ダッシュに必要な量の目盛り
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillRect(x + 50 + BAR_W * (PLAYER.dashStamina / smax), y + 39, 1, 12);
+    bar('空腹', y + 56, me.hunger / 100, me.hunger > 25 ? '#b08a50' : '#d0583e', `${Math.ceil(me.hunger)}%`, hungry);
+    const tox = me.tox ?? 0;
+    bar('汚染', y + 72, tox / 100, tox > 50 ? '#c8d050' : '#8a9a50', `${Math.round(tox)}%`, tox > 50);
+
+    // 区切り
+    ctx.fillStyle = 'rgba(190,180,130,0.18)';
+    ctx.fillRect(x + 10, y + 88, pw - 20, 1);
+    // 装備
+    const wline = (key: 'prim' | 'sec', label: string, iy: number) => {
+      const s = heldWeapon({ ...me, tool: key === 'prim' ? Tool.Primary : Tool.Secondary });
+      ctx.textAlign = 'left';
+      ctx.font = `9px ${MONO}`;
+      ctx.fillStyle = '#8c8872';
       ctx.fillText(label, x + 10, iy);
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
       if (!s) {
-        ctx.fillStyle = '#6f7a90';
-        ctx.fillText('—', x + 46, iy);
+        ctx.font = `bold 11px ${UI}`;
+        ctx.fillStyle = '#5e5c4c';
+        ctx.fillText('— 未装備 —', x + 50, iy);
         return;
       }
       const st = effectiveStats(s.id, s.w);
-      const mods = (['scope', 'suppressor', 'extmag', 'grip'] as const).filter((a) => s.w[a]).length;
-      ctx.fillStyle = '#e6dcc0';
-      ctx.fillText(`${ITEMS[s.id].name}${mods ? ` +${mods}` : ''}`, x + 46, iy);
+      const mods = ATTACHMENTS.filter((a) => s.w[a]).length;
+      ctx.font = `bold 12px ${UI}`;
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(ITEMS[s.id].name, x + 50, iy, 120);
+      let ax = x + 50 + Math.min(120, ctx.measureText(ITEMS[s.id].name).width) + 6;
+      if (mods) {
+        ctx.font = `10px ${MONO}`;
+        ctx.fillStyle = '#93b77c';
+        ctx.fillText(`+${mods}`, ax, iy);
+        ax += 18;
+      }
+      if (s.w.ap) ammoBadge(ctx, ax, iy - 7, s.id === 'shotgun' ? 'SLG' : 'AP');
       ctx.textAlign = 'right';
-      ctx.fillStyle = s.w.mag === 0 ? '#c06a5a' : '#c9a85a';
-      ctx.fillText(`${s.w.mag}/${countItem(me.bag, st.ammo)}`, x + pw - 10, iy);
-      ctx.textAlign = 'left';
+      ctx.font = `13px ${MONO}`;
+      ctx.fillStyle = s.w.mag === 0 ? '#ef8a70' : '#e0b862';
+      ctx.fillText(`${String(s.w.mag).padStart(2, '0')}/${countItem(me.bag, st.ammo)}`, x + pw - 10, iy);
     };
-    wtxt(held, 'メイン', y + 66);
-    wtxt(side, 'サブ', y + 84);
+    wline('prim', 'PRI', y + 102);
+    wline('sec', 'SEC', y + 120);
+    // バッグの使用状況
     const used = me.bag.filter((b) => b).length;
-    ctx.font = '10px "Segoe UI", sans-serif';
-    ctx.fillStyle = '#8f9bb3';
-    ctx.fillText('バッグ', x + 10, y + 102);
+    ctx.textAlign = 'left';
+    ctx.font = `9px ${MONO}`;
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText('BAG', x + 10, y + 138);
+    const cw = (pw - 112) / me.bag.length;
     for (let i = 0; i < me.bag.length; i++) {
-      ctx.fillStyle = me.bag[i] ? '#b8a878' : 'rgba(255,255,255,0.12)';
-      ctx.fillRect(x + 46 + i * 9, y + 98, 7, 8);
+      ctx.fillStyle = me.bag[i] ? '#b8a878' : 'rgba(255,255,255,0.1)';
+      ctx.fillRect(x + 50 + i * cw, y + 134, cw - 2, 8);
     }
     ctx.textAlign = 'right';
-    ctx.fillStyle = used >= me.bag.length ? '#c06a5a' : '#c3cbe0';
-    ctx.font = 'bold 10px "Segoe UI", sans-serif';
-    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 102);
+    ctx.font = `12px ${MONO}`;
+    ctx.fillStyle = used >= me.bag.length ? '#ef8a70' : '#e6e1cc';
+    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 138);
     ctx.textAlign = 'left';
-    ctx.font = '9px "Segoe UI", sans-serif';
-    ctx.fillStyle = '#6f7a90';
-    ctx.fillText('[F]探索/ドア [Tab]持ち物 [R]リロード [C]クラフト [Q]食事 [H]回復', x + 10, y + ph - 7);
+    ctx.font = `9px ${UI}`;
+    ctx.fillStyle = '#6f6c5a';
+    ctx.fillText('F 探索/ドア ・ Tab 持ち物 ・ R リロード ・ T 弾種 ・ C 作業台', x + 10, y + ph - 9, pw - 20);
     void view;
   }
 
   private drawHotbar(o: RenderOptions, view: ViewState): void {
     const { ctx, w, h } = this;
     const me = view.players.find((p) => p.id === o.localId);
-    const size = 50;
-    const gap = 5;
+    const gap = 4;
+    // 左のステータス（約285px）・右のボタン（約250px）と重ならない大きさにする
+    const avail = w - 2 * 292;
+    const size = Math.max(38, Math.min(54, Math.floor((avail - gap * (SLOTS.length - 1)) / SLOTS.length)));
     const total = SLOTS.length * size + (SLOTS.length - 1) * gap;
-    const x0 = w / 2 - total / 2;
+    const x0 = Math.round(w / 2 - total / 2);
     const y = h - size - 14;
     SLOTS.forEach((t, i) => {
       const x = x0 + i * (size + gap);
       const sel = o.localTool === t.id;
       const usable = i < USABLE_SLOTS;
-      panel(ctx, x, y, size, size, sel ? 'rgba(60,90,130,0.92)' : usable ? undefined : 'rgba(10,12,16,0.4)');
-      if (sel) {
-        ctx.strokeStyle = '#9fb4c2';
-        ctx.lineWidth = 2;
-        roundRectPath(ctx, x + 1, y + 1, size - 2, size - 2, 7);
-        ctx.stroke();
-      }
-      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      const yy = sel ? y - 4 : y;
+      // 枠
+      ctx.fillStyle = usable ? (sel ? 'rgba(56,62,38,0.92)' : 'rgba(17,19,14,0.82)') : 'rgba(10,11,8,0.5)';
+      ctx.fillRect(x, yy, size, size);
+      ctx.strokeStyle = sel ? '#e0a33a' : usable ? 'rgba(190,180,130,0.25)' : 'rgba(190,180,130,0.1)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, yy + 0.5, size - 1, size - 1);
+      if (sel) brackets(ctx, x - 2, yy - 2, size + 4, size + 4, '#e0a33a', 9, 2);
+      // キー番号
+      ctx.font = `10px ${MONO}`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillStyle = usable ? '#ffffff' : 'rgba(255,255,255,0.3)';
-      ctx.fillText(t.key, x + 5, y + 4);
-      if (!usable || !me) return;
+      ctx.fillStyle = sel ? '#e0a33a' : usable ? '#bdb79e' : 'rgba(190,180,130,0.25)';
+      ctx.fillText(t.key, x + 4, yy + 3);
+      if (!usable) {
+        // 未解放スロット：錠前
+        ctx.strokeStyle = 'rgba(190,180,130,0.25)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(x + size / 2, yy + size / 2 - 4, 5, Math.PI, 0);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(190,180,130,0.22)';
+        ctx.fillRect(x + size / 2 - 7, yy + size / 2 - 4, 14, 10);
+        return;
+      }
+      if (!me) return;
       let label = '';
       let warn = false;
       let locked = false;
+      let badge = '';
       const cx = x + size / 2;
-      const cy = y + size / 2 - 3;
+      const cy = yy + size / 2 - 4;
       switch (t.id) {
         case Tool.Melee:
           drawSlotIcon(ctx, 'axe', cx, cy);
-          label = '斧';
+          label = 'MELEE';
           break;
         case Tool.Primary:
         case Tool.Secondary: {
@@ -1549,11 +2381,12 @@ export class Renderer {
           if (s) {
             label = `${s.w.mag}/${countItem(me.bag, effectiveStats(s.id, s.w).ammo)}`;
             warn = s.w.mag === 0;
-          } else label = 'なし';
+            if (s.w.ap) badge = s.id === 'shotgun' ? 'SLG' : 'AP';
+          } else label = 'EMPTY';
           break;
         }
         case Tool.Meds: {
-          const n = countItem(me.bag, 'bandage') + countItem(me.bag, 'medkit');
+          const n = countItem(me.bag, 'bandage') + countItem(me.bag, 'medkit') + countItem(me.bag, 'stim') + countItem(me.bag, 'herbs') + countItem(me.bag, 'antitox');
           drawSlotIcon(ctx, 'medkit', cx, cy, n <= 0);
           label = `×${n}`;
           warn = n <= 0;
@@ -1567,118 +2400,860 @@ export class Renderer {
           break;
         }
       }
+      if (badge) ammoBadge(ctx, x + size - 24, yy + 3, badge);
       ctx.textAlign = 'center';
-      ctx.font = 'bold 9px "Segoe UI", sans-serif';
-      ctx.fillStyle = locked ? '#7d8597' : warn ? '#c06a5a' : '#dfe6f3';
-      ctx.fillText(label, x + size / 2, y + size - 12);
+      ctx.textBaseline = 'alphabetic';
+      ctx.font = `11px ${MONO}`;
+      ctx.fillStyle = locked ? '#5e5c4c' : warn ? '#ef8a70' : '#e6e1cc';
+      ctx.fillText(label, cx, yy + size - 5);
+      // 下辺の状態ライン
+      ctx.fillStyle = locked ? 'rgba(90,90,70,0.4)' : warn ? '#d0583e' : sel ? '#e0a33a' : 'rgba(147,183,124,0.5)';
+      ctx.fillRect(x + 1, yy + size - 2, size - 2, 1);
     });
 
     const cur = SLOTS[o.localTool];
-    if (cur && me) {
-      ctx.font = 'bold 12px "Segoe UI", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillStyle = '#e6ebf5';
+    if (cur && me && !o.panelOpen) {
       const s = heldWeapon({ ...me, tool: o.localTool });
       const name: string = s ? ITEMS[s.id].name : cur.name;
-      ctx.fillText(`${name}  （1〜5 / ホイールで切替）`, w / 2, y - 6);
+      ctx.font = `bold 12px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      const txt = `${name}`;
+      const tw = ctx.measureText(txt).width + 60;
+      ctx.fillStyle = 'rgba(12,13,10,0.65)';
+      ctx.fillRect(w / 2 - tw / 2, y - 30, tw, 18);
+      ctx.fillStyle = '#e6e1cc';
+      ctx.fillText(txt, w / 2, y - 16);
     }
-    void view;
   }
 
+  // ---------------- 地図まわり（探索済みのマスク・ミニマップ・全体地図・コンパス） ----------------
+
+  private exploredCanvas = document.createElement('canvas');
+  private exploredT = 0;
+
+  /** 一度見た場所だけ地図に出す（未探索は暗く）。0.5秒ごとに更新 */
+  private updateExplored(dt: number): void {
+    this.exploredT -= dt;
+    if (this.exploredT > 0 && this.exploredCanvas.width) return;
+    this.exploredT = 0.5;
+    const c = this.exploredCanvas;
+    if (c.width !== MAP_W) {
+      c.width = MAP_W;
+      c.height = MAP_H;
+    }
+    const g = c.getContext('2d')!;
+    const img = g.createImageData(MAP_W, MAP_H);
+    const ex = this.vision.explored;
+    for (let i = 0; i < ex.length; i++) {
+      const k = i * 4;
+      img.data[k] = 10;
+      img.data[k + 1] = 11;
+      img.data[k + 2] = 8;
+      img.data[k + 3] = ex[i] ? 0 : 205;
+    }
+    g.putImageData(img, 0, 0);
+  }
+
+  private locExplored(l: { x: number; y: number; w: number; h: number }): boolean {
+    const cx = Math.floor(l.x + l.w / 2);
+    const cy = Math.floor(l.y + l.h / 2);
+    return this.vision.explored[cy * MAP_W + cx] === 1 || this.vision.explored[l.y * MAP_W + l.x] === 1;
+  }
+
+  /** ミニマップ：自分の周り（約 96×72 マス）だけを追従表示。地図の外は霞 */
   private drawMinimap(view: ViewState, localId: number): void {
     const { ctx } = this;
     if (!this.miniCanvas) return;
-    const s = 2.2;
-    const mw = MAP_W * s;
-    const mh = MAP_H * s;
-    const mx = this.w - mw - 12;
-    const my = 86;
-    panel(ctx, mx - 4, my - 4, mw + 8, mh + 8);
-    ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
-    // ロケーション（★の数で危険度）
+    const me = view.players.find((p) => p.id === localId);
+    const s = 2;
+    const RW = 48;
+    const RH = 36;
+    const mw = RW * 2 * s;
+    const mh = RH * 2 * s;
+    const mx = this.w - mw - 16;
+    const my = 98;
+    const ctr = me ?? { x: this.cam.x, y: this.cam.y };
+    const ctx0 = ctr.x / TILE - RW;
+    const cty0 = ctr.y / TILE - RH;
+    panel(ctx, mx - 4, my - 18, mw + 8, mh + 22);
+    ctx.font = `9px ${MONO}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// TAC-MAP', mx, my - 10);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText('[B] 地図  N▲', mx + mw, my - 10);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(mx, my, mw, mh);
+    ctx.clip();
+    ctx.fillStyle = '#2c3020';
+    ctx.fillRect(mx, my, mw, mh);
+    // 地形（miniCanvas は 1マス = 2px）と未探索のマスク
+    const X = (tx: number) => mx + (tx - ctx0) * s;
+    const Y = (ty: number) => my + (ty - cty0) * s;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.miniCanvas, X(0), Y(0), MAP_W * s, MAP_H * s);
+    ctx.drawImage(this.exploredCanvas, X(0), Y(0), MAP_W * s, MAP_H * s);
+    ctx.imageSmoothingEnabled = true;
+    // 地図の外縁（汚染帯）
+    ctx.strokeStyle = 'rgba(170,190,80,0.55)';
+    ctx.setLineDash([3, 3]);
+    ctx.strokeRect(X(EDGE_BAND), Y(EDGE_BAND), (MAP_W - EDGE_BAND * 2) * s, (MAP_H - EDGE_BAND * 2) * s);
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(70,78,40,0.45)';
+    ctx.fillRect(X(-200), Y(-200), (MAP_W + 400) * s, 200 * s);
+    ctx.fillRect(X(-200), Y(MAP_H), (MAP_W + 400) * s, 200 * s);
+    ctx.fillRect(X(-200), Y(0), 200 * s, MAP_H * s);
+    ctx.fillRect(X(MAP_W), Y(0), 200 * s, MAP_H * s);
+    // ロケーション（探索済みのみ）
     for (const loc of this.world.locations) {
-      if (loc.kind === 'ruin') continue;
-      const col = loc.tier >= 3 ? '#c06050' : loc.tier === 2 ? '#c9a85a' : '#9fe08a';
+      if (loc.kind === 'ruin' || !this.locExplored(loc)) continue;
+      if (loc.x + loc.w < ctx0 || loc.y + loc.h < cty0 || loc.x > ctx0 + RW * 2 || loc.y > cty0 + RH * 2) continue;
+      const col = loc.hot ? '#d070c0' : loc.tier >= 4 ? '#e05a40' : loc.tier >= 3 ? '#c06050' : loc.tier === 2 ? '#c9a85a' : loc.kind === 'base' ? '#93b77c' : '#9fe08a';
       ctx.strokeStyle = col;
       ctx.lineWidth = 1;
-      ctx.strokeRect(mx + loc.x * s - 1, my + loc.y * s - 1, loc.w * s + 2, loc.h * s + 2);
-      ctx.font = 'bold 8px "Segoe UI", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
-      ctx.fillStyle = col;
-      ctx.fillText('★'.repeat(loc.tier), mx + (loc.x + loc.w / 2) * s, my + loc.y * s - 1);
+      ctx.strokeRect(X(loc.x) - 0.5, Y(loc.y) - 0.5, loc.w * s + 1, loc.h * s + 1);
+      if (loc.kind !== 'base') {
+        ctx.font = `bold 8px ${UI}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = col;
+        ctx.fillText(loc.hot ? '☣' : '★'.repeat(loc.tier), X(loc.x + loc.w / 2), Y(loc.y) - 1);
+      }
     }
+    // 目印・拠点・補給物資
+    for (const lm of this.world.landmarks) this.landmarkIcon(ctx, X(lm.x), Y(lm.y), lm.kind, 1);
+    this.baseIcon(ctx, X(BASE_TX), Y(BASE_TY));
     const k = s / TILE;
-    for (const ob of this.world.objects.values()) {
-      let c: string | null = null;
-      if (ob.kind === 'woodWall') c = '#c08a50';
-      else if (ob.kind === 'ironWall') c = '#b8c4d4';
-      else if (ob.kind === 'stone') c = '#9a968f';
-      else if (ob.kind === 'spike') c = '#8a6a3a';
-      else if (ob.kind === 'campfire' || ob.kind === 'torch') c = '#c88a4a';
-      else if (ob.kind === 'bag') c = '#e0d090';
-      else if (ob.kind === 'mcrate' && ob.ready) c = '#c98a50';
-      else if (ob.kind === 'bench' || ob.kind === 'chest' || ob.kind === 'stash') c = '#c9a85a';
-      else if (ob.kind === 'turret') c = '#9fb4c2';
-      else if (ob.kind === 'barbed') c = '#8a8f96';
-      if (!c) continue;
-      ctx.fillStyle = c;
-      ctx.fillRect(mx + ob.tx * s, my + ob.ty * s, s, s);
+    if (view.drop && Math.sin(this.time * 8) > -0.3) {
+      ctx.fillStyle = '#e05a3a';
+      ctx.beginPath();
+      ctx.arc(X(0) + view.drop.x * k, Y(0) + view.drop.y * k, 3.5, 0, Math.PI * 2);
+      ctx.fill();
     }
     for (const z of view.zombies) {
       if (!this.vision.isVisible(z.x, z.y)) continue;
       ctx.fillStyle = z.alert === 2 ? '#e05a40' : z.alert === 1 ? '#c9a050' : '#a05050';
-      ctx.fillRect(mx + z.x * k - 1, my + z.y * k - 1, 2, 2);
-    }
-    for (const p of view.players) {
-      if (p.status === 'dead') continue;
-      ctx.fillStyle = PLAYER_COLORS[p.id];
-      ctx.beginPath();
-      ctx.arc(mx + p.x * k, my + p.y * k, p.id === localId ? 3.5 : 2.5, 0, Math.PI * 2);
-      ctx.fill();
-      if (p.status === 'down') {
-        ctx.strokeStyle = '#b4483a';
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(mx + p.x * k, my + p.y * k, 6 + Math.sin(this.time * 8) * 1.5, 0, Math.PI * 2);
-        ctx.stroke();
-      }
+      ctx.fillRect(X(0) + z.x * k - 1, Y(0) + z.y * k - 1, 2, 2);
     }
     if (this.fx) {
       for (const p of this.fx.pings) {
         ctx.strokeStyle = p.t === 'enemy' ? '#c0573e' : p.t === 'loot' ? '#c9a85a' : '#ffffff';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.arc(mx + p.x * k, my + p.y * k, 4 + Math.sin(this.time * 6) * 1.5, 0, Math.PI * 2);
+        ctx.arc(X(0) + p.x * k, Y(0) + p.y * k, 4 + Math.sin(this.time * 6) * 1.5, 0, Math.PI * 2);
         ctx.stroke();
       }
     }
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(mx + (this.cam.x - this.w / 2) * k, my + (this.cam.y - this.h / 2) * k, this.w * k, this.h * k);
+    ctx.restore();
+    // 仲間：枠の外なら縁に矢印
+    for (const p of view.players) {
+      if (p.status === 'dead') continue;
+      let px = X(0) + p.x * k;
+      let py = Y(0) + p.y * k;
+      const out = px < mx || py < my || px > mx + mw || py > my + mh;
+      px = clamp(px, mx + 3, mx + mw - 3);
+      py = clamp(py, my + 3, my + mh - 3);
+      ctx.fillStyle = PLAYER_COLORS[p.id];
+      ctx.beginPath();
+      if (out) {
+        ctx.moveTo(px, py - 4);
+        ctx.lineTo(px + 4, py + 3);
+        ctx.lineTo(px - 4, py + 3);
+        ctx.closePath();
+      } else ctx.arc(px, py, p.id === localId ? 3.5 : 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      if (p.status === 'down') {
+        ctx.strokeStyle = '#d0583e';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(px, py, 6 + Math.sin(this.time * 8) * 1.5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    if (me) {
+      // 自分の向き
+      ctx.strokeStyle = '#efe6c4';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(mx + mw / 2, my + mh / 2);
+      ctx.lineTo(mx + mw / 2 + Math.cos(me.aim) * 9, my + mh / 2 + Math.sin(me.aim) * 9);
+      ctx.stroke();
+    }
   }
+
+  private baseIcon(ctx: CanvasRenderingContext2D, x: number, y: number, sc = 1): void {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(sc, sc);
+    ctx.fillStyle = '#93b77c';
+    ctx.strokeStyle = '#15170f';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(6, 0);
+    ctx.lineTo(4, 0);
+    ctx.lineTo(4, 5);
+    ctx.lineTo(-4, 5);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-6, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private landmarkIcon(ctx: CanvasRenderingContext2D, x: number, y: number, kind: string, sc: number): void {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(sc, sc);
+    if (kind === 'tower') {
+      // 通信塔：裾の広い鉄骨の塔＋筋交い＋アンテナと赤い航空灯（文字の「A」に見えないように）
+      const mast = () => {
+        ctx.beginPath();
+        ctx.moveTo(-4, 5);
+        ctx.lineTo(-1.2, -5);
+        ctx.moveTo(4, 5);
+        ctx.lineTo(1.2, -5);
+        ctx.moveTo(-3.2, 2);
+        ctx.lineTo(2.4, -1.5);
+        ctx.moveTo(3.2, 2);
+        ctx.lineTo(-2.4, -1.5);
+        ctx.moveTo(-4, 5);
+        ctx.lineTo(4, 5);
+        ctx.moveTo(0, -5);
+        ctx.lineTo(0, -9);
+        ctx.stroke();
+      };
+      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.lineWidth = 2.6;
+      mast();
+      ctx.strokeStyle = '#c8c2a8';
+      ctx.lineWidth = 1;
+      mast();
+      ctx.fillStyle = Math.sin(this.time * 4) > 0 ? '#ff5a3c' : '#7a2a20';
+      ctx.beginPath();
+      ctx.arc(0, -9, 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (kind === 'water') {
+      ctx.fillStyle = '#9aa4a8';
+      ctx.fillRect(-3.5, -4, 7, 4);
+      ctx.fillRect(-0.5, 0, 1, 4);
+    } else {
+      ctx.fillStyle = kind === 'fire' ? '#e07a3a' : '#8a8a80';
+      ctx.beginPath();
+      ctx.arc(-1, 1, 2.5, 0, Math.PI * 2);
+      ctx.arc(1.5, -2, 2, 0, Math.PI * 2);
+      ctx.arc(-0.5, -4.5, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /** コンパス：照準方向を中心に方位を表示。拠点・仲間・補給物資・ピン・目印の方角と距離 */
+  private drawCompass(view: ViewState, me: PlayerSnap | undefined, localId: number): void {
+    if (!me) return;
+    const { ctx, w } = this;
+    const cw = Math.max(260, Math.min(460, w - 640));
+    const x0 = Math.round(w / 2 - cw / 2);
+    const y0 = 8;
+    const hh = 30;
+    const FOV = Math.PI * 0.62; // 片側の表示角
+    ctx.fillStyle = 'rgba(14,15,11,0.72)';
+    ctx.fillRect(x0, y0, cw, hh);
+    brackets(ctx, x0, y0, cw, hh, 'rgba(224,163,58,0.7)', 6, 1.5);
+    const head = me.aim;
+    const toX = (ang: number) => {
+      const d = Math.atan2(Math.sin(ang - head), Math.cos(ang - head));
+      return { x: x0 + cw / 2 + (d / FOV) * (cw / 2), d };
+    };
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, y0, cw, hh);
+    ctx.clip();
+    // 目盛り（15°ごと）と方位
+    const names: Record<number, string> = { 0: 'E', 45: 'SE', 90: 'S', 135: 'SW', 180: 'W', 225: 'NW', 270: 'N', 315: 'NE' };
+    for (let deg = 0; deg < 360; deg += 15) {
+      const { x, d } = toX((deg * Math.PI) / 180);
+      if (Math.abs(d) > FOV) continue;
+      const nm = names[deg];
+      ctx.fillStyle = nm ? 'rgba(230,225,204,0.7)' : 'rgba(230,225,204,0.3)';
+      ctx.fillRect(Math.round(x), y0 + hh - (nm ? 8 : 5), 1, nm ? 8 : 5);
+      if (nm) {
+        ctx.font = `${nm.length === 1 ? 'bold 12px' : '10px'} ${MONO}`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = nm === 'N' ? '#e0a33a' : '#d8d2b8';
+        ctx.fillText(nm, x, y0 + 10);
+      }
+    }
+    // 目標の方角
+    const marker = (wx: number, wy: number, color: string, label: string, kind: 'base' | 'dot' | 'drop' | 'lm', lmKind = '') => {
+      const dx = wx - me.x;
+      const dy = wy - me.y;
+      const dist = Math.round(Math.hypot(dx, dy) / TILE);
+      const { x, d } = toX(Math.atan2(dy, dx));
+      const px = clamp(x, x0 + 8, x0 + cw - 8);
+      const edge = Math.abs(d) > FOV;
+      ctx.globalAlpha = edge ? 0.6 : 1;
+      if (kind === 'base') this.baseIcon(ctx, px, y0 + 21, 0.85);
+      else if (kind === 'lm') this.landmarkIcon(ctx, px, y0 + 21, lmKind, 1);
+      else {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        if (kind === 'drop') ctx.rect(px - 3, y0 + 18, 6, 6);
+        else ctx.arc(px, y0 + 21, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (label && !edge) {
+        ctx.font = `9px ${MONO}`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = color;
+        ctx.fillText(`${label}${dist}m`, px, y0 + hh + 8);
+      }
+      ctx.globalAlpha = 1;
+    };
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0 - 2, y0, cw + 4, hh + 16);
+    ctx.clip();
+    for (const lm of this.world.landmarks) if (Math.hypot(lm.x * TILE - me.x, lm.y * TILE - me.y) < 110 * TILE) marker(lm.x * TILE, lm.y * TILE, '#a8a490', '', 'lm', lm.kind);
+    marker((BASE_TX + 0.5) * TILE, (BASE_TY + 0.5) * TILE, '#93b77c', '⌂', 'base');
+    // 川の近くにいるときは、いちばん近い（渡れる）橋の方角
+    const rv = this.world.features.river;
+    if (rv && rv.pts.some(([x, y]) => Math.hypot(x * TILE - me.x, y * TILE - me.y) < 45 * TILE)) {
+      let best: { x: number; y: number } | null = null;
+      let bd = 90 * TILE;
+      for (const b of this.world.features.bridges) {
+        if (b.broken) continue;
+        const bx = (b.x + b.w / 2) * TILE;
+        const by = (b.y + b.h / 2) * TILE;
+        const d = Math.hypot(bx - me.x, by - me.y);
+        if (d < bd) {
+          bd = d;
+          best = { x: bx, y: by };
+        }
+      }
+      if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
+    }
+    if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
+    if (this.fx) for (const p of this.fx.pings) marker(p.x, p.y, p.t === 'enemy' ? '#d0583e' : p.t === 'loot' ? '#e0a33a' : (PLAYER_COLORS[p.id] ?? '#fff'), '', 'dot');
+    for (const p of view.players) if (p.id !== localId && p.status !== 'dead') marker(p.x, p.y, p.status === 'down' ? '#ff6a50' : (PLAYER_COLORS[p.id] ?? '#fff'), p.status === 'down' ? 'SOS ' : '', 'dot');
+    ctx.restore();
+    // 中心の照準マーク
+    ctx.fillStyle = '#e0a33a';
+    ctx.beginPath();
+    ctx.moveTo(x0 + cw / 2, y0 + hh - 1);
+    ctx.lineTo(x0 + cw / 2 - 4, y0 + hh + 5);
+    ctx.lineTo(x0 + cw / 2 + 4, y0 + hh + 5);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /** 全体地図（B）：探索済みの地形・施設、危険度の輪、目印、仲間 */
+  private drawWorldMap(view: ViewState, localId: number): void {
+    const { ctx, w, h } = this;
+    if (!this.miniCanvas) return;
+    const LEG = 50; // 凡例の高さ
+    const s = Math.min((w - 120) / MAP_W, (h - 110 - LEG) / MAP_H);
+    const mw = MAP_W * s;
+    const mh = MAP_H * s;
+    const mx = Math.round(w / 2 - mw / 2);
+    const my = Math.round((h - mh - LEG) / 2 + 14);
+    // 背後の HUD が透けないよう、ほぼ不透明な暗幕を敷く
+    ctx.fillStyle = '#070806';
+    ctx.fillRect(0, 0, w, h);
+    panel(ctx, mx - 12, my - 34, mw + 24, mh + 34 + LEG + 8);
+    ctx.font = `10px ${MONO}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e0a33a';
+    ctx.fillText('// AREA MAP', mx, my - 18);
+    ctx.font = `bold 14px ${UI}`;
+    ctx.fillStyle = '#e6e1cc';
+    ctx.fillText('地図', mx + 90, my - 18);
+    ctx.font = `11px ${UI}`;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#8c8872';
+    ctx.fillText('[B] / [Esc] で閉じる ・ 拠点から離れるほど危険（★）・ 外縁は汚染帯', mx + mw, my - 18);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.miniCanvas, mx, my, mw, mh);
+    ctx.drawImage(this.exploredCanvas, mx, my, mw, mh);
+    ctx.imageSmoothingEnabled = true;
+    const X = (tx: number) => mx + tx * s;
+    const Y = (ty: number) => my + ty * s;
+    const k = s / TILE;
+
+    // ---- 図形（下から順に） ----
+    for (const d of this.world.districts) {
+      ctx.globalAlpha = 0.16;
+      ctx.fillStyle = DISTRICT_INFO[d.kind].color;
+      ctx.fillRect(X(d.x), Y(d.y), d.w * s, d.h * s);
+    }
+    ctx.globalAlpha = 1;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(mx, my, mw, mh);
+    ctx.clip();
+    for (const r of TIER_RINGS) {
+      ctx.strokeStyle = 'rgba(224,163,58,0.32)';
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.arc(X(BASE_TX), Y(BASE_TY), r * s, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(150,170,60,0.22)';
+    const B = EDGE_BAND * s;
+    ctx.fillRect(mx, my, mw, B);
+    ctx.fillRect(mx, my + mh - B, mw, B);
+    ctx.fillRect(mx, my + B, B, mh - 2 * B);
+    ctx.fillRect(mx + mw - B, my + B, B, mh - 2 * B);
+    ctx.restore();
+    this.drawMapRoutes(ctx, X, Y, s);
+    for (const loc of this.world.locations) {
+      if (loc.kind === 'base' || !this.locExplored(loc)) continue;
+      ctx.strokeStyle = this.locColor(loc);
+      ctx.lineWidth = 1;
+      ctx.strokeRect(X(loc.x), Y(loc.y), loc.w * s, loc.h * s);
+    }
+    for (const lm of this.world.landmarks) this.landmarkIcon(ctx, X(lm.x), Y(lm.y), lm.kind, 1.6);
+    this.baseIcon(ctx, X(BASE_TX), Y(BASE_TY), 1.6);
+    if (view.drop) {
+      ctx.fillStyle = '#e05a3a';
+      ctx.fillRect(mx + view.drop.x * k - 4, my + view.drop.y * k - 4, 8, 8);
+    }
+    if (this.fx)
+      for (const p of this.fx.pings) {
+        ctx.strokeStyle = p.t === 'enemy' ? '#e0583e' : p.t === 'loot' ? '#e0b862' : (PLAYER_COLORS[p.id] ?? '#fff');
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(mx + p.x * k, my + p.y * k, 6 + Math.sin(this.time * 6) * 2, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+      }
+    for (const p of view.players) {
+      if (p.status === 'dead') continue;
+      ctx.fillStyle = PLAYER_COLORS[p.id];
+      ctx.beginPath();
+      ctx.arc(mx + p.x * k, my + p.y * k, p.id === localId ? 5 : 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#15170f';
+      ctx.stroke();
+    }
+
+    // ---- ラベル：優先度の高いものから置き、すでに置いたものと重なるラベルは位置をずらすか省く ----
+    const placed: { x: number; y: number; w: number; h: number }[] = [];
+    const PAD = 5;
+    const fits = (x: number, y: number, bw: number, bh: number) =>
+      x >= mx && y >= my && x + bw <= mx + mw && y + bh <= my + mh && !placed.some((r) => x < r.x + r.w + PAD && x + bw + PAD > r.x && y < r.y + r.h + PAD && y + bh + PAD > r.y);
+    // アイコン（目印・橋・補給物資・仲間・ピン）の上にもラベルを重ねない
+    const icon = (x: number, y: number, r: number) => placed.push({ x: x - r, y: y - r, w: r * 2, h: r * 2 });
+    for (const lm of this.world.landmarks) icon(X(lm.x), Y(lm.y), 7);
+    for (const b of this.world.features.bridges) icon(X(b.x + b.w / 2), Y(b.y + b.h / 2), 6);
+    if (view.drop) icon(mx + view.drop.x * k, my + view.drop.y * k, 6);
+    for (const p of view.players) if (p.status !== 'dead') icon(mx + p.x * k, my + p.y * k, 6);
+    if (this.fx) for (const p of this.fx.pings) icon(mx + p.x * k, my + p.y * k, 8);
+    type Lb = { text: string; x: number; y: number; fg: string; bg?: string; font: string; align?: 'center' | 'left' };
+    const put = (lb: Lb, tries: [number, number][] = [[0, 0]]): boolean => {
+      ctx.font = lb.font;
+      const tw = ctx.measureText(lb.text).width + (lb.bg ? 8 : 2);
+      const th = lb.bg ? 14 : 13;
+      for (const [dx, dy] of tries) {
+        const lx = (lb.align === 'left' ? lb.x : lb.x - tw / 2) + dx;
+        const ly = lb.y - th / 2 + dy;
+        if (!fits(lx, ly, tw, th)) continue;
+        placed.push({ x: lx, y: ly, w: tw, h: th });
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        if (lb.bg) {
+          ctx.fillStyle = lb.bg;
+          ctx.fillRect(lx, ly, tw, th);
+          ctx.fillStyle = lb.fg;
+          ctx.fillText(lb.text, lx + 4, ly + th / 2 + 0.5);
+        } else {
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = 'rgba(8,9,7,0.85)';
+          ctx.strokeText(lb.text, lx + 1, ly + th / 2);
+          ctx.fillStyle = lb.fg;
+          ctx.fillText(lb.text, lx + 1, ly + th / 2);
+        }
+        return true;
+      }
+      return false;
+    };
+    const around: [number, number][] = [[0, 0], [0, -16], [0, 16], [-30, 0], [30, 0], [0, -30], [0, 30], [-30, -16], [30, 16]];
+    // 1) 仲間の名前（いちばん大事）
+    for (const p of view.players) {
+      if (p.status === 'dead') continue;
+      put({ text: p.name + (p.status === 'down' ? ' SOS' : ''), x: mx + p.x * k + 8, y: my + p.y * k, fg: p.status === 'down' ? '#ff7a60' : '#ffffff', font: `bold 11px ${UI}`, align: 'left' }, [[0, 0], [0, -12], [0, 12], [-60, 0]]);
+    }
+    placed.push({ x: X(BASE_TX) - 10, y: Y(BASE_TY) - 10, w: 20, h: 20 });
+    // 2) 川の名前・国道の標識（1本につき見える所に2枚まで）
+    const F = this.world.features;
+    if (F.river) {
+      const n = F.river.pts.length;
+      for (const f of [0.3, 0.6, 0.15, 0.8]) {
+        const [x, y] = F.river.pts[Math.floor(n * f)];
+        if (put({ text: F.river.name, x: X(x), y: Y(y), fg: '#8fc0e0', font: `bold 12px ${UI}` }, [[0, 0], [22, 0], [-22, 0]])) break;
+      }
+    }
+    for (const hw of F.highways) {
+      let n = 0;
+      for (const f of [0.3, 0.7, 0.15, 0.85, 0.5]) {
+        if (n >= 2) break;
+        const along = (hw.horiz ? MAP_W : MAP_H) * f;
+        const x = hw.horiz ? X(along) : X(hw.at + hw.w / 2);
+        const y = hw.horiz ? Y(hw.at + hw.w / 2) : Y(along);
+        // 標識は道に沿って少しずらしても良い（交差する地区名などを避ける）
+        const slide: [number, number][] = hw.horiz ? [[0, 0], [30, 0], [-30, 0], [60, 0], [-60, 0]] : [[0, 0], [0, 24], [0, -24], [0, 48], [0, -48]];
+        if (put({ text: hw.name, x, y, fg: '#ffffff', bg: 'rgba(40,80,140,0.92)', font: `bold 10px ${UI}` }, slide)) n++;
+      }
+    }
+    // 3) 橋の名前
+    if (s >= 2)
+      for (const b of F.bridges) {
+        if (b.broken) continue;
+        put({ text: b.name, x: X(b.x + b.w) + 4, y: Y(b.y + b.h / 2), fg: '#d8cfb0', font: `bold 9px ${UI}`, align: 'left' }, [[0, 0], [0, -11], [0, 11], [-X(b.x + b.w) + X(b.x) - 48, 0]]);
+      }
+    // 4) 地区名
+    for (const d of this.world.districts) {
+      if (!d.label) continue;
+      put({ text: d.name.replace(/^.*?の/, '').replace(/ 第\d+$/, ''), x: X(d.x + d.w / 2), y: Y(d.y + d.h / 2), fg: DISTRICT_INFO[d.kind].color, font: `bold ${s >= 2.5 ? 12 : 10}px ${UI}` }, around);
+    }
+    // 5) 探索済みの施設名
+    if (s >= 2.2)
+      for (const loc of this.world.locations) {
+        if (loc.kind === 'base' || loc.kind === 'ruin' || !this.locExplored(loc)) continue;
+        put({ text: `${loc.hot ? '☣' : '★'.repeat(loc.tier)} ${loc.name.replace(/^.*?の/, '')}`, x: X(loc.x + loc.w / 2), y: Y(loc.y) - 7, fg: this.locColor(loc), font: `bold 9px ${UI}` }, [[0, 0], [0, Y(loc.y + loc.h) - Y(loc.y) + 14]]);
+      }
+    // 6) 旧道・浅瀬・危険度の輪
+    for (const c of F.curves) {
+      const [x, y] = c.pts[Math.floor(c.pts.length / 2)];
+      put({ text: c.name, x: X(x), y: Y(y), fg: '#2a2418', bg: 'rgba(210,195,150,0.85)', font: `bold 9px ${UI}` }, around);
+    }
+    for (const f of F.fords) put({ text: '浅瀬', x: X(f.x), y: Y(f.y), fg: '#a8d0d8', font: `bold 9px ${UI}` }, [[0, 0], [26, 0], [-26, 0]]);
+    TIER_RINGS.forEach((r, i) => put({ text: '★'.repeat(i + 2), x: X(BASE_TX), y: Y(BASE_TY) - r * s - 6, fg: 'rgba(224,163,58,0.8)', font: `bold 10px ${UI}` }, [[0, 0], [40, 0], [-40, 0]]));
+
+    // ---- 凡例（2段：記号／地区の色） ----
+    const ly1 = my + mh + 16;
+    const ly2 = ly1 + 20;
+    let lx = mx;
+    ctx.font = `10px ${UI}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    const item = (draw: (x: number, y: number) => void, text: string) => {
+      draw(lx + 6, ly1);
+      ctx.font = `10px ${UI}`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#bdb79e';
+      ctx.fillText(text, lx + 15, ly1);
+      lx += 15 + ctx.measureText(text).width + 14;
+    };
+    item((x, y) => this.baseIcon(ctx, x, y, 1), '拠点');
+    item((x, y) => this.landmarkIcon(ctx, x, y, 'tower', 1), '通信塔');
+    item((x, y) => this.landmarkIcon(ctx, x, y, 'smoke', 1), '煙・炎');
+    item((x, y) => {
+      ctx.fillStyle = '#e05a3a';
+      ctx.fillRect(x - 4, y - 4, 8, 8);
+    }, '補給物資');
+    item((x, y) => {
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }, 'ピン');
+    item((x, y) => {
+      ctx.fillStyle = '#d8cfb0';
+      ctx.fillRect(x - 6, y - 4, 12, 8);
+    }, '橋');
+    item((x, y) => {
+      ctx.strokeStyle = '#e0583e';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x - 4, y - 4);
+      ctx.lineTo(x + 4, y + 4);
+      ctx.moveTo(x + 4, y - 4);
+      ctx.lineTo(x - 4, y + 4);
+      ctx.stroke();
+    }, '崩落した橋');
+    item((x, y) => {
+      ctx.fillStyle = 'rgba(40,80,140,0.92)';
+      ctx.fillRect(x - 6, y - 5, 12, 10);
+    }, '国道');
+    item((x, y) => {
+      ctx.strokeStyle = 'rgba(224,163,58,0.7)';
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x - 6, y);
+      ctx.lineTo(x + 6, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }, '危険度の境目');
+    lx = mx;
+    for (const kd of Object.keys(DISTRICT_INFO) as (keyof typeof DISTRICT_INFO)[]) {
+      const info = DISTRICT_INFO[kd];
+      ctx.fillStyle = info.color;
+      ctx.fillRect(lx, ly2 - 4, 10, 8);
+      ctx.fillStyle = '#bdb79e';
+      ctx.font = `10px ${UI}`;
+      ctx.fillText(info.name, lx + 14, ly2);
+      lx += 14 + ctx.measureText(info.name).width + 16;
+    }
+  }
+
+  private locColor(loc: { hot?: boolean; tier: number }): string {
+    return loc.hot ? '#d070c0' : loc.tier >= 4 ? '#e05a40' : loc.tier >= 3 ? '#d07a5e' : loc.tier === 2 ? '#d8b862' : '#9fc48a';
+  }
+
+  /** 全体地図：旧道の線と橋の記号（名前はラベルの段で置く） */
+  private drawMapRoutes(ctx: CanvasRenderingContext2D, X: (t: number) => number, Y: (t: number) => number, s: number): void {
+    const F = this.world.features;
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (const c of F.curves) {
+      ctx.beginPath();
+      c.pts.forEach(([x, y], i) => (i ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))));
+      ctx.strokeStyle = 'rgba(200,190,150,0.55)';
+      ctx.lineWidth = Math.max(2, c.w * s * 0.8);
+      ctx.stroke();
+    }
+    for (const b of F.bridges) {
+      const x = X(b.x + b.w / 2);
+      const y = Y(b.y + b.h / 2);
+      if (b.broken) {
+        ctx.strokeStyle = '#e0583e';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x - 4, y - 4);
+        ctx.lineTo(x + 4, y + 4);
+        ctx.moveTo(x + 4, y - 4);
+        ctx.lineTo(x - 4, y + 4);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = '#d8cfb0';
+        ctx.fillRect(x - 6, y - 4, 12, 8);
+        ctx.strokeStyle = '#2a2418';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - 6, y - 4, 12, 8);
+      }
+    }
+    ctx.restore();
+  }
+
+  /** 遠くから見える目印（霧の上に描く）：煙の柱・炎・通信塔の赤いランプ・給水塔 */
+  private drawLandmarks(vx0: number, vy0: number, vx1: number, vy1: number): void {
+    const { ctx } = this;
+    for (const lm of this.world.landmarks) {
+      const x = lm.x * TILE;
+      const y = lm.y * TILE;
+      if (x < vx0 - 300 || x > vx1 + 300 || y < vy0 - 100 || y > vy1 + 500) continue;
+      if (lm.kind === 'smoke' || lm.kind === 'fire') {
+        for (let i = 0; i < 12; i++) {
+          const ph = (this.time * 0.18 + i / 12) % 1;
+          const r = 14 + ph * 60;
+          const dark = lm.kind === 'smoke' ? 30 : 55;
+          ctx.fillStyle = `rgba(${dark},${dark},${dark - 4},${0.3 * (1 - ph)})`;
+          ctx.beginPath();
+          ctx.arc(x + Math.sin(i * 1.7 + this.time * 0.6) * 18 * ph + ph * 70, y - ph * 320, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        if (lm.kind === 'fire') {
+          const f = 0.6 + Math.sin(this.time * 11 + lm.x) * 0.25;
+          const g = ctx.createRadialGradient(x, y, 0, x, y, 70);
+          g.addColorStop(0, `rgba(255,170,70,${0.55 * f})`);
+          g.addColorStop(1, 'rgba(255,120,40,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x - 70, y - 70, 140, 140);
+        }
+      } else if (lm.kind === 'tower') {
+        // 格子の通信塔（上から見ると細長い影）と赤いランプ
+        ctx.strokeStyle = 'rgba(40,40,36,0.8)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x - 10, y + 10);
+        ctx.lineTo(x + 10, y - 10);
+        ctx.moveTo(x - 10, y - 10);
+        ctx.lineTo(x + 10, y + 10);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + 140, y + 160);
+        ctx.stroke();
+        const on = Math.sin(this.time * 3.5) > 0.2;
+        if (on) {
+          const g = ctx.createRadialGradient(x, y, 0, x, y, 26);
+          g.addColorStop(0, 'rgba(255,70,50,0.9)');
+          g.addColorStop(1, 'rgba(255,70,50,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x - 26, y - 26, 52, 52);
+        }
+      } else {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(x + 40, y + 50, 34, 26, 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#7a7c74';
+        ctx.beginPath();
+        ctx.arc(x, y, 26, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#4a4c46';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.12)';
+        ctx.beginPath();
+        ctx.arc(x - 8, y - 8, 10, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
 }
 
 // ---------------- ヘルパー ----------------
 
-function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
+
+const UI = '"Noto Sans JP", "Segoe UI", sans-serif';
+const MONO = '"Share Tech Mono", ui-monospace, Consolas, monospace';
+const HEAD = '"Oswald", "Noto Sans JP", sans-serif';
+
+/** タクティカルパネル：ダークガラス＋1px枠＋四隅のL字ブラケット */
+/** HUD レイヤーに描いたパネルの位置（照準の弾数表示がパネルに重ならないように使う） */
+let panelLog: { x: number; y: number; w: number; h: number }[] | null = null;
+
+function panel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, fill?: string, accent?: string): void {
+  x = Math.round(x);
+  y = Math.round(y);
+  panelLog?.push({ x, y, w, h });
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, fill ?? 'rgba(28,31,22,0.84)');
+  g.addColorStop(1, fill ?? 'rgba(13,14,10,0.84)');
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = accent ?? 'rgba(190,180,130,0.22)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  brackets(ctx, x, y, w, h, accent ?? 'rgba(224,163,58,0.75)', 7, 1.5);
 }
 
-function panel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, fill?: string): void {
-  ctx.fillStyle = fill ?? 'rgba(10,12,16,0.72)';
-  roundRectPath(ctx, x, y, w, h, 8);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+/** 四隅のL字 */
+function brackets(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, color: string, len: number, lw: number): void {
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, len, lw);
+  ctx.fillRect(x, y, lw, len);
+  ctx.fillRect(x + w - len, y, len, lw);
+  ctx.fillRect(x + w - lw, y, lw, len);
+  ctx.fillRect(x, y + h - lw, len, lw);
+  ctx.fillRect(x, y + h - len, lw, len);
+  ctx.fillRect(x + w - len, y + h - lw, len, lw);
+  ctx.fillRect(x + w - lw, y + h - len, lw, len);
+}
+
+/** 区切り目盛り付きのゲージ */
+function segBar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, ratio: number, color: string, segs: number): void {
+  ctx.fillStyle = 'rgba(255,255,240,0.07)';
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, w * clamp(ratio, 0, 1), h);
+  ctx.fillStyle = 'rgba(10,11,8,0.55)';
+  for (let i = 1; i < segs; i++) ctx.fillRect(Math.round(x + (w * i) / segs), y, 1, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.fillRect(x, y, w * clamp(ratio, 0, 1), 1);
+}
+
+/** 小さな枠（チップ） */
+function chipBox(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, color: string, fill: boolean): void {
+  if (fill) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+  } else {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  }
+}
+
+/** 弾種バッジ（AP / SLG） */
+function ammoBadge(ctx: CanvasRenderingContext2D, x: number, y: number, t: string): void {
+  ctx.font = `9px ${MONO}`;
+  const tw = ctx.measureText(t).width + 6;
+  ctx.fillStyle = '#e08a4a';
+  ctx.fillRect(x, y, tw, 12);
+  ctx.fillStyle = '#15170f';
+  const ta = ctx.textAlign;
+  const tb = ctx.textBaseline;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(t, x + 3, y + 6.5);
+  ctx.textAlign = ta;
+  ctx.textBaseline = tb;
+}
+
+/** 操作ヒント：キーキャップ風 */
+function keyHint(ctx: CanvasRenderingContext2D, x: number, y: number, text: string, color: string, t: number): void {
+  const m = /^\[([^\]]+)\]\s*(.*)$/.exec(text);
+  const key = m ? m[1] : '';
+  const body = m ? m[2] : text;
+  ctx.font = `bold 14px ${UI}`;
+  const bw = ctx.measureText(body).width;
+  ctx.font = `bold 12px ${MONO}`;
+  const kw = key ? ctx.measureText(key).width + 14 : 0;
+  const total = kw + (kw ? 8 : 0) + bw + 24;
+  const x0 = x - total / 2;
+  const pulse = 0.7 + Math.sin(t * 5) * 0.3;
+  ctx.fillStyle = 'rgba(12,13,10,0.78)';
+  ctx.fillRect(x0, y - 15, total, 30);
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35 + pulse * 0.4;
+  ctx.strokeRect(x0 + 0.5, y - 14.5, total - 1, 29);
+  ctx.globalAlpha = 1;
+  brackets(ctx, x0, y - 15, total, 30, color, 6, 1.5);
+  let cx = x0 + 12;
+  ctx.textBaseline = 'middle';
+  if (key) {
+    ctx.fillStyle = color;
+    ctx.fillRect(cx, y - 9, kw, 18);
+    ctx.fillStyle = '#15170f';
+    ctx.textAlign = 'center';
+    ctx.fillText(key, cx + kw / 2, y + 1);
+    cx += kw + 8;
+  }
+  ctx.font = `bold 14px ${UI}`;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#e6e1cc';
+  ctx.fillText(body, cx, y + 1);
+  ctx.textAlign = 'center';
+}
+
+/** ダウン・戦闘不能などの中央カード */
+function centerCard(ctx: CanvasRenderingContext2D, x: number, y: number, title: string, sub: string, color: string, t: number): void {
+  ctx.font = `bold 13px ${UI}`;
+  const w = Math.max(360, ctx.measureText(sub).width + 60);
+  const pulse = 0.6 + Math.sin(t * 6) * 0.4;
+  ctx.fillStyle = 'rgba(14,12,10,0.82)';
+  ctx.fillRect(x - w / 2, y - 30, w, 64);
+  ctx.fillStyle = color;
+  ctx.globalAlpha = pulse;
+  ctx.fillRect(x - w / 2, y - 30, w, 2);
+  ctx.globalAlpha = 1;
+  brackets(ctx, x - w / 2, y - 30, w, 64, color, 10, 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold 24px ${HEAD}`;
+  ctx.fillStyle = color;
+  ctx.fillText(title, x, y - 6);
+  ctx.font = `bold 13px ${UI}`;
+  ctx.fillStyle = '#e6e1cc';
+  ctx.fillText(sub, x, y + 20);
 }
 
 /** ホットバーのアイコン（ベクター） */
@@ -1791,19 +3366,18 @@ function makeForestPattern(ctx: CanvasRenderingContext2D): CanvasPattern {
 }
 
 /** フィルムグレイン用のノイズパターン */
-function makeGrain(ctx: CanvasRenderingContext2D): CanvasPattern {
+/** CSS 用のフィルムグレイン画像（data URL） */
+function makeGrainURL(): string {
   const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 256;
+  c.width = c.height = 160;
   const g = c.getContext('2d')!;
-  const img = g.createImageData(256, 256);
-  for (let i = 0; i < 256 * 256; i++) {
-    const v = Math.floor(Math.random() * 255);
-    img.data[i * 4] = v;
-    img.data[i * 4 + 1] = v;
-    img.data[i * 4 + 2] = v;
-    img.data[i * 4 + 3] = 255;
+  const img = g.createImageData(160, 160);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = Math.random() * 255;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+    img.data[i + 3] = 255;
   }
   g.putImageData(img, 0, 0);
-  return ctx.createPattern(c, 'repeat')!;
+  return c.toDataURL('image/png');
 }
+

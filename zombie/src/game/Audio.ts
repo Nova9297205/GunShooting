@@ -64,6 +64,7 @@ export class AudioManager {
   private lastPlayed = new Map<string, number>();
   private focused = true;
   private groanT = 1;
+  private rainT = 0;
 
   settings: AudioSettings = { music: 0.5, sfx: 0.8, muted: false };
   listener = { x: 0, y: 0 };
@@ -498,6 +499,12 @@ export class AudioManager {
         this.tone({ f: 660, f2: 990, dur: 0.35, g: 0.12, t });
         this.tone({ f: 990, f2: 1320, dur: 0.4, g: 0.1, t: t + 0.15 });
         break;
+      case 'level':
+        [523, 659, 784, 1046].forEach((f, i) => this.tone({ type: 'triangle', f, dur: 0.16, g: 0.09, t: t + i * 0.07 }));
+        break;
+      case 'alarm':
+        for (let i = 0; i < 3; i++) this.tone({ type: 'square', f: 880, f2: 660, dur: 0.14, g: 0.07, lp: 2400, t: t + i * 0.2 });
+        break;
       case 'craft':
         [400, 600, 900].forEach((f, i) => this.tone({ type: 'square', f, dur: 0.06, g: 0.07, lp: 3000, t: t + i * 0.08 }));
         break;
@@ -560,12 +567,16 @@ export class AudioManager {
       case 'hit':
         if (ev.m) this.meleeHit(ev.x, ev.y);
         else this.fleshHit(ev.x, ev.y);
+        // 自分の弾が当たった：小さく高い命中音（ヒットマーカー）
+        if (ev.o === localId && !ev.m && this.gate('hitconf', 0.03)) this.tone({ type: 'square', f: 1850, dur: 0.035, g: 0.045, lp: 4000 });
         break;
       case 'wall':
         this.ricochet(ev.x, ev.y);
         break;
       case 'kill':
         this.zombieDie(ev.x, ev.y, ev.r >= ZOMBIE.brute.radius);
+        // 自分が倒した：低く短い「手応え」の音
+        if (ev.o === localId && this.gate('killconf', 0.05)) this.tone({ type: 'triangle', f: 220, f2: 110, dur: 0.12, g: 0.14 });
         break;
       case 'phit':
         if (ev.id === localId) this.hurt();
@@ -594,6 +605,30 @@ export class AudioManager {
       case 'burn':
         this.burn(ev.x, ev.y);
         break;
+      case 'boom': {
+        const s = this.spatial(ev.x, ev.y);
+        if (s) {
+          this.noise({ dur: 1.4, g: 0.8 * s.k, filter: 'lowpass', f: 1400, f2: 120, pan: s.pan });
+          this.tone({ f: 70, f2: 28, dur: 0.9, g: 0.6 * s.k, pan: s.pan });
+        }
+        break;
+      }
+      case 'gas': {
+        const s = this.spatial(ev.x, ev.y);
+        if (s) {
+          this.tone({ type: 'sawtooth', f: 120, f2: 60, dur: 0.4, g: 0.12 * s.k, lp: 500, pan: s.pan });
+          this.noise({ dur: 1.6, g: 0.25 * s.k, filter: 'bandpass', f: 900, f2: 400, a: 0.05, pan: s.pan });
+        }
+        break;
+      }
+      case 'scream': {
+        const s = this.spatial(ev.x, ev.y);
+        if (s) {
+          this.tone({ type: 'sawtooth', f: 620, f2: 980, dur: 1.1, g: 0.14 * s.k, lp: 3200, a: 0.05, rel: 0.6, pan: s.pan });
+          this.tone({ type: 'square', f: 455, f2: 700, dur: 1.0, g: 0.05 * s.k, lp: 2400, a: 0.08, pan: s.pan });
+        }
+        break;
+      }
       case 'tshot':
         this.turretShot(ev.x, ev.y);
         break;
@@ -610,6 +645,15 @@ export class AudioManager {
           this.noise({ dur: 0.14, g: 0.35 * s.k, filter: 'lowpass', f: 700, pan: s.pan, t });
           this.tone({ f: 110, f2: 60, dur: 0.12, g: 0.3 * s.k, pan: s.pan, t });
         }
+        break;
+      }
+      case 'feed':
+        if (ev.snd && (ev.id === undefined || ev.id === localId || ev.snd === 'alarm')) this.ui(ev.snd);
+        break;
+      case 'ricochet': {
+        const s = this.spatial(ev.x, ev.y);
+        if (!s || !this.gate('rico', 0.08)) break;
+        this.tone({ type: 'triangle', f: 2400 + Math.random() * 900, f2: 1500, dur: 0.12, g: 0.05 * s.k, pan: s.pan });
         break;
       }
       case 'search': {
@@ -659,6 +703,20 @@ export class AudioManager {
     // 追われているときは緊迫した曲調に
     const chased = view.zombies.some((z) => z.alert === 2 && Math.hypot(z.x - this.listener.x, z.y - this.listener.y) < 650);
     this.music?.setMood(chased ? 'horde' : view.phase);
+    // 雨音・雷鳴
+    if (view.weather === 'rain' || view.weather === 'storm') {
+      this.rainT -= dt;
+      if (this.rainT <= 0) {
+        this.rainT = 0.3;
+        const k = view.wx * (view.weather === 'storm' ? 1.4 : 1);
+        this.noise({ dur: 0.45, g: 0.05 * k, filter: 'bandpass', f: 2600 + Math.random() * 1200, q: 0.4, a: 0.1 });
+        this.noise({ dur: 0.45, g: 0.035 * k, filter: 'lowpass', f: 600, a: 0.1 });
+        if (view.weather === 'storm' && Math.random() < 0.012 * view.wx * 10) {
+          const t = this.ctx!.currentTime + 0.2 + Math.random() * 0.6;
+          this.noise({ dur: 2.4, g: 0.3 * view.wx, filter: 'lowpass', f: 300, f2: 60, a: 0.05, t });
+        }
+      }
+    }
     // うめき声：近くのゾンビが多いほど頻繁に
     this.groanT -= dt;
     if (this.groanT <= 0) {

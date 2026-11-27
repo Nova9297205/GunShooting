@@ -3,8 +3,12 @@ import type { ItemId } from './items';
 
 // ---------------- ワールド / 通信 ----------------
 export const TILE = 40;
-export const MAP_W = 80; // タイル数
-export const MAP_H = 60;
+export const MAP_W = 360; // タイル数（広大なオープンワールド：18×14 チャンク）
+export const MAP_H = 280;
+/** チャンク（区画）の一辺のタイル数。描画・シミュレーションはチャンク単位で動的に管理する */
+export const CHUNK = 20;
+export const CHUNKS_X = MAP_W / CHUNK;
+export const CHUNKS_Y = MAP_H / CHUNK;
 export const WORLD_W = MAP_W * TILE;
 export const WORLD_H = MAP_H * TILE;
 
@@ -21,9 +25,9 @@ export const PLAYER_COLORS = ['#7f9cb8', '#93a86a', '#c4a35c'];
 
 // ---------------- 時間（昼夜サイクル） ----------------
 /** 06:00〜20:00 の昼（実時間秒） */
-export const DAY_SECONDS = 90;
+export const DAY_SECONDS = 160;
 /** 20:00〜06:00 の夜（実時間秒） */
-export const NIGHT_SECONDS = 45;
+export const NIGHT_SECONDS = 70;
 export const CYCLE_SECONDS = DAY_SECONDS + NIGHT_SECONDS;
 /** 松明の明かりの半径(px) */
 export const TORCH_LIGHT = 200;
@@ -46,7 +50,7 @@ export const PLAYER = {
   interactRange: 62,
   buildRange: 170,
   /** 空腹ゲージが 100→0 になるまでの秒数 */
-  hungerSeconds: 260,
+  hungerSeconds: 300,
   /** 空腹0のときのHP減少/秒 */
   starveDps: 1.5,
   foodValue: 40,
@@ -86,13 +90,19 @@ export interface ZombieStats {
   attackInterval: number;
   color: string;
   skin: string;
+  /** 装甲（通常弾のダメージ軽減率） */
+  armor: number;
 }
 
 export const ZOMBIE: Record<ZombieType, ZombieStats> = {
-  walker: { radius: 14, hp: 60, daySpeed: 42, nightSpeed: 88, damage: 10, wallDamage: 18, attackInterval: 1.0, color: '#565a4a', skin: '#8e9278' },
-  runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#5c5048', skin: '#a2968a' },
-  soldier: { radius: 14, hp: 150, daySpeed: 55, nightSpeed: 92, damage: 16, wallDamage: 30, attackInterval: 0.9, color: '#4a4f3c', skin: '#8a8c76' },
-  brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#46483e', skin: '#7a7e6a' },
+  walker: { radius: 14, hp: 60, daySpeed: 42, nightSpeed: 88, damage: 10, wallDamage: 18, attackInterval: 1.0, color: '#565a4a', skin: '#8e9278', armor: 0 },
+  runner: { radius: 12, hp: 40, daySpeed: 70, nightSpeed: 150, damage: 7, wallDamage: 10, attackInterval: 0.7, color: '#5c5048', skin: '#a2968a', armor: 0 },
+  soldier: { radius: 14, hp: 150, daySpeed: 55, nightSpeed: 92, damage: 16, wallDamage: 30, attackInterval: 0.9, color: '#4a4f3c', skin: '#8a8c76', armor: 0.4 },
+  brute: { radius: 22, hp: 280, daySpeed: 35, nightSpeed: 62, damage: 24, wallDamage: 65, attackInterval: 1.3, color: '#46483e', skin: '#7a7e6a', armor: 0.3 },
+  /** 膨張体：遅いが倒すと毒ガスを撒く（工業地区・病院） */
+  bloater: { radius: 18, hp: 130, daySpeed: 30, nightSpeed: 56, damage: 9, wallDamage: 20, attackInterval: 1.2, color: '#4e5a3a', skin: '#9aa06a', armor: 0 },
+  /** 叫び屋：獲物を見つけると叫び、周りのゾンビを呼び寄せる（商業地区・荒野） */
+  screamer: { radius: 12, hp: 45, daySpeed: 52, nightSpeed: 112, damage: 5, wallDamage: 6, attackInterval: 0.8, color: '#5a5450', skin: '#b8b0a0', armor: 0 },
 };
 
 export const ZOMBIE_SENSE = {
@@ -130,10 +140,13 @@ export const OBJ_HP: Record<ObjKind, number> = {
   sandbag: 400,
   stash: 1,
   bag: 1,
+  drop: 1,
+  barrel: 30,
 };
 
 /** 衝突する（通れない）オブジェクト */
 export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
+  'barrel',
   'tree',
   'car',
   'crate',
@@ -158,7 +171,7 @@ export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
 ]);
 
 /** プレイヤーの弾を止めるオブジェクト（建築壁・石壁の上は撃ち越せる） */
-export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench', 'chest', 'door', 'shelf', 'locker', 'fridge', 'sandbag', 'stash']);
+export const BULLET_BLOCK_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['tree', 'car', 'crate', 'box', 'mcrate', 'bench', 'chest', 'door', 'shelf', 'locker', 'fridge', 'sandbag', 'stash', 'barrel']);
 
 /** ゾンビが破壊して進む建築物 */
 export const BREAKABLE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['stone', 'woodWall', 'ironWall', 'turret', 'door']);
@@ -193,6 +206,8 @@ export interface Recipe {
   bench: boolean;
   cost: Partial<Record<ItemId, number>>;
   out: { id: ItemId; n: number };
+  /** 必要な作業台レベル（1〜3） */
+  lv?: number;
 }
 
 /** クラフトレシピ（素材はバックパックから消費し、完成品はバックパックへ） */
@@ -200,12 +215,18 @@ export const RECIPES: Recipe[] = [
   { id: 'bandage', name: '包帯', desc: '布から包帯を作る', bench: false, cost: { cloth: 2 }, out: { id: 'bandage', n: 1 } },
   { id: 'ammo9', name: '9mm弾 ×15', desc: 'ハンドガン・SMG 用', bench: true, cost: { gunpowder: 1, scrap: 1 }, out: { id: 'ammo9', n: 15 } },
   { id: 'ammo762', name: '7.62mm弾 ×10', desc: 'ライフル用', bench: true, cost: { gunpowder: 2, scrap: 2 }, out: { id: 'ammo762', n: 10 } },
-  { id: 'shells', name: '12ゲージ弾 ×6', desc: 'ショットガン用', bench: true, cost: { gunpowder: 2, scrap: 1 }, out: { id: 'shells', n: 6 } },
+  { id: 'shells', name: '12ゲージ散弾 ×6', desc: 'ショットガン用', bench: true, cost: { gunpowder: 2, scrap: 1 }, out: { id: 'shells', n: 6 } },
   { id: 'medkit', name: '救急キット', desc: '包帯と薬品を調合', bench: true, cost: { bandage: 2, chem: 1 }, out: { id: 'medkit', n: 1 } },
-  { id: 'suppressor', name: 'サプレッサー', desc: '銃声を抑えるアタッチメント', bench: true, cost: { parts: 2, scrap: 4 }, out: { id: 'suppressor', n: 1 } },
+  { id: 'grip', name: 'フォアグリップ', desc: '連射時の反動を大きく軽減', bench: true, cost: { parts: 1, scrap: 3 }, out: { id: 'grip', n: 1 } },
   { id: 'extmag', name: '拡張マガジン', desc: '装弾数 +60%', bench: true, cost: { parts: 2, scrap: 3 }, out: { id: 'extmag', n: 1 } },
-  { id: 'grip', name: 'フォアグリップ', desc: '反動・ばらつき軽減', bench: true, cost: { parts: 1, scrap: 3 }, out: { id: 'grip', n: 1 } },
-  { id: 'scope', name: 'スコープ', desc: '視界が伸び命中精度アップ', bench: true, cost: { parts: 1, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
+  { id: 'ammo9ap', name: '9mm徹甲弾 ×10', desc: '装甲を無視し1体貫通', bench: true, lv: 2, cost: { gunpowder: 2, scrap: 2, parts: 1 }, out: { id: 'ammo9ap', n: 10 } },
+  { id: 'ammo762ap', name: '7.62mm徹甲弾 ×8', desc: '装甲を無視し2体まで貫通', bench: true, lv: 2, cost: { gunpowder: 3, scrap: 2, parts: 1 }, out: { id: 'ammo762ap', n: 8 } },
+  { id: 'slug', name: 'スラッグ弾 ×5', desc: 'ショットガンの一粒弾', bench: true, lv: 2, cost: { gunpowder: 2, scrap: 2 }, out: { id: 'slug', n: 5 } },
+  { id: 'holo', name: 'ホロサイト', desc: '集弾率と反動を改善', bench: true, lv: 2, cost: { parts: 1, electronics: 1, scrap: 2 }, out: { id: 'holo', n: 1 } },
+  { id: 'stim', name: '興奮剤', desc: 'HP +15・スタミナ全快', bench: true, lv: 2, cost: { chem: 2, medkit: 1 }, out: { id: 'stim', n: 1 } },
+  { id: 'suppressor', name: 'サプレッサー', desc: '銃声を約1/3に抑える', bench: true, lv: 3, cost: { parts: 2, scrap: 4, tools: 1 }, out: { id: 'suppressor', n: 1 } },
+  { id: 'scope', name: '4倍スコープ', desc: '集弾率が大きく上がり視界が伸びる', bench: true, lv: 3, cost: { parts: 2, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
+  { id: 'tools', name: '工具セット', desc: '拠点強化の素材', bench: true, lv: 3, cost: { scrap: 10, parts: 2 }, out: { id: 'tools', n: 1 } },
 ];
 
 /** 作業台を使える距離(px) */
@@ -221,6 +242,11 @@ export const T_WINDOW = 5; // ガラス窓（通れないが、見通せて撃�
 export const T_WOOD = 6; // フローリング
 export const T_TILE = 7; // タイル床
 export const T_FENCE = 8; // 金網フェンス（通れないが見通せる）
+export const T_WATER = 9; // 川・池（泳いで渡れない。見通せて、弾は水面を越えて飛ぶ）
+export const T_SHALLOW = 10; // 浅瀬（歩いて渡れるが足が遅くなる）
+export const T_BRIDGE = 11; // 橋（道路と同じく通れる）
+/** 浅瀬での移動速度の倍率 */
+export const SHALLOW_SPEED = 0.55;
 
 /** 屋内の床 */
 export const INDOOR_FLOORS: ReadonlySet<number> = new Set([T_FLOOR, T_WOOD, T_TILE]);
@@ -230,5 +256,8 @@ export const STORAGE_SHARED = 40;
 export const STORAGE_PERSONAL = 24;
 
 /** 拠点の敷地（タイル座標）：フェンスで囲まれた安全地帯（ゾンビは入ってこない） */
-export const SAFEHOUSE = { x: 31, y: 21, w: 18, h: 17 };
-export const CAMPFIRE_TILE = { x: 44, y: 33 };
+/** 拠点（地図の中心）のタイル座標：危険度は拠点からの距離で決まる */
+export const BASE_TX = MAP_W / 2;
+export const BASE_TY = MAP_H / 2;
+export const SAFEHOUSE = { x: BASE_TX - 9, y: BASE_TY - 9, w: 18, h: 17 };
+export const CAMPFIRE_TILE = { x: BASE_TX + 4, y: BASE_TY + 3 };

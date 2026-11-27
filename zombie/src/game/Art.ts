@@ -7,9 +7,9 @@
 // ============================================================
 import type { ObjSnap, PlayerSnap, ZombieSnap } from '../types';
 import type { Corpse } from './Effects';
-import { Tool } from '../types';
-import { TILE, ZOMBIE } from './constants';
-import { heldWeapon } from './items';
+import { TILE } from './constants';
+import { drawCar, drawProp, drawTreeTop } from './PropArt';
+import { drawCorpse as drawCorpseNew, drawPlayer as drawPlayerNew, drawZombie as drawZombieNew } from './CharacterArt';
 import { type BakedTerrain, bakeTerrain } from './TerrainArt';
 import type { TileWorld } from './world';
 
@@ -31,6 +31,10 @@ export interface PlayerAnim {
 export interface ZombieAnim {
   lastAtk: number;
   lunge: number;
+  /** 近くのプレイヤーへの近さ 0..1（腕を振り上げる予備動作） */
+  near?: number;
+  /** 被弾ののけぞり 0..1 */
+  hit?: number;
   walk: number;
   lastX: number;
   lastY: number;
@@ -109,9 +113,6 @@ function southFace(ctx: CanvasRenderingContext2D, x: number, y: number, top: str
   ctx.fillRect(x, y + TILE, TILE, 10);
 }
 
-// 服の色（ゾンビごとにIDから決定）
-const SHIRTS = ['#5b6b7a', '#7a5b4f', '#4f6b55', '#6e6a54', '#7d4a4a', '#4a4f6e', '#8a7a62', '#5e5e5e'];
-const PANTS = ['#2f3a4a', '#3b3229', '#2c2c2c', '#41423a'];
 
 // ============================================================
 export class VectorArt implements ArtSet {
@@ -124,6 +125,16 @@ export class VectorArt implements ArtSet {
     const y = o.ty * TILE;
     const cx = x + TILE / 2;
     const cy = y + TILE / 2;
+    // 細かく描いたプロップ（キャッシュ）＋動く要素（未探索の光る縁）
+    if (drawProp(ctx, o)) {
+      if (o.ready && (o.kind === 'wcase' || o.kind === 'mcrate')) {
+        const pulse = 0.25 + Math.sin(t * 3 + o.id) * 0.15;
+        ctx.strokeStyle = `rgba(225,190,110,${pulse})`;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 1, y + (o.kind === 'wcase' ? 9 : 4), 38, o.kind === 'wcase' ? 22 : 32);
+      }
+      return true;
+    }
     switch (o.kind) {
       case 'spike': {
         const ratio = o.hp / o.maxHp;
@@ -350,6 +361,72 @@ export class VectorArt implements ArtSet {
         ctx.fillStyle = '#c3ccd6';
         for (let i = 0; i < 6; i++) ctx.fillRect(x + 6 + i * 5.5, y + 19 + Math.sin(i * 2) * 8, 2, 2);
         ctx.globalAlpha = 1;
+        return true;
+      }
+      case 'bag': {
+        // 落ちている袋（ダッフルバッグ）
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.ellipse(cx + 3, cy + 6, 14, 8, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(((o.id * 37) % 10) / 10 - 0.5);
+        ctx.fillStyle = '#4a4a36';
+        roundRect(ctx, -13, -7, 26, 14, 6);
+        ctx.fill();
+        ctx.strokeStyle = '#2c2c20';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = '#5c5c44';
+        ctx.fillRect(-11, -5, 22, 3);
+        ctx.strokeStyle = '#8a7a50';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-5, -7);
+        ctx.quadraticCurveTo(0, -13, 5, -7);
+        ctx.stroke();
+        ctx.restore();
+        const pulse = 0.35 + Math.sin(t * 4 + o.id) * 0.25;
+        ctx.strokeStyle = `rgba(230,210,140,${pulse})`;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 17, 0, Math.PI * 2);
+        ctx.stroke();
+        return true;
+      }
+      case 'drop': {
+        // 補給物資：パラシュート付きの金属コンテナ
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(x + 6, y + 10, 34, 28);
+        if (o.ready) {
+          ctx.fillStyle = 'rgba(200,190,170,0.55)';
+          ctx.beginPath();
+          ctx.ellipse(x + 34, y + 30, 18, 9, 0.6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(80,70,60,0.6)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x + 24, y + 22);
+          ctx.lineTo(x + 34, y + 30);
+          ctx.moveTo(x + 30, y + 16);
+          ctx.lineTo(x + 40, y + 26);
+          ctx.stroke();
+        }
+        const lg = ctx.createLinearGradient(x, y + 4, x, y + 34);
+        lg.addColorStop(0, o.ready ? '#6d7a86' : '#4a525a');
+        lg.addColorStop(1, o.ready ? '#4a5660' : '#33393f');
+        ctx.fillStyle = lg;
+        roundRect(ctx, x + 2, y + 4, 36, 30, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#262c32';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = o.ready ? '#c0503a' : '#6b3a30';
+        ctx.fillRect(x + 2, y + 16, 36, 5);
+        ctx.fillStyle = '#e8e0c8';
+        ctx.fillRect(x + 16, y + 8, 8, 3);
+        ctx.fillRect(x + 18.5, y + 6, 3, 7);
         return true;
       }
       case 'mcrate': {
@@ -592,6 +669,42 @@ export class VectorArt implements ArtSet {
         }
         return true;
       }
+      case 'barrel': {
+        // 燃料のドラム缶（赤錆・危険マーク）
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.beginPath();
+        ctx.ellipse(cx + 5, cy + 7, 15, 13, 0, 0, Math.PI * 2);
+        ctx.fill();
+        const g = ctx.createRadialGradient(cx - 5, cy - 5, 2, cx, cy, 16);
+        g.addColorStop(0, '#b0543a');
+        g.addColorStop(1, '#6a2a1c');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#3a1810';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(30,14,10,0.6)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        // 注ぎ口
+        ctx.fillStyle = '#2a1a14';
+        ctx.beginPath();
+        ctx.arc(cx + 6, cy - 6, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        // 危険マーク（黄色い三角）
+        ctx.fillStyle = '#d8b040';
+        ctx.beginPath();
+        ctx.moveTo(cx - 4, cy + 5);
+        ctx.lineTo(cx + 4, cy + 5);
+        ctx.lineTo(cx, cy - 2);
+        ctx.closePath();
+        ctx.fill();
+        return true;
+      }
       case 'sandbag': {
         ctx.fillStyle = 'rgba(0,0,0,0.3)';
         ctx.fillRect(x + 4, y + 12, 38, 26);
@@ -703,8 +816,12 @@ export class VectorArt implements ArtSet {
           ctx.save();
           ctx.translate(cx + 7, cy + 9);
           ctx.rotate(rot);
-          ctx.fillStyle = 'rgba(0,0,0,0.35)';
-          roundRect(ctx, -20, -12, 40, 24, 6);
+          // 2重の影でやわらかい縁（毎フレームなので blur フィルタは使わない）
+          ctx.fillStyle = 'rgba(0,0,0,0.2)';
+          roundRect(ctx, -23, -14, 46, 28, 9);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          roundRect(ctx, -20, -11, 40, 22, 6);
           ctx.fill();
           ctx.restore();
           return false;
@@ -771,6 +888,10 @@ export class VectorArt implements ArtSet {
     const ratio = o.hp / o.maxHp;
     switch (o.kind) {
       case 'tree': {
+        if (ratio > 0) {
+          drawTreeTop(ctx, o, t);
+          break;
+        }
         const sway = Math.sin(t * 1.3 + o.id) * 1.6;
         const s = 0.85 + hash2(o.tx, o.ty, 5) * 0.4;
         const hue = hash2(o.tx, o.ty, 9);
@@ -812,6 +933,10 @@ export class VectorArt implements ArtSet {
         break;
       }
       case 'car': {
+        if (o.ready >= 0) {
+          drawCar(ctx, o);
+          break;
+        }
         const palette = ['#8a3e30', '#3e5f7a', '#6d6a3a', '#5a5f66', '#8a6630', '#3d5e48'];
         const col = palette[Math.floor(hash2(o.tx, o.ty, 2) * palette.length)];
         ctx.save();
@@ -975,599 +1100,16 @@ export class VectorArt implements ArtSet {
   // ---------------- ゾンビ ----------------
 
   drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: ZombieAnim, t: number): void {
-    const st = ZOMBIE[z.type];
-    const r = st.radius;
-    const flash = z.flash > 0;
-    const id = z.id;
-    const shirt = flash ? '#fff' : SHIRTS[id % SHIRTS.length];
-    const pants = PANTS[(id >> 2) % PANTS.length];
-    const skinBase = st.skin;
-    const skin = flash ? '#fff' : hash2(id, 1) > 0.5 ? skinBase : shade(skinBase, -0.12);
-    const outline = 'rgba(15,18,12,0.85)';
-    const mv = Math.min(1, anim.move);
-    const wcyc = anim.walk;
-
-    ctx.save();
-    ctx.translate(z.x, z.y);
-    // 影
-    ctx.fillStyle = 'rgba(0,0,0,0.32)';
-    ctx.beginPath();
-    ctx.ellipse(4, 6, r * 1.1, r * 0.85, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.rotate(z.angle);
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-
-    if (z.type === 'brute') {
-      // ---- ブルート：幅広い肩・巨大な腕と拳 ----
-      const step = Math.sin(wcyc) * r * 0.3 * mv;
-      ctx.fillStyle = pants;
-      ctx.beginPath();
-      ctx.ellipse(step - 2, -r * 0.42, r * 0.38, r * 0.24, 0, 0, Math.PI * 2);
-      ctx.ellipse(-step - 2, r * 0.42, r * 0.38, r * 0.24, 0, 0, Math.PI * 2);
-      ctx.fill();
-      const reach = anim.lunge * r * 0.7;
-      for (const side of [-1, 1]) {
-        const swingA = Math.sin(wcyc + (side > 0 ? Math.PI : 0)) * 0.15 * mv;
-        const ax = r * 0.75 + reach + Math.cos(swingA) * 2;
-        const ay = side * (r * 0.78 + swingA * r);
-        ctx.strokeStyle = outline;
-        ctx.lineWidth = r * 0.52 + 2;
-        ctx.beginPath();
-        ctx.moveTo(0, side * r * 0.62);
-        ctx.lineTo(ax, ay);
-        ctx.stroke();
-        ctx.strokeStyle = skin;
-        ctx.lineWidth = r * 0.52;
-        ctx.stroke();
-        ctx.fillStyle = flash ? '#fff' : shade(skinBase, -0.25);
-        ctx.beginPath();
-        ctx.arc(ax + 2, ay, r * 0.3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.fillStyle = outline;
-      roundRect(ctx, -r * 0.62, -r * 0.92, r * 1.12, r * 1.84, r * 0.4);
-      ctx.fill();
-      ctx.fillStyle = flash ? '#fff' : '#3d4630';
-      roundRect(ctx, -r * 0.58, -r * 0.88, r * 1.04, r * 1.76, r * 0.38);
-      ctx.fill();
-      ctx.fillStyle = flash ? '#fff' : 'rgba(0,0,0,0.25)';
-      ctx.fillRect(-r * 0.3, -r * 0.7, r * 0.12, r * 1.4); // 背骨の影
-      ctx.strokeStyle = 'rgba(120,20,20,0.6)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.2, -r * 0.5);
-      ctx.lineTo(r * 0.2, -r * 0.1);
-      ctx.stroke();
-      // 小さな頭
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.arc(r * 0.38, 0, r * 0.33, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = skin;
-      ctx.beginPath();
-      ctx.arc(r * 0.38, 0, r * 0.29, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (z.type === 'runner') {
-      // ---- ランナー：細身・前傾・腕を交互に振る ----
-      const step = Math.sin(wcyc * 1.3) * r * 0.55 * mv;
-      ctx.fillStyle = pants;
-      ctx.beginPath();
-      ctx.ellipse(step, -r * 0.3, r * 0.42, r * 0.17, 0, 0, Math.PI * 2);
-      ctx.ellipse(-step, r * 0.3, r * 0.42, r * 0.17, 0, 0, Math.PI * 2);
-      ctx.fill();
-      for (const side of [-1, 1]) {
-        const swing = Math.sin(wcyc * 1.3 + (side > 0 ? 0 : Math.PI)) * r * 0.7 * mv + anim.lunge * r * 0.9;
-        ctx.strokeStyle = outline;
-        ctx.lineWidth = r * 0.26 + 2;
-        ctx.beginPath();
-        ctx.moveTo(r * 0.1, side * r * 0.5);
-        ctx.lineTo(r * 0.2 + swing, side * r * 0.62);
-        ctx.stroke();
-        ctx.strokeStyle = skin;
-        ctx.lineWidth = r * 0.26;
-        ctx.stroke();
-      }
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, r * 0.52, r * 0.72, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = shirt;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, r * 0.46, r * 0.66, 0, 0, Math.PI * 2);
-      ctx.fill();
-      // 破れたシャツ
-      ctx.fillStyle = flash ? '#fff' : skin;
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.1, r * 0.2);
-      ctx.lineTo(r * 0.15, r * 0.5);
-      ctx.lineTo(-r * 0.25, r * 0.55);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.arc(r * 0.5, 0, r * 0.4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = skin;
-      ctx.beginPath();
-      ctx.arc(r * 0.5, 0, r * 0.35, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = flash ? '#fff' : '#2b2018';
-      ctx.beginPath();
-      ctx.arc(r * 0.4, 0, r * 0.3, Math.PI * 0.55, Math.PI * 1.45);
-      ctx.fill();
-    } else {
-      // ---- ウォーカー：猫背・片腕を前に突き出してよろめく ----
-      const step = Math.sin(wcyc) * r * 0.35 * mv;
-      const lurch = Math.sin(wcyc * 0.5 + id) * 0.12;
-      ctx.rotate(lurch);
-      ctx.fillStyle = pants;
-      ctx.beginPath();
-      ctx.ellipse(step, -r * 0.38, r * 0.36, r * 0.2, 0, 0, Math.PI * 2);
-      ctx.ellipse(-step * 0.6, r * 0.38, r * 0.36, r * 0.2, 0, 0, Math.PI * 2);
-      ctx.fill();
-      const reach = anim.lunge * r * 0.7;
-      const sway = Math.sin(t * 2.4 + id) * 2.5;
-      const arms: [number, number, number][] = [
-        [-1, r * 1.05 + reach, -r * 0.55 + sway],
-        [1, r * (hash2(id, 3) > 0.5 ? 0.6 : 1.0) + reach, r * 0.55 - sway],
-      ];
-      for (const [side, ax, ay] of arms) {
-        ctx.strokeStyle = outline;
-        ctx.lineWidth = r * 0.3 + 2;
-        ctx.beginPath();
-        ctx.moveTo(r * 0.05, side * r * 0.58);
-        ctx.lineTo(ax, ay);
-        ctx.stroke();
-        ctx.strokeStyle = skin;
-        ctx.lineWidth = r * 0.3;
-        ctx.stroke();
-      }
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.ellipse(-r * 0.12, 0, r * 0.62, r * 0.84, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = shirt;
-      ctx.beginPath();
-      ctx.ellipse(-r * 0.12, 0, r * 0.56, r * 0.78, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = flash ? '#fff' : 'rgba(100,12,12,0.6)';
-      ctx.beginPath();
-      ctx.ellipse(-r * 0.2 + (id % 5) - 2, r * 0.25, r * 0.22, r * 0.16, 0.6, 0, Math.PI * 2);
-      ctx.fill();
-      // 頭（少し傾く）
-      const hx = r * 0.18;
-      const hy = Math.sin(id) * r * 0.12;
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.arc(hx, hy, r * 0.47, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = skin;
-      ctx.beginPath();
-      ctx.arc(hx, hy, r * 0.42, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = flash ? '#fff' : hash2(id, 7) > 0.5 ? '#3a3026' : '#5a4a36';
-      ctx.beginPath();
-      ctx.arc(hx - r * 0.08, hy, r * 0.36, Math.PI * 0.6, Math.PI * 1.4);
-      ctx.fill();
-    }
-
-    // 感染兵士：防弾ベストとヘルメット
-    if (z.type === 'soldier') {
-      ctx.fillStyle = flash ? '#fff' : '#3b4030';
-      roundRect(ctx, -r * 0.62, -r * 0.62, r * 0.78, r * 1.24, r * 0.18);
-      ctx.fill();
-      ctx.fillStyle = flash ? '#fff' : '#2f3326';
-      ctx.fillRect(-r * 0.5, -r * 0.5, r * 0.22, r * 0.28);
-      ctx.fillRect(-r * 0.5, r * 0.22, r * 0.22, r * 0.28);
-      ctx.fillRect(-r * 0.18, -r * 0.18, r * 0.2, r * 0.36);
-      const hy = Math.sin(id) * r * 0.12;
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.arc(r * 0.16, hy, r * 0.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = flash ? '#fff' : '#4d5539';
-      ctx.beginPath();
-      ctx.arc(r * 0.12, hy, r * 0.44, Math.PI * 0.35, Math.PI * 1.65);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.08)';
-      ctx.beginPath();
-      ctx.arc(r * 0.02, hy - r * 0.12, r * 0.18, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // 目
-    const ex = z.type === 'brute' ? r * 0.56 : z.type === 'runner' ? r * 0.75 : r * 0.48;
-    const ey = z.type === 'brute' ? r * 0.12 : r * 0.15;
-    ctx.fillStyle = z.alert === 2 ? '#e86a4a' : '#d8d070';
-    ctx.beginPath();
-    ctx.arc(ex, -ey, r * 0.08 + 0.5, 0, Math.PI * 2);
-    ctx.arc(ex, ey, r * 0.08 + 0.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 攻撃のひっかき
-    if (anim.lunge > 0.35) {
-      ctx.strokeStyle = `rgba(255,220,220,${(anim.lunge - 0.35) * 1.2})`;
-      ctx.lineWidth = 2;
-      for (let i = -1; i <= 1; i++) {
-        ctx.beginPath();
-        ctx.arc(r * 0.4, i * 4, r * 1.5, -0.5, 0.5);
-        ctx.stroke();
-      }
-    }
-    ctx.restore();
+    drawZombieNew(ctx, z, anim, t);
   }
 
   drawCorpse(ctx: CanvasRenderingContext2D, c: Corpse): void {
-    const st = ZOMBIE[c.type];
-    const r = st.radius;
-    const a = Math.min(1, c.life / 3);
-    const shirt = c.type === 'brute' ? '#3d4630' : SHIRTS[c.id % SHIRTS.length];
-    const skin = shade(st.skin, -0.25);
-    ctx.save();
-    ctx.globalAlpha = a * 0.9;
-    ctx.translate(c.x, c.y);
-    ctx.rotate(c.angle);
-    ctx.lineCap = 'round';
-    // 投げ出された手足
-    ctx.strokeStyle = skin;
-    ctx.lineWidth = r * 0.3;
-    ctx.beginPath();
-    ctx.moveTo(0, -r * 0.5);
-    ctx.lineTo(r * 0.7, -r * 1.1);
-    ctx.moveTo(0, r * 0.5);
-    ctx.lineTo(-r * 0.2, r * 1.2);
-    ctx.stroke();
-    ctx.strokeStyle = PANTS[(c.id >> 2) % PANTS.length];
-    ctx.lineWidth = r * 0.36;
-    ctx.beginPath();
-    ctx.moveTo(-r * 0.4, -r * 0.2);
-    ctx.lineTo(-r * 1.3, -r * 0.5);
-    ctx.moveTo(-r * 0.4, r * 0.2);
-    ctx.lineTo(-r * 1.2, r * 0.6);
-    ctx.stroke();
-    ctx.fillStyle = shade(shirt.startsWith('#') ? shirt : '#555555', -0.35);
-    ctx.beginPath();
-    ctx.ellipse(-r * 0.1, 0, r * 0.75, r * 0.85, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = skin;
-    ctx.beginPath();
-    ctx.arc(r * 0.65, 0, r * 0.4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    drawCorpseNew(ctx, c);
   }
 
   // ---------------- プレイヤー ----------------
 
   drawPlayer(ctx: CanvasRenderingContext2D, p: PlayerSnap, color: string, anim: PlayerAnim, t: number): void {
-    const r = 14;
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    if (p.status === 'dead') {
-      ctx.globalAlpha = 0.5;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.moveTo(-9, -9);
-      ctx.lineTo(9, 9);
-      ctx.moveTo(9, -9);
-      ctx.lineTo(-9, 9);
-      ctx.stroke();
-      ctx.restore();
-      return;
-    }
-    const down = p.status === 'down';
-    const outline = 'rgba(10,12,18,0.9)';
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.beginPath();
-    ctx.ellipse(4, 6, 16, 13, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 足は移動方向（bodyAngle）、上半身は照準方向
-    const mv = Math.min(1, anim.move);
-    if (!down) {
-      ctx.save();
-      ctx.rotate(p.bodyAngle);
-      const step = Math.sin(anim.walk) * 6 * mv;
-      ctx.fillStyle = '#20252f';
-      ctx.beginPath();
-      ctx.ellipse(step, -5, 6, 3.6, 0, 0, Math.PI * 2);
-      ctx.ellipse(-step, 5, 6, 3.6, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-    const bob = 1 + Math.abs(Math.sin(anim.walk)) * 0.04 * mv;
-    ctx.rotate(down ? p.bodyAngle + Math.PI / 2 : p.aim);
-    ctx.scale(bob, bob);
-    const body = down ? '#5d6470' : color;
-    const skin = '#e3c7a8';
-
-    // バックパック（寝袋付き）
-    ctx.fillStyle = outline;
-    roundRect(ctx, -r - 6, -10, 14, 20, 4);
-    ctx.fill();
-    ctx.fillStyle = '#4e4634';
-    roundRect(ctx, -r - 5, -9, 12, 18, 4);
-    ctx.fill();
-    ctx.fillStyle = '#5e5440';
-    ctx.fillRect(-r - 4, -7, 9, 4);
-    ctx.fillStyle = '#4a5440';
-    roundRect(ctx, -r - 8, -9, 4, 18, 2); // 丸めた寝袋
-    ctx.fill();
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.fillRect(-r - 8, -3, 4, 1.5);
-    ctx.fillRect(-r - 8, 3, 4, 1.5);
-
-    // 武器と腕
-    if (!down) this.drawWeapon(ctx, p, anim, body, skin, outline, t);
-
-    // 胴体
-    ctx.fillStyle = outline;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 10, r + 1, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = shade(body.startsWith('#') ? body : '#888888', -0.3);
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 9, r, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = body;
-    ctx.beginPath();
-    ctx.ellipse(1, -1, 7, r - 3, 0, 0, Math.PI * 2);
-    ctx.fill();
-    // タクティカルベスト（胸のポーチと肩のストラップ）
-    if (!down) {
-      ctx.fillStyle = 'rgba(30,32,26,0.85)';
-      ctx.fillRect(-4, -r + 3, 3, 2 * r - 6);
-      ctx.fillStyle = '#3d4234';
-      roundRect(ctx, 1, -9, 5, 6, 1.5);
-      ctx.fill();
-      roundRect(ctx, 1, 3, 5, 6, 1.5);
-      ctx.fill();
-    }
-    // 頭と帽子（プレイヤーごとに違う：ヘルメット / キャップ / ニット帽）
-    ctx.fillStyle = outline;
-    ctx.beginPath();
-    ctx.arc(2, 0, 7.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = down ? '#b9a594' : skin;
-    ctx.beginPath();
-    ctx.arc(2, 0, 6.5, 0, Math.PI * 2);
-    ctx.fill();
-    const hat = p.id % 3;
-    if (hat === 0) {
-      // ヘルメット
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.arc(0.5, 0, 8.2, 0, Math.PI * 2);
-      ctx.fill();
-      const hg = ctx.createRadialGradient(-1, -2, 1, 0.5, 0, 8);
-      hg.addColorStop(0, '#6e7558');
-      hg.addColorStop(1, '#474c38');
-      ctx.fillStyle = hg;
-      ctx.beginPath();
-      ctx.arc(0.5, 0, 7.4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(0,0,0,0.25)';
-      ctx.fillRect(-4, -0.8, 9, 1.6); // ヘルメットのバンド
-    } else if (hat === 1) {
-      // キャップ（つば付き）
-      ctx.fillStyle = shade(body.startsWith('#') ? body : '#888888', -0.4);
-      ctx.beginPath();
-      ctx.arc(0.5, 0, 6.8, Math.PI * 0.5, Math.PI * 1.5);
-      ctx.fill();
-      ctx.fillRect(0, -6.8, 3, 13.6);
-      ctx.fillRect(4, -4.5, 5, 9);
-    } else {
-      // ニット帽
-      ctx.fillStyle = '#5a4a3c';
-      ctx.beginPath();
-      ctx.arc(0.5, 0, 7, Math.PI * 0.45, Math.PI * 1.55);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.08)';
-      ctx.fillRect(-5, -0.8, 6, 1.6);
-    }
-    ctx.restore();
-  }
-
-  private drawWeapon(ctx: CanvasRenderingContext2D, p: PlayerSnap, anim: PlayerAnim, body: string, skin: string, outline: string, t: number): void {
-    const arm = (x1: number, y1: number, x2: number, y2: number) => {
-      ctx.strokeStyle = outline;
-      ctx.lineWidth = 6;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-      ctx.strokeStyle = shade(body.startsWith('#') ? body : '#888888', -0.15);
-      ctx.lineWidth = 4;
-      ctx.stroke();
-      ctx.fillStyle = skin;
-      ctx.beginPath();
-      ctx.arc(x2, y2, 2.8, 0, Math.PI * 2);
-      ctx.fill();
-    };
-    const held = heldWeapon(p);
-    const gun = held ? (held.id === 'pistol' ? 'pistol' : held.id === 'shotgun' ? 'shotgun' : 'rifle') : null;
-    if (gun && held) {
-      const rc = anim.recoil;
-      const long = gun !== 'pistol';
-      arm(0, -8, (long ? 18 : 13) + rc, long ? -1 : -1);
-      arm(0, 8, 11 + rc, 2);
-      let muzzle = 30;
-      if (gun === 'pistol') {
-        ctx.fillStyle = outline;
-        roundRect(ctx, 9 + rc, -3, 20, 7, 2);
-        ctx.fill();
-        ctx.fillStyle = '#2b2f37';
-        roundRect(ctx, 10 + rc, -2, 18, 5, 1.5);
-        ctx.fill();
-        ctx.fillStyle = '#55606e';
-        ctx.fillRect(12 + rc, -2, 12, 1.5);
-      } else if (gun === 'rifle') {
-        muzzle = 38;
-        ctx.fillStyle = outline;
-        roundRect(ctx, 0 + rc, -3.5, 38, 7, 2);
-        ctx.fill();
-        ctx.fillStyle = '#2a2e35';
-        roundRect(ctx, 1 + rc, -2.5, 36, 5, 1.5);
-        ctx.fill();
-        ctx.fillStyle = '#1c1f24';
-        ctx.fillRect(14 + rc, 2, 5, 7); // マガジン
-        ctx.fillStyle = '#4b5563';
-        ctx.fillRect(10 + rc, -4.5, 9, 2); // 照準器
-        if (held.id === 'hunting') {
-          // 狩猟ライフル：長い銃身と木製ストック
-          ctx.fillStyle = '#6e4a2c';
-          roundRect(ctx, 0 + rc, -3, 16, 6, 2);
-          ctx.fill();
-          ctx.fillStyle = outline;
-          ctx.fillRect(36 + rc, -1.5, 8, 3);
-          muzzle = 44;
-        } else if (held.id === 'smg') {
-          ctx.fillStyle = '#1c1f24';
-          ctx.fillRect(16 + rc, 2, 3, 9);
-        }
-      } else {
-        muzzle = 36;
-        ctx.fillStyle = outline;
-        roundRect(ctx, -2 + rc, -4, 38, 8, 2);
-        ctx.fill();
-        ctx.fillStyle = '#7a5232';
-        roundRect(ctx, -1 + rc, -3, 14, 6, 2); // 木製ストック
-        ctx.fill();
-        ctx.fillStyle = '#6b7380';
-        ctx.fillRect(12 + rc, -3, 23, 2.5);
-        ctx.fillStyle = '#4b5260';
-        ctx.fillRect(12 + rc, 0, 20, 2.5);
-        ctx.fillStyle = '#8a5c33';
-        ctx.fillRect(20 + rc, 1, 7, 3.5); // ポンプ
-      }
-      // アタッチメント
-      if (held.w.scope) {
-        ctx.fillStyle = outline;
-        roundRect(ctx, 8 + rc, -5.5, 13, 4, 1.5);
-        ctx.fill();
-        ctx.fillStyle = 'rgba(150,200,220,0.7)';
-        ctx.fillRect(19 + rc, -5, 1.5, 3);
-      }
-      if (held.w.extmag && gun !== 'shotgun') {
-        ctx.fillStyle = '#1c1f24';
-        ctx.fillRect((gun === 'pistol' ? 13 : 14) + rc, 3, 5, 9);
-      }
-      if (held.w.grip && gun !== 'pistol') {
-        ctx.fillStyle = '#23262b';
-        ctx.fillRect(24 + rc, 2.5, 3, 5);
-      }
-      if (held.w.suppressor) {
-        ctx.fillStyle = outline;
-        roundRect(ctx, muzzle - 1 + rc, -2.5, 11, 5, 2);
-        ctx.fill();
-        ctx.fillStyle = '#3a3f46';
-        ctx.fillRect(muzzle + rc, -1.5, 9, 3);
-        muzzle += 10;
-      }
-      if (anim.flash > 0) {
-        const s = (0.7 + anim.flashSeed * 0.6) * (gun === 'shotgun' ? 1.5 : 1) * (held.w.suppressor ? 0.35 : 1);
-        ctx.save();
-        ctx.translate(muzzle + rc, 0.5);
-        ctx.globalCompositeOperation = 'lighter';
-        ctx.fillStyle = 'rgba(255,210,120,0.95)';
-        ctx.beginPath();
-        ctx.moveTo(0, -5 * s);
-        ctx.lineTo(18 * s, 0);
-        ctx.lineTo(0, 5 * s);
-        ctx.lineTo(5 * s, 0);
-        ctx.closePath();
-        ctx.fill();
-        if (gun === 'shotgun') {
-          ctx.beginPath();
-          ctx.moveTo(2, -2);
-          ctx.lineTo(12 * s, -9 * s);
-          ctx.lineTo(6, 0);
-          ctx.lineTo(12 * s, 9 * s);
-          ctx.lineTo(2, 2);
-          ctx.fill();
-        }
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
-        ctx.beginPath();
-        ctx.arc(2, 0, 3.5 * s, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
-    } else if (p.tool === Tool.Melee) {
-      const prog = anim.swing > 0 ? 1 - anim.swing : -1;
-      const ang = prog >= 0 ? -1.2 + prog * 2.4 : 0.6;
-      ctx.save();
-      ctx.rotate(ang);
-      arm(-2, 8, 12, 4);
-      ctx.strokeStyle = outline;
-      ctx.lineWidth = 5;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(8, 4);
-      ctx.lineTo(32, 4);
-      ctx.stroke();
-      ctx.strokeStyle = '#8a6038';
-      ctx.lineWidth = 3;
-      ctx.stroke();
-      ctx.fillStyle = outline;
-      ctx.beginPath();
-      ctx.moveTo(26, 2);
-      ctx.lineTo(35, -7);
-      ctx.lineTo(38, 3);
-      ctx.lineTo(30, 7);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = '#c3ccd6';
-      ctx.beginPath();
-      ctx.moveTo(27, 2);
-      ctx.lineTo(34.5, -5.5);
-      ctx.lineTo(36.5, 3);
-      ctx.lineTo(30, 6);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-      arm(0, -8, 8, -6);
-      if (prog >= 0 && prog < 0.8) {
-        ctx.strokeStyle = `rgba(255,255,255,${(1 - prog) * 0.45})`;
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.arc(0, 0, 36, -1.2, -1.2 + prog * 2.4);
-        ctx.stroke();
-      }
-    } else if (p.tool === Tool.Food || p.tool === Tool.Meds || p.tool === Tool.Primary || p.tool === Tool.Secondary) {
-      arm(0, -8, 12, -4);
-      arm(0, 8, 12, 4);
-      if (p.tool === Tool.Food) {
-        ctx.fillStyle = '#b8c2cc';
-        ctx.fillRect(12, -4, 7, 8);
-        ctx.fillStyle = '#d9534f';
-        ctx.fillRect(12, -2, 7, 4);
-      } else if (p.tool === Tool.Meds) {
-        ctx.fillStyle = '#e8edf2';
-        ctx.fillRect(11, -5, 9, 10);
-        ctx.fillStyle = '#d9534f';
-        ctx.fillRect(14.5, -3.5, 2, 7);
-        ctx.fillRect(12.5, -1, 6, 2);
-      }
-    } else {
-      // ハンマー（建築・修理）
-      ctx.save();
-      ctx.rotate(0.5 + Math.sin(t * 6) * 0.05);
-      arm(-2, 8, 10, 3);
-      ctx.strokeStyle = '#7a5532';
-      ctx.lineWidth = 3.5;
-      ctx.beginPath();
-      ctx.moveTo(8, 3);
-      ctx.lineTo(26, 3);
-      ctx.stroke();
-      ctx.fillStyle = outline;
-      ctx.fillRect(22, -4, 9, 14);
-      ctx.fillStyle = '#9aa3ad';
-      ctx.fillRect(23, -3, 7, 12);
-      ctx.restore();
-      arm(0, -8, 8, -6);
-    }
+    drawPlayerNew(ctx, p, color, anim, t);
   }
 }

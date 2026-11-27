@@ -85,10 +85,16 @@ export class Effects {
   decals: Decal[] = [];
   corpses: Corpse[] = [];
   banner: Banner | null = null;
+  /** 画面左のイベントログ */
+  feed: { t: string; c: string; life: number; cat: string }[] = [];
   trauma = 0;
   hurt = 0;
   /** ヒットストップの残り秒（見た目だけ一瞬止める） */
   hitstop = 0;
+  /** 上部の細い帯で知らせる通知（補給物資など。大型バナーは日付の切り替えだけ） */
+  notice: { text: string; sub: string; color: string } | null = null;
+  /** 自分の弾が当たった／倒したときの照準の×印（残り時間・撃破か） */
+  hitMark = { t: 0, kill: false };
   /** 射撃の反動によるカメラのずれ */
   kickX = 0;
   kickY = 0;
@@ -225,7 +231,7 @@ export class Effects {
     this.trauma = Math.min(1, this.trauma + amount);
   }
 
-  showBanner(text: string, sub: string, color: string, life = 3.2): void {
+  showBanner(text: string, sub: string, color: string, life = 2.6): void {
     this.banner = { text, sub, life, maxLife: life, color };
   }
 
@@ -235,6 +241,8 @@ export class Effects {
   }
 
   update(dt: number): void {
+    this.hitMark.t = Math.max(0, this.hitMark.t - dt);
+    if (this.hitMark.t <= 0) this.hitMark.kill = false;
     this.trauma = Math.max(0, this.trauma - dt * 1.8);
     this.hurt = Math.max(0, this.hurt - dt * 2.5);
     for (const p of this.particles) {
@@ -278,6 +286,8 @@ export class Effects {
       this.banner.life -= dt;
       if (this.banner.life <= 0) this.banner = null;
     }
+    for (const f of this.feed) f.life -= dt;
+    this.feed = this.feed.filter((f) => f.life > 0);
   }
 
   /** ホストから届いた（またはローカルで発生した）イベントを演出に変換 */
@@ -285,6 +295,7 @@ export class Effects {
     switch (ev.k) {
       case 'hit':
         this.bloodSpray(ev.x, ev.y, ev.a, ev.m ? 1.8 : 1);
+        if (ev.o === localId && !this.hitMark.kill) this.hitMark = { t: 0.14, kill: false };
         if (ev.m) {
           this.burst(ev.x, ev.y, '#ffffff', 4, 200, 0.15, 2);
           if (ev.o === localId) {
@@ -321,7 +332,10 @@ export class Effects {
           maxLife: 22,
         });
         if (this.corpses.length > MAX_CORPSES) this.corpses.shift();
-        if (ev.o === localId) this.hitstop = Math.max(this.hitstop, big ? 0.09 : 0.05);
+        if (ev.o === localId) {
+          this.hitstop = Math.max(this.hitstop, big ? 0.09 : 0.05);
+          this.hitMark = { t: 0.32, kill: true };
+        }
         this.shakeAt(ev.x, ev.y, big ? 0.3 : 0.12);
         break;
       }
@@ -370,6 +384,11 @@ export class Effects {
         this.popup(ev.x, ev.y, ev.t, ev.c, ev.id === localId ? 15 : 12);
         break;
       case 'banner':
+        // 大きな中央バナーは日付・昼夜の切り替えだけ。それ以外は上部の細い帯に
+        if (!ev.t.startsWith('DAY')) {
+          this.notice = { text: ev.t, sub: ev.s, color: ev.c };
+          break;
+        }
         this.showBanner(ev.t, ev.s, ev.c);
         if (ev.c === '#b03a2e') this.shake(0.5);
         break;
@@ -380,6 +399,14 @@ export class Effects {
         break;
       case 'door':
         this.burst(ev.x, ev.y, '#8a8070', 5, 60, 0.6, 5, 'smoke', false);
+        break;
+      case 'feed':
+        this.feed.push({ t: ev.t, c: ev.c, life: 9, cat: ev.cat ?? 'info' });
+        if (this.feed.length > 6) this.feed.shift();
+        break;
+      case 'ricochet':
+        // 装甲に弾かれた火花
+        this.burst(ev.x, ev.y, '#e8e0b0', 4, 260, 0.15, 1.4, 'spark', true);
         break;
       case 'tshot':
         this.turretAim.set(ev.id, { a: ev.a, flash: 0.06 });
@@ -393,6 +420,26 @@ export class Effects {
         break;
       case 'noise':
         this.ring(ev.x, ev.y, '#5a6270', 46, 0.25); // 銃声（騒音）の小さな波紋
+        break;
+      case 'gas':
+        // 膨張体の破裂：黄緑の毒ガスが広がる
+        this.burst(ev.x, ev.y, '#a8c060', 26, 120, 2.2, 14, 'smoke', false);
+        this.burst(ev.x, ev.y, '#d0e070', 12, 220, 0.5, 3, 'dot', false);
+        this.ring(ev.x, ev.y, '#b8d070', 150, 0.6);
+        this.decal(ev.x, ev.y, 34, 'scorch', 50);
+        break;
+      case 'scream':
+        // 叫び声の大きな波紋
+        this.ring(ev.x, ev.y, '#e8c8b0', 220, 0.9);
+        this.ring(ev.x, ev.y, '#e09070', 120, 0.6);
+        break;
+      case 'boom':
+        this.burst(ev.x, ev.y, '#ffb050', 30, 380, 0.5, 4, 'spark', true);
+        this.burst(ev.x, ev.y, '#ff7030', 14, 160, 0.7, 10, 'smoke', true, -Math.PI / 2, 2);
+        this.burst(ev.x, ev.y, '#3a3632', 18, 90, 2.4, 16, 'smoke', false, -Math.PI / 2, 1.6);
+        this.ring(ev.x, ev.y, '#ffc070', 140, 0.4);
+        this.decal(ev.x, ev.y, 40, 'scorch', 80);
+        this.shake(0.7);
         break;
     }
   }

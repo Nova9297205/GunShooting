@@ -3,6 +3,7 @@
 //   - ホスト: 6桁ルームIDで Peer を作成し、最大2人のゲスト接続を受け付ける
 //   - ゲスト: ルームIDへ接続し、名前を名乗ってから入力送信・スナップショット受信
 // ============================================================
+import { netStats } from '../game/PerfOverlay';
 import { Peer, type DataConnection, type PeerOptions } from 'peerjs';
 import type {
   GameResult,
@@ -14,6 +15,7 @@ import type {
   StartInfo,
 } from '../types';
 import { MAX_PLAYERS, NAME_MAX } from '../game/constants';
+import { loadProfile, type Profile, sanitizeProfile } from '../game/progression';
 
 const ID_PREFIX = 'deadnights2d-v1-';
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -33,6 +35,7 @@ interface ChunkMsg {
 
 function sendBig(conn: DataConnection, msg: object): void {
   const s = JSON.stringify(msg);
+  netStats.out += s.length;
   if (s.length <= CHUNK) {
     conn.send(msg);
     return;
@@ -104,7 +107,7 @@ export class NetworkManager {
   snapInterval = 0;
 
   private peer: Peer | null = null;
-  private conns = new Map<number, { conn: DataConnection; name: string }>();
+  private conns = new Map<number, { conn: DataConnection; name: string; prof: Profile }>();
   private hostConn: DataConnection | null = null;
   private handlers: Partial<NetHandlers> = {};
   private destroyed = false;
@@ -120,7 +123,7 @@ export class NetworkManager {
     this.role = 'host';
     this.localId = 0;
     this.hostName = sanitizeName(name, 0);
-    this.players = [{ id: 0, name: this.hostName }];
+    this.players = [{ id: 0, name: this.hostName, prof: loadProfile() }];
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = genCode();
       try {
@@ -160,7 +163,7 @@ export class NetworkManager {
           }
         }
         if (slot < 0) return reject('ルームが満員です（最大3人）');
-        this.conns.set(slot, { conn, name: sanitizeName(msg.name, slot) });
+        this.conns.set(slot, { conn, name: sanitizeName(msg.name, slot), prof: sanitizeProfile(msg.prof) });
         this.rebuildLobby();
         conn.send({ type: 'welcome', slot, players: this.players } satisfies HostMessage);
         this.broadcastLobby();
@@ -182,7 +185,7 @@ export class NetworkManager {
 
   private rebuildLobby(): void {
     const ids = [...this.conns.keys()].sort();
-    this.players = [{ id: 0, name: this.hostName }, ...ids.map((id) => ({ id, name: this.conns.get(id)!.name }))];
+    this.players = [{ id: 0, name: this.hostName, prof: loadProfile() }, ...ids.map((id) => ({ id, name: this.conns.get(id)!.name, prof: this.conns.get(id)!.prof }))];
   }
 
   private broadcastLobby(): void {
@@ -201,6 +204,11 @@ export class NetworkManager {
 
   sendSnapshot(s: Snapshot): void {
     this.broadcast({ type: 'snap', s });
+  }
+
+  /** 受け取り手ごとに内容を変えて送る（広い地図では、各自の周りのゾンビ・弾だけを送って通信量を抑える） */
+  sendSnapshotEach(make: (slot: number) => Snapshot): void {
+    for (const [slot, { conn }] of this.conns) if (conn.open) sendBig(conn, { type: 'snap', s: make(slot) } satisfies HostMessage);
   }
 
   sendGameOver(result: GameResult): void {
@@ -238,7 +246,7 @@ export class NetworkManager {
       this.hostConn = conn;
       let lastSnapAt = 0;
 
-      conn.on('open', () => conn.send({ type: 'hello', name } satisfies GuestMessage));
+      conn.on('open', () => conn.send({ type: 'hello', name, prof: loadProfile() } satisfies GuestMessage));
       const asm = new ChunkAssembler();
       conn.on('data', (raw) => {
         const data = asm.feed(raw);
@@ -270,6 +278,8 @@ export class NetworkManager {
             const now = performance.now();
             if (lastSnapAt) this.snapInterval = this.snapInterval * 0.9 + (now - lastSnapAt) * 0.1;
             lastSnapAt = now;
+            netStats.snaps++;
+            if (netStats.measure) netStats.in += JSON.stringify(msg.s).length;
             this.handlers.onSnapshot?.(msg.s);
             break;
           }

@@ -7,6 +7,8 @@ import { audio } from './game/Audio';
 import { HostSimulation } from './game/Engine';
 import { GameSession } from './game/GameSession';
 import { NetworkManager, sanitizeName } from './network/NetworkManager';
+import { levelOf, loadProfile, type Profile, saveProfile, SKILLS } from './game/progression';
+import { TitleBackdrop } from './ui/TitleBackdrop';
 import type { GameMode, ObjKind, GameResult, LobbyPlayer, StartInfo } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -60,9 +62,32 @@ volSfx.addEventListener('change', () => audio.handleEvent({ k: 'pop', x: 0, y: 0
 
 // ---------------- 画面切り替え ----------------
 
+const backdrop = new TitleBackdrop($<HTMLCanvasElement>('title-bg'));
+
 function show(name: keyof typeof screens | null): void {
   for (const [k, el] of Object.entries(screens)) el.classList.toggle('hidden', k !== name);
+  backdrop.show(name !== null);
+  if (name === 'title') renderProfile();
 }
+
+/** タイトル：このブラウザに保存されたスキルと記録 */
+function renderProfile(): void {
+  const prof = loadProfile();
+  const box = $('profile-box');
+  box.innerHTML = `<div class="pb-title"><span>保存済みの記録</span><span>最長生存 <b>${prof.bestDay}</b> 日 ・ 持ち帰り総額 <b>${prof.banked}</b></span></div>${SKILLS.map(
+    (sk, i) => `<div class="pb-skill">${sk.name}<b>Lv${levelOf(prof.xp[i] ?? 0)}</b></div>`,
+  ).join('')}`;
+}
+
+/** ロビーのカード用：スキルのレベル表示 */
+function skillPips(prof: Profile | undefined): string {
+  return SKILLS.map((sk, i) => {
+    const lv = levelOf(prof?.xp[i] ?? 0);
+    return `<div class="op-skill">${sk.name} <span>Lv${lv}</span><div class="pipbar">${Array.from({ length: 10 }, (_, k) => `<i class="${k < lv ? 'on' : ''}"></i>`).join('')}</div></div>`;
+  }).join('');
+}
+
+const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function setStatus(id: string, text: string, error = false): void {
   const el = $(id);
@@ -112,6 +137,7 @@ function startSession(m: GameMode, info: StartInfo, localId: number, sim?: HostS
     },
   });
   session.start();
+  if (import.meta.env.DEV) Object.assign(window, { __session: session });
 }
 
 /** ソロ/ホスト：シミュレーションを作って開始 */
@@ -132,6 +158,15 @@ function endSession(): void {
 
 function showResult(r: GameResult): void {
   audio.gameOver();
+  // 自分のスキル経験値・記録を保存（次回に引き継ぐ）
+  const mine = r.players.find((p) => p.id === (net?.localId ?? 0));
+  if (mine) {
+    const prof = loadProfile();
+    prof.xp = mine.xp.map((v, i) => Math.max(v, prof.xp[i] ?? 0));
+    prof.bestDay = Math.max(prof.bestDay, r.day);
+    prof.banked += mine.value;
+    saveProfile(prof);
+  }
   $('result-day').textContent = String(r.day);
   const body = $('result-body');
   body.innerHTML = '';
@@ -161,18 +196,17 @@ function renderLobby(players: LobbyPlayer[]): void {
     const p = players.find((pl) => pl.id === i);
     const li = document.createElement('li');
     if (p) {
-      const dot = document.createElement('span');
-      dot.className = 'dot';
-      dot.style.background = PLAYER_COLORS[i];
-      const name = document.createElement('span');
-      name.textContent = p.name + (net && p.id === net.localId ? ' (YOU)' : '');
-      const tag = document.createElement('span');
-      tag.className = 'tag';
-      tag.textContent = i === 0 ? 'HOST' : 'GUEST';
-      li.append(dot, name, tag);
+      const me = (net?.localId ?? 0) === p.id;
+      li.className = 'op-card';
+      li.style.setProperty('--op', PLAYER_COLORS[i]);
+      li.innerHTML = `
+        <div class="op-slot"><span>P${i + 1} / OPERATOR</span><span>${p.prof?.bestDay ? `最長 ${p.prof.bestDay}日` : 'NEW'}</span></div>
+        <div class="op-name" style="color:${PLAYER_COLORS[i]}">${esc(p.name)}</div>
+        <div class="chips">${i === 0 ? '<span class="chip host">HOST</span>' : '<span class="chip">GUEST</span>'}${me ? '<span class="chip you">YOU</span>' : ''}<span class="chip ok">● 接続中</span></div>
+        <div class="op-skills">${skillPips(p.prof)}</div>`;
     } else {
-      li.className = 'empty';
-      li.textContent = `P${i + 1} — 空き`;
+      li.className = 'op-card empty';
+      li.innerHTML = `<div class="scan"></div>P${i + 1} — 接続待機中<br /><small>ルームIDで参加できます</small>`;
     }
     list.append(li);
   }
@@ -197,7 +231,7 @@ function showLobby(): void {
 $('btn-solo').addEventListener('click', () => {
   net?.destroy();
   net = null;
-  startAsHost('solo', [{ id: 0, name: sanitizeName(playerName(), 0) }]);
+  startAsHost('solo', [{ id: 0, name: sanitizeName(playerName(), 0), prof: loadProfile() }]);
 });
 
 $('btn-host').addEventListener('click', async () => {
