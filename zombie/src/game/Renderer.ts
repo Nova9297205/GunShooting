@@ -713,6 +713,7 @@ export class Renderer {
     this.drawBullets({ ...view, bullets: view.bullets.filter((b) => vis.isVisible(b.x, b.y)) }, o);
     for (const z of zombiesSeen) this.art.drawZombie(ctx, z, this.getZAnim(z), this.time);
     this.touchUI = !!o.touch;
+    this.roofDt = Math.min(0.1, o.dt || 0.016);
     this.padUI = !!o.pad;
     this.glyphs = o.pad ? (o.glyphs ?? null) : null;
     this.vehLights = (view.vehicles ?? []).filter((v) => v.seats[0] >= 0 && !v.broken).map((v) => ({ x: v.x + Math.cos(v.a) * 90, y: v.y + Math.sin(v.a) * 90 }));
@@ -951,52 +952,57 @@ export class Renderer {
     ctx.restore();
   }
 
-  /** 屋根：プレイヤーが中に入っていない建物の、見えていない部分を覆う */
+  /**
+   * 屋根：建物に近づく（3マス以内）と屋根は消え、中は視界の届く所だけが見える（見えない所は暗闇）。
+   * 離れている建物は屋根全体を描く。見えている／いないの境目で屋根を切り抜かないので、ちらつかない。
+   */
+  private roofAlpha = new Map<number, number>();
+  private roofDt = 0.016;
   private drawRoofs(me: PlayerSnap | undefined, x0: number, y0: number, x1: number, y1: number, seenPass: boolean): void {
     const { ctx } = this;
-    const mtx = me ? Math.floor(me.x / TILE) : -1;
-    const mty = me ? Math.floor(me.y / TILE) : -1;
-    for (const b of this.world.buildings) {
-      if (b.x * TILE > x1 || b.y * TILE > y1 || (b.x + b.w) * TILE < x0 || (b.y + b.h) * TILE < y0) continue;
-      const inside = mtx > b.x && mty > b.y && mtx < b.x + b.w - 1 && mty < b.y + b.h - 1;
-      if (inside) continue;
-      // 外壁のどこかが見えているか
+    const mx = me ? me.x / TILE : -999;
+    const my = me ? me.y / TILE : -999;
+    const k = 1 - Math.exp(-this.roofDt * 9);
+    this.world.buildings.forEach((b, i) => {
+      if (b.x * TILE > x1 || b.y * TILE > y1 || (b.x + b.w) * TILE < x0 || (b.y + b.h) * TILE < y0) return;
+      // 外壁のどこかが見えているか（地図の「探索済み」に使う）
       let seen = false;
       for (let tx = b.x; tx < b.x + b.w && !seen; tx++) seen = this.vision.tileVisible(tx, b.y) || this.vision.tileVisible(tx, b.y + b.h - 1);
       for (let ty = b.y; ty < b.y + b.h && !seen; ty++) seen = this.vision.tileVisible(b.x, ty) || this.vision.tileVisible(b.x + b.w - 1, ty);
-      if (seen !== seenPass) continue;
+      if (seen !== seenPass) return;
       if (seen) this.vision.markExplored(b.x, b.y, b.w, b.h);
-      // 建物ごとに焼き込んだ屋根テクスチャを、見えていないタイルの分だけ切り出して描く
-      const roof = roofCanvas(b);
-      let all = true;
-      for (let ty = b.y; ty < b.y + b.h && all; ty++) for (let tx = b.x; tx < b.x + b.w && all; tx++) if (this.vision.tileVisible(tx, ty)) all = false;
-      if (all) {
-        ctx.drawImage(roof, b.x * TILE, b.y * TILE);
-        continue;
-      }
-      // 見えていないタイルを横方向の帯にまとめてクリップし、屋根は1回で描く（drawImage の回数を減らす）
-      ctx.save();
-      ctx.beginPath();
-      let any = false;
-      for (let ty = b.y; ty < b.y + b.h; ty++) {
-        let run = -1;
-        for (let tx = b.x; tx <= b.x + b.w; tx++) {
-          const hidden = tx < b.x + b.w && !this.vision.tileVisible(tx, ty);
-          if (hidden && run < 0) run = tx;
-          else if (!hidden && run >= 0) {
-            ctx.rect(run * TILE, ty * TILE, (tx - run) * TILE, TILE);
-            run = -1;
-            any = true;
-          }
+      const near = mx > b.x - 3 && mx < b.x + b.w + 3 && my > b.y - 3 && my < b.y + b.h + 3;
+      const cur = this.roofAlpha.get(i) ?? (near ? 0 : 1);
+      const a = cur + ((near ? 0 : 1) - cur) * k;
+      this.roofAlpha.set(i, a);
+      // 屋根を外した建物：中の見えていない所は暗闇（タイルごとに少しずつ明暗を変えて、境目をちらつかせない）
+      if (a < 0.98) {
+        let dark = this.roomDark.get(i);
+        if (!dark) {
+          dark = new Float32Array(b.w * b.h).fill(1);
+          this.roomDark.set(i, dark);
         }
+        const kd = 1 - Math.exp(-this.roofDt * 7);
+        ctx.fillStyle = '#07080a';
+        for (let ty = 0; ty < b.h; ty++)
+          for (let tx = 0; tx < b.w; tx++) {
+            const j = ty * b.w + tx;
+            const target = this.vision.tileVisible(b.x + tx, b.y + ty) ? 0 : 1;
+            dark[j] += (target - dark[j]) * kd;
+            const v = dark[j] * (1 - a) * 0.93;
+            if (v < 0.03) continue;
+            ctx.globalAlpha = v;
+            ctx.fillRect((b.x + tx) * TILE, (b.y + ty) * TILE, TILE, TILE);
+          }
+        ctx.globalAlpha = 1;
       }
-      if (any) {
-        ctx.clip();
-        ctx.drawImage(roof, b.x * TILE, b.y * TILE);
-      }
-      ctx.restore();
-    }
+      if (a < 0.02) return;
+      ctx.globalAlpha = a;
+      ctx.drawImage(roofCanvas(b), b.x * TILE, b.y * TILE);
+      ctx.globalAlpha = 1;
+    });
   }
+  private roomDark = new Map<number, Float32Array>();
 
   /** フィルムグレイン＋彩度を落とす色調補正 */
 

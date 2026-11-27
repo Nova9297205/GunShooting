@@ -522,6 +522,7 @@ export class HostSimulation {
     this.dropAt = DAY_SECONDS * (0.08 + Math.random() * 0.2);
     this.newJobs(true);
     this.spawnVehicles();
+    this.setupBase(lobby.length);
     this.dayTip();
     // 初日の天候はランダム（霧で始まることもある）
     if (Math.random() < 0.3) this.setWeather(Math.random() < 0.5 ? 'fog' : 'rain', true);
@@ -1796,6 +1797,29 @@ export class HostSimulation {
       }
     }
     this.updateMoveMods(p);
+  }
+
+  /** 拠点の初期配置：ベッドは参加人数分。倉庫は 1 つ（個人・共有はタブで切り替え） */
+  private setupBase(n: number): void {
+    const bx = SAFEHOUSE.x + 2;
+    const by = SAFEHOUSE.y + 2;
+    const inHouse = (o: SimObj) => o.tx > bx && o.ty > by && o.tx < bx + 7 && o.ty < by + 5;
+    const drop = (o: SimObj) => {
+      this.world.removeObj(o.id);
+      this.changed.delete(o.id);
+      this.removed.push(o.id);
+    };
+    for (const o of [...this.world.objects.values()]) if (o.kind === 'stash' && inHouse(o)) drop(o);
+    const beds = [...this.world.objects.values()].filter((o) => o.kind === 'bed' && inHouse(o)).sort((a, b) => a.tx - b.tx);
+    for (let i = Math.max(1, n); i < beds.length; i++) drop(beds[i]);
+    for (let i = beds.length; i < n; i++) {
+      const tx = bx + 1 + i;
+      const ty = by + 4;
+      if (this.world.objAt(tx, ty) || this.world.solid(tx, ty)) continue;
+      const o: SimObj = { id: this.nextObjId++, kind: 'bed', tx, ty, hp: 1, maxHp: 1, ready: 0, regrowT: 0 };
+      this.world.setObj(o);
+      this.changed.add(o.id);
+    }
   }
 
   // ======================== 車両 ========================

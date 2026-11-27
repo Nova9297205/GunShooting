@@ -112,7 +112,7 @@ export function padText(t: string, g: Glyphs): string {
 }
 
 /** メニュー・パネルで、十字キー／左スティックで選べる要素 */
-const FOCUSABLE = '[data-act], [data-tab], [data-id], [data-build], [data-upg], [data-mod], [data-pick], button:not([disabled]), input, select';
+const FOCUSABLE = '.ccard, [data-act], [data-tab], [data-id], [data-build], [data-upg], [data-mod], [data-pick], button:not([disabled]), input, select';
 
 /**
  * 1台のコントローラーの読み取り：スティック・ボタン（押した瞬間）・メニュー用のカーソル・振動。
@@ -280,6 +280,8 @@ export class PadReader {
             items.find((e) => e.dataset.pick !== undefined && e.classList.contains('on')) ??
             items.find((e) => e.dataset.act === 'cont') ??
             items.find((e) => e.dataset.act === 'bag') ??
+            items.find((e) => e.classList.contains('ccard') && e.classList.contains('ready')) ??
+            items.find((e) => e.classList.contains('ccard')) ??
             items.find((e) => e.dataset.id || e.dataset.build || e.dataset.upg || e.dataset.mod || e.dataset.pick) ??
             items.find((e) => !e.classList.contains('x-btn') && !e.dataset.tab) ??
             items[0] ??
@@ -331,7 +333,12 @@ export class PadReader {
     }
     if (this.pressed.has(PAD.A)) this.click(target, 0);
     if (this.pressed.has(PAD.X)) this.click(target, 2);
-    if (this.pressed.has(PAD.Y) && target) this.click(target, 0, true);
+    if (this.pressed.has(PAD.Y)) {
+      // Y：入れ物を開いているときは「全部取る」、それ以外は選んだ物を捨てる
+      const all = scope?.querySelector<HTMLElement>('[data-act="takeall"]');
+      if (all && visible(all)) this.click(all, 0);
+      else if (target) this.click(target, 0, true);
+    }
     if (this.pressed.has(PAD.B)) {
       if (this.onBack) this.onBack();
       else {
@@ -359,6 +366,12 @@ export class PadReader {
   /** カーソルの位置を押す（0 = 左クリック、2 = 右クリック） */
   private click(el: HTMLElement | null, button: 0 | 2, shift = false): void {
     if (!el) return;
+    // レシピなどのカードは、中の（押せる）ボタンを押す
+    if (el.classList.contains('ccard')) {
+      const b = el.querySelector<HTMLElement>('button:not([disabled])');
+      if (!b) return;
+      el = b;
+    }
     const useFocus = el === this.focusEl && !this.useCursor;
     const bb = el.getBoundingClientRect();
     const x = useFocus ? bb.x + bb.width / 2 : this.cx;

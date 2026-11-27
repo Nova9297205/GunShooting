@@ -1095,7 +1095,7 @@ export class GameSession {
         if (el.dataset.orig === undefined) el.dataset.orig = el.innerHTML;
         const want = g
           ? el.classList.contains('ph-sub')
-            ? padText('{A} 移す／使う ・ {X} 使う・装備 ・ {Y} 捨てる ・ {LB}/{RB} タブ', g)
+            ? padText('{A} 移す／使う ・ {X} 使う・装備 ・ {Y} 全部取る（入れ物）／捨てる ・ {LB}/{RB} タブ', g)
             : padText('{B} で閉じる ・ 十字キーで選ぶ ・ 右スティックでカーソル ・ ゲームは止まりません', g)
           : el.dataset.orig;
         if (el.innerHTML !== want) el.innerHTML = want;
