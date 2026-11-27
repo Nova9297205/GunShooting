@@ -127,6 +127,8 @@ export interface PlayerSnap extends MoveBody {
   cold?: number;
   bleed?: boolean;
   frac?: number;
+  /** 背負っているリュック（バッグのマスと重さが増える） */
+  pack?: ItemId;
   /** 乗っている車の ID と座席（0 = 運転席） */
   veh?: number;
   seat?: number;

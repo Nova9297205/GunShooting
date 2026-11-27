@@ -69,6 +69,13 @@ import { jobReward, makeJobs, radioLevel, rewardMul } from './jobs';
 import { buildDef, buildSpotError, canAfford } from './build';
 import {
   addItem,
+  BACKPACK_SLOTS,
+  capacityOf,
+  lastAddLimitedByWeight,
+  loadKg,
+  PACKS,
+  setBagLimits,
+  slotKg,
   ammoOf,
   ATTACHMENTS,
   bagValue,
@@ -222,15 +229,15 @@ export function inBase(x: number, y: number): boolean {
 type LootRow = [ItemId | 'weapon' | 'attach', number, number, number];
 const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
   // 序盤の詰まりを減らす：棚・机・木箱・車からも少し弾と包帯が出る。食料は出すぎないように控えめ
-  shelf: [['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
+  shelf: [['pack1', 0.25, 1, 1], ['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
   fridge: [['can', 4.5, 1, 2], ['mre', 1, 1, 1]],
   cabinet: [['bandage', 5, 1, 2], ['chem', 4, 1, 2], ['medkit', 1.2, 1, 1], ['cloth', 2, 1, 2], ['stim', 0.35, 1, 1]],
-  locker: [['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
+  locker: [['pack1', 0.5, 1, 1], ['pack2', 0.15, 1, 1], ['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
   desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
   crate: [['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
   car: [['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
   wcase: [['ammo762', 4, 8, 20], ['ammo9', 3, 10, 20], ['shells', 3, 4, 8], ['weapon', 2, 1, 1], ['attach', 1.5, 1, 1], ['parts', 2, 1, 2], ['ammo762ap', 1, 5, 12], ['slug', 0.8, 3, 6]],
-  mcrate: [['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
+  mcrate: [['pack3', 0.35, 1, 1], ['pack2', 0.3, 1, 1], ['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
   box: [['can', 3, 1, 2], ['bandage', 2, 1, 1], ['ammo9', 2, 6, 10], ['cloth', 1, 1, 2]],
   drop: [['ammo762ap', 3, 10, 20], ['weapon', 2.5, 1, 1], ['attach', 3, 1, 1], ['stim', 2, 1, 2], ['medkit', 2, 1, 2], ['tools', 2, 1, 2], ['mre', 1.5, 1, 2], ['electronics', 1.5, 1, 3], ['valuables', 1.5, 1, 3]],
 };
@@ -302,7 +309,7 @@ export interface SaveData {
     tool: number;
     kills: number;
     xp: number[];
-    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number };
+    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number; pack?: ItemId };
   }[];
   extra?: Record<string, unknown>;
 }
@@ -647,7 +654,7 @@ export class HostSimulation {
         tool: p.tool,
         kills: p.kills,
         xp: p.xp,
-        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0 },
+        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0, pack: p.pack },
       })),
       extra: this.saveExtra(),
     };
@@ -867,6 +874,7 @@ export class HostSimulation {
         ...(p.away ? { away: true } : {}),
         ...(p.sleeping ? { sleeping: true } : {}),
         ...(p.veh !== undefined ? { veh: p.veh, seat: p.seat } : {}),
+        ...(p.pack ? { pack: p.pack } : {}),
         ...((p.rested ?? 0) > 0 ? { rested: Math.ceil(p.rested ?? 0) } : {}),
         x: r1(p.x),
         y: r1(p.y),
@@ -1078,6 +1086,12 @@ export class HostSimulation {
     if (p.away) {
       p.queue.length = 0;
       return;
+    }
+    // バッグの上限（マスと重さ）を、背負っている物・持っている武器から決め直す
+    while (p.bag.length < BACKPACK_SLOTS) p.bag.push(null);
+    {
+      const cap = capacityOf(p.pack);
+      setBagLimits(p.bag, cap.slots, cap.kg, slotKg(p.prim) + slotKg(p.sec));
     }
     for (const f of p.queue) {
       // 眠っている人は、動く・撃つ・ダッシュで目を覚ます
@@ -1486,7 +1500,7 @@ export class HostSimulation {
         const s = c?.[n(b)];
         if (!c || !s) return;
         const left = addItem(p.bag, s.id, s.n, s.w);
-        if (left === s.n) return this.pop(p, 'バックパックがいっぱい', '#c87a6a');
+        if (left === s.n) return this.pop(p, this.fullMsg(p), '#c87a6a');
         if (left > 0) s.n = left;
         else c[n(b)] = null;
         this.pop(p, ITEMS[s.id].name, '#d8c48a', 'loot');
@@ -1506,7 +1520,7 @@ export class HostSimulation {
           else c[i] = null;
         }
         if (any) this.pop(p, '回収', '#d8c48a', 'loot');
-        if (c.some((s) => s)) this.pop(p, 'バックパックがいっぱい', '#c87a6a');
+        if (c.some((s) => s)) this.pop(p, this.fullMsg(p), '#c87a6a');
         break;
       }
       case 'put': {
@@ -1534,16 +1548,21 @@ export class HostSimulation {
           if (p.hp >= p.maxHp && !(cleans && p.tox > 0) && !treats) return this.pop(p, 'HPは満タン', '#cccccc');
           this.heal(p, s.id);
         } else if (isWeapon(s.id)) this.equip(p, n(a));
+        else if (PACKS[s.id]) this.wearPack(p, n(a));
         break;
       }
       case 'equip':
         this.equip(p, n(a));
         break;
       case 'unequip': {
+        if (a === 'pack') {
+          this.takeOffPack(p);
+          break;
+        }
         const key = a === 'prim' ? 'prim' : 'sec';
         const s = p[key];
         if (!s) return;
-        if (freeSlots(p.bag) <= 0) return this.pop(p, 'バックパックがいっぱい', '#c87a6a');
+        if (freeSlots(p.bag) <= 0) return this.pop(p, this.fullMsg(p), '#c87a6a');
         addItem(p.bag, s.id, 1, s.w);
         p[key] = null;
         p.reloadT = 0;
@@ -1588,7 +1607,7 @@ export class HostSimulation {
           const s = box[i];
           if (!s) return;
           const left = addItem(p.bag, s.id, s.n, s.w);
-          if (left === s.n) return this.pop(p, 'バックパックがいっぱい', '#c87a6a');
+          if (left === s.n) return this.pop(p, this.fullMsg(p), '#c87a6a');
           if (left > 0) s.n = left;
           else box[i] = null;
         }
@@ -1610,7 +1629,7 @@ export class HostSimulation {
         const next = ammoOf(slot.id, { ...slot.w, ap: want });
         if (countItem(p.bag, next) <= 0) return this.pop(p, `${ITEMS[next].name}を持っていない`, '#c87a6a');
         const left = addItem(p.bag, ammoOf(slot.id, slot.w), slot.w.mag);
-        if (left > 0) return this.pop(p, 'バックパックがいっぱい', '#c87a6a');
+        if (left > 0) return this.pop(p, this.fullMsg(p), '#c87a6a');
         slot.w.mag = 0;
         if (want) slot.w.ap = 1;
         else delete slot.w.ap;
@@ -1664,7 +1683,7 @@ export class HostSimulation {
         const att = ATTACHMENTS.find((x) => x === b);
         if (!slot || !slot.w || !att || !isWeapon(slot.id)) return;
         if (slot.w[att]) {
-          if (addItem(p.bag, att, 1) > 0) return this.pop(p, 'バックパックがいっぱい', '#c87a6a');
+          if (addItem(p.bag, att, 1) > 0) return this.pop(p, this.fullMsg(p), '#c87a6a');
           delete slot.w[att];
           this.pop(p, `${ITEMS[att].name}を外した`, '#d8c48a', 'craft');
         } else {
@@ -1685,6 +1704,37 @@ export class HostSimulation {
         break;
       }
     }
+  }
+
+  /** バッグがいっぱい／重すぎる、の出し分け */
+  private fullMsg(p: SimPlayer): string {
+    const cap = capacityOf(p.pack);
+    return lastAddLimitedByWeight ? `重すぎる（${loadKg(p).toFixed(1)}/${cap.kg}kg）— リュックで増やせる` : `バッグがいっぱい（${cap.slots}マス）`;
+  }
+
+  /** リュックを背負う（背負っていた物はバッグへ） */
+  private wearPack(p: SimPlayer, idx: number): void {
+    const s = p.bag[idx];
+    if (!s || !PACKS[s.id]) return;
+    const old = p.pack;
+    p.bag[idx] = old ? { id: old, n: 1 } : null;
+    p.pack = s.id;
+    const c = capacityOf(p.pack);
+    this.pop(p, `${ITEMS[s.id].name}を背負った：${c.slots}マス・${c.kg}kg`, '#d8c48a', 'craft');
+  }
+
+  /** リュックを下ろす：増えていたマスが空で、重さも収まるときだけ */
+  private takeOffPack(p: SimPlayer): void {
+    if (!p.pack) return;
+    const base = capacityOf(null);
+    if (p.bag.slice(base.slots).some((x) => x)) return this.pop(p, `下ろす前に、リュックの分のマス（${base.slots + 1}番目以降）を空けよう`, '#c87a6a');
+    const kg = loadKg(p) + 0.01;
+    if (kg > base.kg) return this.pop(p, `重すぎて下ろせない（${kg.toFixed(1)}/${base.kg}kg）`, '#c87a6a');
+    const free = p.bag.slice(0, base.slots).findIndex((x) => !x);
+    if (free < 0) return this.pop(p, 'バッグに空きがない', '#c87a6a');
+    p.bag[free] = { id: p.pack, n: 1 };
+    p.pack = undefined;
+    this.pop(p, 'リュックを下ろした', '#d8c48a');
   }
 
   private equip(p: SimPlayer, idx: number): void {

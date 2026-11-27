@@ -235,6 +235,8 @@ export const RECIPES: Recipe[] = [
   { id: 'suppressor', name: 'サプレッサー', desc: '銃声を約1/3に抑える', bench: true, lv: 3, cost: { parts: 2, scrap: 4, tools: 1 }, out: { id: 'suppressor', n: 1 } },
   { id: 'scope', name: '4倍スコープ', desc: '集弾率が大きく上がり視界が伸びる', bench: true, lv: 3, cost: { parts: 2, electronics: 2, scrap: 2 }, out: { id: 'scope', n: 1 } },
   { id: 'splint', name: '添え木', desc: '骨折の手当て（足が遅い・ダッシュできない状態を治す）', bench: false, cost: { cloth: 2, scrap: 1 }, out: { id: 'splint', n: 1 } },
+  { id: 'pack1', name: '学生かばん', desc: '背負うとバッグ +3マス・+6kg', bench: false, cost: { cloth: 5, scrap: 1 }, out: { id: 'pack1', n: 1 } },
+  { id: 'pack2', name: '登山リュック', desc: '背負うとバッグ +6マス・+13kg', bench: true, lv: 2, cost: { cloth: 9, scrap: 4, parts: 1 }, out: { id: 'pack2', n: 1 } },
   { id: 'coat', name: '防寒コート', desc: '持っているだけで雨・夜の冷えが半分に', bench: true, cost: { cloth: 6, scrap: 1 }, out: { id: 'coat', n: 1 } },
   { id: 'stew', name: '温かいシチュー', desc: '空腹 +60・HP +20・6分間 休息済み', bench: false, station: 'stove', cost: { water: 1, can: 1, herbs: 1 }, out: { id: 'stew', n: 1 } },
   { id: 'tea', name: 'ハーブティー', desc: '汚染度 -30・HP +8・2分間 休息済み', bench: false, station: 'stove', cost: { water: 1, herbs: 1 }, out: { id: 'tea', n: 1 } },

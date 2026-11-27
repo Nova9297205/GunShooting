@@ -6,7 +6,7 @@
 //   ・右クリック → 使う・装備   ・Shift+クリック → 足元に捨てる
 //   マスにカーソルを合わせると右端の詳細欄に種類・効果・数値が出る
 // ============================================================
-import { ATTACHMENTS, effectiveStats, ITEMS, type ItemCat, type ItemId, isWeapon, WEAPON_STATS, type WeaponId } from '../game/items';
+import { ATTACHMENTS, capacityOf, effectiveStats, ITEMS, type ItemCat, type ItemId, isWeapon, loadKg, slotKg, WEAPON_STATS, type WeaponId } from '../game/items';
 import { levelOf, MAX_SKILL_LV, SKILLS, xpForLevel } from '../game/progression';
 import type { PlayerSnap, Slot, StorageState } from '../types';
 
@@ -142,7 +142,7 @@ export class InventoryPanel {
     if (act === 'bag') return c.me.bag[i] ?? null;
     if (act === 'cont') return c.cont?.slots[i] ?? null;
     if (act === 'store') return this.storageBox(c)?.[i] ?? null;
-    if (act === 'equip') return slot === 'prim' ? c.me.prim : slot === 'sec' ? c.me.sec : null;
+    if (act === 'equip') return slot === 'prim' ? c.me.prim : slot === 'sec' ? c.me.sec : slot === 'pack' && c.me.pack ? { id: c.me.pack, n: 1 } : null;
     return null;
   }
 
@@ -270,13 +270,22 @@ export class InventoryPanel {
     if (!this.open) return;
     const st = this.storageBox(c);
     if (this.giveTo >= 0 && !c.allies.some((a) => a.id === this.giveTo)) this.giveTo = -1;
-    const key = JSON.stringify([c.me.xp, c.me.bag, c.me.prim, c.me.sec, c.cont, st, this.tab, c.allies, this.giveTo]);
+    const key = JSON.stringify([c.me.xp, c.me.bag, c.me.prim, c.me.sec, c.me.pack, c.cont, st, this.tab, c.allies, this.giveTo]);
     if (key === this.lastKey) return;
     this.lastKey = key;
 
-    const used = c.me.bag.filter((s) => s).length;
+    const cap = capacityOf(c.me.pack);
+    const used = c.me.bag.slice(0, cap.slots).filter((s) => s).length;
+    const kg = loadKg(c.me);
     const equip = (k: 'prim' | 'sec', label: string) => `<div class="eq"><small>${label}</small>${this.cell(c.me[k], 'equip', 0, ' wide', k)}</div>`;
-    const bag = c.me.bag.map((s, i) => this.cell(s, 'bag', i)).join('');
+    const packCell = `<div class="eq"><small>PACK / リュック</small>${this.cell(c.me.pack ? { id: c.me.pack, n: 1 } : null, 'equip', 0, ' wide', 'pack')}</div>`;
+    // リュックの分を超えたマスは鍵（はみ出した物があれば赤で見せ、取り出せる）
+    const bag = c.me.bag
+      .map((s, i) => (i < cap.slots ? this.cell(s, 'bag', i) : s ? this.cell(s, 'bag', i).replace('class="islot', 'class="islot over') : '<div class="islot locked" title="リュックを背負うと使える">🔒</div>'))
+      .join('');
+    const kgR = Math.min(1, kg / cap.kg);
+    const kgBar = `<div class="kgbar ${kgR > 0.9 ? 'hi' : ''}"><i style="width:${Math.round(kgR * 100)}%"></i><span>${kg.toFixed(1)} / ${cap.kg} kg</span></div>`;
+    void slotKg;
     let right = '';
     if (c.cont) {
       const any = c.cont.slots.some((s) => s);
@@ -313,10 +322,11 @@ export class InventoryPanel {
     this.body.innerHTML = `<div class="inv-col">
         <div class="box">
           <div class="sec-head">装備<small class="right">EQUIPMENT</small></div>
-          <div class="eqrow">${equip('prim', 'PRIMARY / メイン')}${equip('sec', 'SIDEARM / サブ')}</div>
+          <div class="eqrow">${equip('prim', 'PRIMARY / メイン')}${equip('sec', 'SIDEARM / サブ')}${packCell}</div>
         </div>
         <div class="box">
-          <div class="sec-head">バックパック<small class="right">${used}/${c.me.bag.length}</small></div>
+          <div class="sec-head">バッグ<small class="right">${used}/${cap.slots} マス</small></div>
+          ${kgBar}
           ${give ? `<div style="margin-bottom:6px">${give}</div>` : ''}
           <div class="igrid g4">${bag}</div>
         </div>

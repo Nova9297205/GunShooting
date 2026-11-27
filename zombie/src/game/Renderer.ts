@@ -44,7 +44,7 @@ import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
 import { type Glyphs, padText } from '../ui/Gamepad';
-import { ATTACHMENTS, CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
+import { ATTACHMENTS, capacityOf, CONTAINER_NAMES, countItem, loadKg, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
 /** 落ち影と側面を持つ「高い」建築物 */
@@ -2755,20 +2755,25 @@ export class Renderer {
     wline('prim', 'PRI', y + 102);
     wline('sec', 'SEC', y + 120);
     // バッグの使用状況
-    const used = me.bag.filter((b) => b).length;
+    // バッグ：マス（左）と重さ（右）
+    const cap = capacityOf(me.pack);
+    const used = me.bag.slice(0, cap.slots).filter((b) => b).length;
+    const kg = loadKg(me);
     ctx.textAlign = 'left';
     ctx.font = `9px ${MONO}`;
     ctx.fillStyle = '#8c8872';
     ctx.fillText('BAG', x + 10, y + 138);
-    const cw = (pw - 112) / me.bag.length;
-    for (let i = 0; i < me.bag.length; i++) {
+    const cw = (pw - 150) / cap.slots;
+    for (let i = 0; i < cap.slots; i++) {
       ctx.fillStyle = me.bag[i] ? '#b8a878' : 'rgba(255,255,255,0.1)';
-      ctx.fillRect(x + 50 + i * cw, y + 134, cw - 2, 8);
+      ctx.fillRect(x + 40 + i * cw, y + 134, cw - 1.5, 8);
     }
     ctx.textAlign = 'right';
-    ctx.font = `12px ${MONO}`;
-    ctx.fillStyle = used >= me.bag.length ? '#ef8a70' : '#e6e1cc';
-    ctx.fillText(`${used}/${me.bag.length}`, x + pw - 10, y + 138);
+    ctx.font = `11px ${MONO}`;
+    ctx.fillStyle = used >= cap.slots ? '#ef8a70' : '#e6e1cc';
+    ctx.fillText(`${used}/${cap.slots}`, x + pw - 58, y + 138);
+    ctx.fillStyle = kg > cap.kg * 0.9 ? '#ef8a70' : '#bdb79e';
+    ctx.fillText(`${kg.toFixed(1)}/${cap.kg}kg`, x + pw - 8, y + 138);
     ctx.textAlign = 'left';
     ctx.font = `9px ${UI}`;
     ctx.fillStyle = '#6f6c5a';

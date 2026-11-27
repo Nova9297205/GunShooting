@@ -42,7 +42,10 @@ export type ItemId =
   | 'tea'
   | 'fuel'
   | 'splint'
-  | 'coat';
+  | 'coat'
+  | 'pack1'
+  | 'pack2'
+  | 'pack3';
 
 export type ItemCat = 'ammo' | 'med' | 'food' | 'mat' | 'att' | 'weapon' | 'misc';
 /** レア度（0=ありふれた 1=普通 2=レア 3=非常にレア）。UIの枠色に使う */
@@ -113,6 +116,9 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   antitox: D('antitox', '解毒剤', 3, 'med', 35, 2, '汚染度 -60・HP +10（市街中心部の病院で見つかる）'),
   herbs: D('herbs', '薬草', 8, 'med', 4, 0, 'HP +12・汚染度 -10（森林で採れる）'),
   splint: D('splint', '添え木', 3, 'med', 6, 0, '骨折の手当て。足の遅さが軽くなり、約2分半で治る（布2・鉄くず1で作れる）'),
+  pack1: D('pack1', '学生かばん', 1, 'misc', 15, 0, '背負うと バッグ +3マス・+6kg（[X]/右クリックで背負う）'),
+  pack2: D('pack2', '登山リュック', 1, 'misc', 40, 1, '背負うと バッグ +6マス・+13kg'),
+  pack3: D('pack3', '軍用バックパック', 1, 'misc', 90, 2, '背負うと バッグ +8マス・+21kg（軍用地で見つかる）'),
   coat: D('coat', '防寒コート', 1, 'misc', 20, 1, 'バックパックに入れておくと着ている扱い。雨・夜の冷えが半分になる'),
   fuel: D('fuel', 'ガソリン缶', 3, 'mat', 8, 1, '車の燃料 +35。車の残骸・倉庫・ガソリンスタンドで見つかる'),
   water: D('water', 'きれいな水', 6, 'mat', 2, 0, '雨水タンクに貯まる。かまどで料理に使う'),
@@ -164,7 +170,53 @@ export const WEAPON_STATS: Record<WeaponId, WeaponStats> = {
   dmr: W({ name: 'マークスマンライフル', ammo: 'ammo762', apAmmo: 'ammo762ap', magSize: 10, fireInterval: 0.32, reloadTime: 2.2, bulletSpeed: 1450, bulletLife: 0.9, damage: 62, spread: 0.012, recoil: 0.045, pellets: 1, knock: 170, auto: false, noiseRadius: 950, kick: 4.5, secondary: false }),
 };
 
-export const BACKPACK_SLOTS = 16;
+export const BACKPACK_SLOTS = 20;
+
+// ---------------- 持てる量：マスと重さ ----------------
+/** 何も背負っていないときのバッグ */
+export const BASE_SLOTS = 12;
+export const BASE_KG = 15;
+export const PACKS: Partial<Record<ItemId, { slots: number; kg: number }>> = {
+  pack1: { slots: 3, kg: 6 },
+  pack2: { slots: 6, kg: 13 },
+  pack3: { slots: 8, kg: 21 },
+};
+export function capacityOf(pack: ItemId | null | undefined): { slots: number; kg: number } {
+  const p = pack ? PACKS[pack] : undefined;
+  return { slots: BASE_SLOTS + (p?.slots ?? 0), kg: BASE_KG + (p?.kg ?? 0) };
+}
+/** 1 個あたりの重さ（kg） */
+const KG: Partial<Record<ItemId, number>> = {
+  ammo9: 0.012, ammo9ap: 0.014, ammo762: 0.025, ammo762ap: 0.028, shells: 0.045, slug: 0.05,
+  bandage: 0.05, medkit: 0.6, stim: 0.1, antitox: 0.15, herbs: 0.05, splint: 0.3,
+  can: 0.4, mre: 0.5, stew: 0.6, tea: 0.3, water: 0.8,
+  scrap: 0.35, cloth: 0.12, gunpowder: 0.15, parts: 0.3, chem: 0.3, electronics: 0.2, tools: 1.2, fuel: 3,
+  scope: 0.3, holo: 0.2, suppressor: 0.35, extmag: 0.25, grip: 0.2,
+  pistol: 0.9, smg: 2.4, rifle: 3.6, shotgun: 3.4, hunting: 3.3, dmr: 4.3,
+  valuables: 0.1, intel: 0.1, coat: 1.6, pack1: 0.5, pack2: 1.2, pack3: 1.8,
+};
+export function unitKg(id: ItemId): number {
+  return KG[id] ?? 0.3;
+}
+export function slotKg(s: Slot | null): number {
+  return s ? unitKg(s.id) * s.n : 0;
+}
+export function bagKg(bag: (Slot | null)[]): number {
+  let w = 0;
+  for (const s of bag) w += slotKg(s);
+  return w;
+}
+/** 背負っている物・装備も含めた重さ */
+export function loadKg(p: { bag: (Slot | null)[]; prim: Slot | null; sec: Slot | null }): number {
+  return bagKg(p.bag) + slotKg(p.prim) + slotKg(p.sec);
+}
+/** プレイヤーのバッグの上限（ホストが毎ステップ更新）。入れ物・倉庫の配列には付かない */
+const LIMITS = new WeakMap<(Slot | null)[], { slots: number; kg: number; extra: number }>();
+export function setBagLimits(bag: (Slot | null)[], slots: number, kg: number, extraKg: number): void {
+  LIMITS.set(bag, { slots, kg, extra: extraKg });
+}
+/** 重さのせいで入らなかったか（メッセージの出し分け用） */
+export let lastAddLimitedByWeight = false;
 export const ATTACHMENTS = ['scope', 'holo', 'suppressor', 'extmag', 'grip'] as const;
 export type AttachmentId = (typeof ATTACHMENTS)[number];
 
@@ -234,6 +286,20 @@ export function countItem(bag: (Slot | null)[], id: ItemId): number {
 /** アイテムを入れる。入りきらなかった数を返す */
 export function addItem(bag: (Slot | null)[], id: ItemId, n: number, w?: WeaponState): number {
   const def = ITEMS[id];
+  const lim = LIMITS.get(bag);
+  let refused = 0;
+  lastAddLimitedByWeight = false;
+  if (lim) {
+    // 重さ：入る数だけ入れ、残りは返す
+    const room = lim.kg - bagKg(bag) - lim.extra;
+    const can = Math.max(0, Math.floor((room + 1e-6) / unitKg(id)));
+    if (can < n) {
+      refused = n - can;
+      n = can;
+      lastAddLimitedByWeight = true;
+    }
+  }
+  const maxSlot = lim ? Math.min(bag.length, lim.slots) : bag.length;
   let left = n;
   if (def.stack > 1) {
     for (const s of bag) {
@@ -241,16 +307,17 @@ export function addItem(bag: (Slot | null)[], id: ItemId, n: number, w?: WeaponS
       const k = Math.min(left, def.stack - s.n);
       s.n += k;
       left -= k;
-      if (left <= 0) return 0;
+      if (left <= 0) return refused;
     }
   }
-  for (let i = 0; i < bag.length && left > 0; i++) {
+  for (let i = 0; i < maxSlot && left > 0; i++) {
     if (bag[i]) continue;
     const k = Math.min(left, def.stack);
     bag[i] = { id, n: k, ...(w ? { w: { ...w } } : {}) };
     left -= k;
   }
-  return left;
+  if (left > 0) lastAddLimitedByWeight = false;
+  return left + refused;
 }
 
 /** アイテムを取り除く。取り除けた数を返す */
@@ -268,6 +335,8 @@ export function removeItem(bag: (Slot | null)[], id: ItemId, n: number): number 
 }
 
 export function freeSlots(bag: (Slot | null)[]): number {
+  const lim = LIMITS.get(bag);
+  if (lim) return bag.slice(0, lim.slots).filter((s) => !s).length;
   return bag.filter((s) => !s).length;
 }
 
