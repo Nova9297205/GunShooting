@@ -3475,7 +3475,7 @@ export class Renderer {
       if (st.done) continue;
       const sx = X(st.tx + 0.5);
       const sy = Y(st.ty + 0.5);
-      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : '#c08af0';
+      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : st.kind === 'stash' ? '#7fd8d0' : '#c08af0';
       ctx.beginPath();
       ctx.moveTo(sx, sy - 5);
       ctx.lineTo(sx + 5, sy);
@@ -3707,7 +3707,7 @@ export class Renderer {
       if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
     }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
-    for (const st of view.sites ?? []) if (!st.done) marker((st.tx + 0.5) * TILE, (st.ty + 0.5) * TILE, st.kind === 'tower' ? '#f0c040' : '#c08af0', '◆ ', 'dot');
+    for (const st of view.sites ?? []) if (!st.done) marker((st.tx + 0.5) * TILE, (st.ty + 0.5) * TILE, st.kind === 'tower' ? '#f0c040' : st.kind === 'stash' ? '#7fd8d0' : '#c08af0', '◆ ', 'dot');
     if (me.veh === undefined) {
       let best: VehicleSnap | null = null;
       let bd = 70 * TILE;
@@ -3838,7 +3838,7 @@ export class Renderer {
       const sx = X(st.tx + 0.5);
       const sy = Y(st.ty + 0.5);
       ctx.globalAlpha = st.done ? 0.35 : 1;
-      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : '#c08af0';
+      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : st.kind === 'stash' ? '#7fd8d0' : '#c08af0';
       ctx.strokeStyle = '#140a1c';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -3963,7 +3963,7 @@ export class Renderer {
     for (const st of view.sites ?? []) {
       if (st.done) continue;
       const tw = st.kind === 'tower';
-      put({ text: `◆ ${tw ? `救助無線の部品（${st.name}）` : st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: tw ? 'rgba(240,192,64,0.94)' : 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
+      put({ text: `◆ ${st.kind === 'stash' ? '隠し物資' : tw ? `救助無線の部品（${st.name}）` : st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: tw ? 'rgba(240,192,64,0.94)' : st.kind === 'stash' ? 'rgba(127,216,208,0.92)' : 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
     }
     // 依頼の目的地の名前
     (view.jobs ?? []).forEach((j, i) => {

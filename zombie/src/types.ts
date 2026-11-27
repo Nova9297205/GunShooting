@@ -265,6 +265,7 @@ export type GameEvent =
   /** 拠点に建てた・修理した */
   | { k: 'built'; x: number; y: number; kind: ObjKind; id: number; repair?: boolean }
   | { k: 'break'; x: number; y: number; kind: ObjKind }
+  | { k: 'note'; id: number; n: number; title: string; text: string }
   | { k: 'pop'; x: number; y: number; t: string; c: string; id: number; s?: SoundKey }
   | { k: 'banner'; t: string; s: string; c: string; snd?: SoundKey }
   | { k: 'burn'; x: number; y: number }
@@ -331,7 +332,7 @@ export interface ViewState {
 /** 異変：墜落したヘリ・感染体の巣・封鎖された武器庫。見張りを倒して箱を開けると制圧 */
 export interface SiteSnap {
   id: number;
-  kind: 'heli' | 'nest' | 'armory' | 'tower';
+  kind: 'heli' | 'nest' | 'armory' | 'tower' | 'stash';
   name: string;
   tx: number;
   ty: number;
@@ -422,6 +423,8 @@ export interface GameResult {
   day: number;
   /** 救助されてクリア */
   won?: boolean;
+  /** 読んだ手記の数 */
+  notes?: number;
   run?: RunMode;
   players: { id: number; name: string; kills: number; value: number; xp: number[] }[];
 }

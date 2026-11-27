@@ -309,6 +309,7 @@ export class GameSession {
 
   /** イベントを演出（パーティクル等）と効果音の両方へ */
   private onEvent(ev: GameEvent): void {
+    if (ev.k === 'note' && ev.id === this.o.localId) this.showNote(ev);
     this.effects.handleEvent(ev, this.o.localId);
     audio.handleEvent(ev, this.o.localId);
     // ローカル協力：同じ画面のほかの人の演出にも渡す（音は 1 回だけ）
@@ -317,8 +318,37 @@ export class GameSession {
 
   /** ローカル協力の 2 人目以降：演出と、自分のコントローラーの振動 */
   localEvent(ev: GameEvent): void {
+    if (ev.k === 'note' && ev.id === this.o.localId) this.showNote(ev);
     this.effects.handleEvent(ev, this.o.localId);
     if (ev.k === 'phit' && ev.id === this.o.localId) this.pad?.rumble(0.6, 0.4, 160);
+  }
+
+  /** 手記を読んだ：画面に紙のメモを出す（ゲームは止まらない。クリック・Esc・時間で閉じる） */
+  private noteEl: HTMLDivElement | null = null;
+  private noteTimer = 0;
+  private showNote(ev: { n: number; title: string; text: string }): void {
+    this.noteEl?.remove();
+    const el = document.createElement('div');
+    el.className = 'note-card';
+    const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+    el.innerHTML = `<div class="note-n">手記 ${ev.n}/24</div><h3>${esc(ev.title)}</h3><p>${esc(ev.text)}</p><small>クリック／Esc で閉じる</small>`;
+    (this.o.root ?? document.body).appendChild(el);
+    this.noteEl = el;
+    const close = () => {
+      el.remove();
+      if (this.noteEl === el) this.noteEl = null;
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Escape' && this.noteEl === el) {
+        e.stopImmediatePropagation();
+        close();
+      }
+    };
+    el.addEventListener('click', close);
+    window.addEventListener('keydown', onKey, true);
+    window.clearTimeout(this.noteTimer);
+    this.noteTimer = window.setTimeout(close, 25000);
   }
 
   // ---------------- ネットワークからの呼び出し ----------------

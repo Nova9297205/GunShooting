@@ -2295,3 +2295,46 @@ input[type='range'] {
   color: #cfc8a8;
   font-size: 13px;
 }
+
+/* 手記：紙のメモ */
+.note-card {
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  transform: translateX(-50%) rotate(-1deg);
+  width: min(440px, calc(100% - 32px));
+  z-index: 60;
+  background: linear-gradient(#e9e0c8, #d8cba8);
+  color: #2b2418;
+  padding: 16px 20px 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.55);
+  font-family: 'Noto Serif JP', 'Noto Sans JP', serif;
+  cursor: pointer;
+  animation: note-in 0.25s ease-out;
+}
+body > .note-card {
+  position: fixed;
+}
+.note-card h3 {
+  margin: 2px 0 8px;
+  font-size: 16px;
+}
+.note-card p {
+  margin: 0 0 10px;
+  font-size: 14px;
+  line-height: 1.7;
+}
+.note-card .note-n {
+  font-size: 11px;
+  color: #6b5d40;
+}
+.note-card small {
+  color: #7a6c50;
+  font-size: 11px;
+}
+@keyframes note-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px) rotate(-1deg);
+  }
+}

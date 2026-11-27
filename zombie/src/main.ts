@@ -99,7 +99,7 @@ function renderProfile(): void {
   const recs = loadRecords().slice(0, 3);
   const recHtml = recs.length
     ? `<div class="pb-recs"><span>戦績 TOP3</span>${recs
-        .map((r, i) => `<div class="pb-rec"><i>${i + 1}</i>${r.won ? '🚁 救助 ' : ''}DAY ${r.day}・撃破 ${r.kills}・価値 ${r.value}<small>${r.mode === 'solo' ? 'ソロ' : `${r.players}人`}・${new Date(r.at).toLocaleDateString()}</small></div>`)
+        .map((r, i) => `<div class="pb-rec"><i>${i + 1}</i>${r.won ? '🚁 救助 ' : ''}DAY ${r.day}・撃破 ${r.kills}・価値 ${r.value}${r.notes ? `・手記 ${r.notes}` : ''}<small>${r.mode === 'solo' ? 'ソロ' : `${r.players}人`}・${new Date(r.at).toLocaleDateString()}</small></div>`)
         .join('')}</div>`
     : '';
   box.innerHTML = `<div class="pb-title"><span>保存済みの記録</span><span>最長生存 <b>${prof.bestDay}</b> 日 ・ 持ち帰り総額 <b>${prof.banked}</b></span></div>${SKILLS.map(
@@ -283,10 +283,10 @@ function showResult(r: GameResult): void {
   head.textContent = r.won ? 'RESCUED' : 'K.I.A.';
   head.classList.toggle('won', !!r.won);
   $('result-sub').textContent = r.won
-    ? `救助ヘリで脱出した！（${r.run === 'd30' ? '30日モード' : '期限なしモード'}・DAY ${r.day}）`
+    ? `救助ヘリで脱出した！（${r.run === 'd30' ? '30日モード' : '期限なしモード'}・DAY ${r.day}・手記 ${r.notes ?? 0}/24）`
     : r.run === 'd30'
-      ? `救助まで あと ${Math.max(0, 30 - r.day)} 日だった`
-      : '';
+      ? `救助まで あと ${Math.max(0, 30 - r.day)} 日だった・手記 ${r.notes ?? 0}/24`
+      : `読んだ手記 ${r.notes ?? 0}/24`;
   // 自分のスキル経験値・記録を保存（次回に引き継ぐ）
   const mine = r.players.find((p) => p.id === (net?.localId ?? 0));
   if (mine) {
@@ -296,7 +296,7 @@ function showResult(r: GameResult): void {
     prof.banked += mine.value;
     saveProfile(prof);
     // 戦績（上位10件）に追加
-    const { rank, best } = addRecord({ at: Date.now(), name: mine.name, day: r.day, kills: mine.kills, value: mine.value, mode, players: r.players.length, won: r.won, run: r.run });
+    const { rank, best } = addRecord({ at: Date.now(), name: mine.name, day: r.day, kills: mine.kills, value: mine.value, mode, players: r.players.length, won: r.won, run: r.run, notes: r.notes });
     $('result-record').textContent = best ? '★ 自己ベスト更新！' : rank <= 10 ? `戦績 ${rank} 位` : '';
   } else $('result-record').textContent = '';
   $('result-day').textContent = String(r.day);

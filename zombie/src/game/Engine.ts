@@ -100,6 +100,7 @@ import {
 } from './items';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
 import { type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
+import { NOTES } from './notes';
 import { TUT_ALL, TUT_BUILD, TUT_CRAFT, TUT_JOB, TUT_REWARD, TUT_SEARCH, TUT_SLEEP, TUT_STEPS } from './tutorial';
 import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
 
@@ -261,11 +262,11 @@ export function inBase(x: number, y: number): boolean {
 type LootRow = [ItemId | 'weapon' | 'attach', number, number, number];
 const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
   // 序盤の詰まりを減らす：棚・机・木箱・車からも少し弾と包帯が出る。食料は出すぎないように控えめ
-  shelf: [['machete', 0.12, 1, 1], ['pack1', 0.25, 1, 1], ['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
+  shelf: [['note', 0.3, 1, 1], ['machete', 0.12, 1, 1], ['pack1', 0.25, 1, 1], ['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
   fridge: [['can', 4.5, 1, 2], ['mre', 1, 1, 1]],
-  cabinet: [['bandage', 5, 1, 2], ['chem', 4, 1, 2], ['medkit', 1.2, 1, 1], ['cloth', 2, 1, 2], ['stim', 0.35, 1, 1]],
-  locker: [['fireaxe', 0.3, 1, 1], ['crowbar', 0.25, 1, 1], ['pack1', 0.5, 1, 1], ['pack2', 0.15, 1, 1], ['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
-  desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
+  cabinet: [['note', 0.3, 1, 1], ['bandage', 5, 1, 2], ['chem', 4, 1, 2], ['medkit', 1.2, 1, 1], ['cloth', 2, 1, 2], ['stim', 0.35, 1, 1]],
+  locker: [['note', 0.35, 1, 1], ['fireaxe', 0.3, 1, 1], ['crowbar', 0.25, 1, 1], ['pack1', 0.5, 1, 1], ['pack2', 0.15, 1, 1], ['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
+  desk: [['note', 0.6, 1, 1], ['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
   crate: [['crowbar', 0.35, 1, 1], ['fireaxe', 0.12, 1, 1], ['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
   car: [['crowbar', 0.3, 1, 1], ['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
   safe: [['valuables', 4, 1, 3], ['weapon', 2.2, 1, 1], ['attach', 2, 1, 1], ['ammo762ap', 1.5, 6, 14], ['ammo9ap', 1.5, 8, 16], ['upkit', 1.2, 1, 1], ['medkit', 1.5, 1, 1], ['stim', 1, 1, 1], ['pack2', 0.6, 1, 1], ['tools', 0.8, 1, 1]],
@@ -701,7 +702,7 @@ export class HostSimulation {
 
   /** 追加の保存項目（拡張用） */
   protected saveExtra(): Record<string, unknown> {
-    return { runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
+    return { notesRead: this.notesRead, runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
   }
 
   /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
@@ -721,6 +722,7 @@ export class HostSimulation {
     // 古いセーブは「期限なし」。通信塔は新しく置いたものを使う
     sim.runMode = rx?.runMode ?? 'endless';
     if (rx?.rescue) sim.rescue = { ...rx.rescue };
+    sim.notesRead = (data.extra as { notesRead?: number } | undefined)?.notesRead ?? 0;
     for (const id of data.removed) {
       sim.world.removeObj(id);
       sim.everRemoved.add(id);
@@ -1077,6 +1079,7 @@ export class HostSimulation {
         day: this.day,
         won,
         run: this.runMode,
+        notes: this.notesRead,
         players: this.players.map((p) => ({
           id: p.id,
           name: p.name,
@@ -1707,6 +1710,7 @@ export class HostSimulation {
         } else if (isWeapon(s.id)) this.equip(p, n(a));
         else if (PACKS[s.id]) this.wearPack(p, n(a));
         else if (MELEE_STATS[s.id as MeleeId]) this.equipMelee(p, n(a));
+        else if (s.id === 'note') this.readNote(p, n(a));
         else if (s.id === 'decoy' || s.id === 'pipebomb') this.throwItem(p, s.id);
         else if (s.id === 'upkit') this.upgradeWeapon(p);
         break;
@@ -2372,12 +2376,14 @@ export class HostSimulation {
       const crate = this.world.objects.get(st.crate);
       if (!crate || !crate.ready) {
         st.done = true;
-        if (st.kind === 'tower') this.events.push({ k: 'feed', cat: 'up', t: `${st.name}を制圧 — 救助無線の部品を拠点の無線へ持ち帰れ`, c: '#f0d070', snd: 'clear' });
+        if (st.kind === 'stash') this.events.push({ k: 'feed', cat: 'loot', t: `${st.name}を見つけた`, c: '#7fd8d0', snd: 'clear' });
+        else if (st.kind === 'tower') this.events.push({ k: 'feed', cat: 'up', t: `${st.name}を制圧 — 救助無線の部品を拠点の無線へ持ち帰れ`, c: '#f0d070', snd: 'clear' });
         else this.events.push({ k: 'feed', cat: 'up', t: `異変を制圧：${st.name}`, c: '#c08af0', snd: 'clear' });
         for (const p of this.players) if (p.status === 'alive') this.gainXp(p, 1, 30);
         continue;
       }
       // 誰かが近づいたら見張りを出す（精鋭を含む）
+      if (st.kind === 'stash') continue;
       if (!st.guards && this.players.some((p) => p.status === 'alive' && Math.hypot(p.x / TILE - st.tx, p.y / TILE - st.ty) < 40)) {
         st.guards = true;
         const tier = this.tierAt(st.tx, st.ty);
@@ -3452,6 +3458,44 @@ export class HostSimulation {
       z.alert = 1;
       return;
     }
+  }
+
+  // ======================== 手記と隠し物資 ========================
+  /** これまでに読んだ手記の数（話の続き・戦績） */
+  notesRead = 0;
+  /** 手記を読む：話の続きと、隠し物資の場所（地図に印） */
+  private readNote(p: SimPlayer, idx: number): void {
+    const s = p.bag[idx];
+    if (!s || s.id !== 'note') return;
+    s.n--;
+    if (s.n <= 0) p.bag[idx] = null;
+    const n = this.notesRead % NOTES.length;
+    this.notesRead++;
+    // 隠し物資：まだ使っていない施設（近い所から遠い所まで）
+    const used = new Set([...this.sites, ...this.rsites].map((x) => `${x.tx},${x.ty}`));
+    const cands = this.world.locations.map((l, i) => ({ l, i })).filter(({ l }) => l.kind !== 'base' && l.tier <= 3 && !used.has(`${l.x},${l.y}`));
+    let place = '';
+    for (let t = 0; t < 12 && cands.length; t++) {
+      const { l, i } = cands.splice(Math.floor(Math.random() * cands.length), 1)[0];
+      const spot = this.crateSpot(i);
+      if (!spot) continue;
+      const o: SimObj = { id: this.nextObjId++, kind: 'crate', tx: spot[0], ty: spot[1], hp: 1, maxHp: 1, ready: 1, regrowT: 0 };
+      this.world.setObj(o);
+      this.changed.add(o.id);
+      const c = emptyBag(8);
+      addItem(c, 'can', 2 + Math.floor(Math.random() * 2));
+      addItem(c, Math.random() < 0.5 ? 'ammo9' : 'ammo762', 15 + Math.floor(Math.random() * 15));
+      addItem(c, Math.random() < 0.5 ? 'bandage' : 'medkit', Math.random() < 0.5 ? 2 : 1);
+      addItem(c, (['parts', 'tools', 'electronics', 'gunpowder'] as ItemId[])[Math.floor(Math.random() * 4)], 2);
+      if (Math.random() < 0.3) addItem(c, 'upkit', 1);
+      this.contents.set(o.id, c);
+      place = l.name;
+      this.rsites.push({ id: this.siteSeq++, kind: 'stash', name: `${l.name}の隠し物資`, tx: spot[0], ty: spot[1], crate: o.id, guards: false });
+      break;
+    }
+    const note = NOTES[n];
+    this.events.push({ k: 'note', id: p.id, n: n + 1, title: note.title, text: note.text.replace('{loc}', place || 'どこか') });
+    if (place) this.events.push({ k: 'feed', cat: 'info', t: `${p.name} が手記を読んだ（${this.notesRead}/${NOTES.length}）— ${place}に隠し物資（地図に◆）`, c: '#7fd8d0' });
   }
 
   // ======================== 精鋭の特性 ========================

@@ -169,6 +169,8 @@ export interface RunRecord {
   /** 救助されてクリア */
   won?: boolean;
   run?: 'd30' | 'endless';
+  /** 読んだ手記の数 */
+  notes?: number;
 }
 const REC_KEY = 'deadnights2d.records';
 
