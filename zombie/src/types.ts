@@ -34,6 +34,7 @@ export interface RescueSnap {
 
 /** マップ上のオブジェクト種別（設備・家具・入れ物・ドアなど） */
 export type ObjKind =
+  | 'lever'
   | 'safe'
   | 'barrel'
   | 'tree'
@@ -324,6 +325,8 @@ export interface ViewState {
   winter?: boolean;
   /** 救出を待つ生存者（ついてくる人） */
   npcs?: { id: number; x: number; y: number; a: number; hp: number; role: string; follow: number }[];
+  /** 二人でレバーを引くまで閉じている箱（ID） */
+  locks?: number[];
   /** 拠点にいる生存者の役割 */
   survivors?: string[];
   /** 酸だまり（地面）と、飛んでいる酸 */

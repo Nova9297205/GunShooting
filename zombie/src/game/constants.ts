@@ -149,6 +149,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
   locker: 1,
   wcase: 1,
   safe: 1,
+  lever: 1,
   fridge: 1,
   desk: 1,
   bed: 1,

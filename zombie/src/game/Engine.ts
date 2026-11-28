@@ -108,6 +108,9 @@ interface SimPlayer extends PlayerSnap {
   queue: InputFrame[];
   /** 酸だまりのダメージ間隔 */
   acidT?: number;
+  heavyTold?: boolean;
+  /** 窓をひとりでよじ登っている */
+  climb?: { t: number; dur: number; x: number; y: number; toX: number; toY: number } | null;
   /** 骨折が治るまでの秒数 */
   fracT?: number;
   fire: boolean;
@@ -707,7 +710,7 @@ export class HostSimulation {
 
   /** 追加の保存項目（拡張用） */
   protected saveExtra(): Record<string, unknown> {
-    return { survivors: this.survivors, notesRead: this.notesRead, runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
+    return { locks: [...this.locks.entries()].map(([k, v]) => [k, v.levers]), survivors: this.survivors, notesRead: this.notesRead, runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
   }
 
   /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
@@ -718,6 +721,7 @@ export class HostSimulation {
     if (rx?.rsites) {
       // 生成し直したときの通信塔の箱は捨て、保存してあった物を使う
       for (const st of sim.rsites) {
+        for (const id of st.levers ?? []) sim.world.removeObj(id);
         sim.world.removeObj(st.crate);
         sim.contents.delete(st.crate);
         sim.changed.delete(st.crate);
@@ -729,6 +733,8 @@ export class HostSimulation {
     if (rx?.rescue) sim.rescue = { ...rx.rescue };
     sim.notesRead = (data.extra as { notesRead?: number } | undefined)?.notesRead ?? 0;
     sim.survivors = (data.extra as { survivors?: string[] } | undefined)?.survivors ?? [];
+    const lk = (data.extra as { locks?: [number, number[]][] } | undefined)?.locks;
+    if (lk) sim.locks = new Map(lk.map(([k, v]) => [k, { levers: v, pulled: new Map() }]));
     for (const id of data.removed) {
       sim.world.removeObj(id);
       sim.everRemoved.add(id);
@@ -941,6 +947,7 @@ export class HostSimulation {
       rescue: this.rescueSnap(),
       ...(this.npcs.length ? { npcs: this.npcs.map((n) => ({ id: n.id, x: Math.round(n.x), y: Math.round(n.y), a: r2(n.a), hp: Math.round(n.hp), role: n.role, follow: n.follow })) } : {}),
       ...(this.survivors.length ? { survivors: this.survivors } : {}),
+      ...(this.locks.size ? { locks: [...this.locks.keys()] } : {}),
       ...(this.winter() ? { winter: true } : {}),
       ...(this.acid.length ? { acid: this.acid.map((a) => ({ x: Math.round(a.x), y: Math.round(a.y), r: a.r, t: r1(a.t) })) } : {}),
       ...(this.spits.length ? { spits: this.spits.map((q) => ({ sx: Math.round(q.sx), sy: Math.round(q.sy), tx: Math.round(q.tx), ty: Math.round(q.ty), p: r2(1 - q.t / q.dur) })) } : {}),
@@ -1342,6 +1349,17 @@ export class HostSimulation {
           p.search = null;
           this.openContainer(p, o);
         }
+      }
+    }
+    // 窓をよじ登る（動いたら中断）
+    if (p.climb) {
+      const c = p.climb;
+      if (Math.hypot(p.x - c.x, p.y - c.y) > 26) p.climb = null;
+      else if ((c.t += dt) >= c.dur) {
+        p.climb = null;
+        p.x = c.toX;
+        p.y = c.toY;
+        this.pop(p, '窓を乗り越えた', '#cccccc');
       }
     }
     // 中身を見ている入れ物から離れたら閉じる
@@ -2028,7 +2046,15 @@ export class HostSimulation {
   /** 歩く速さの倍率とダッシュ可否（ゲストの予測でも同じ値を使う） */
   private updateMoveMods(p: SimPlayer): void {
     const k = Math.max(0, ((p.fatigue ?? 0) - FATIGUE_BAD) / (100 - FATIGUE_BAD));
-    p.spdMul = r2((p.frac === 1 ? 0.7 : p.frac === 2 ? 0.88 : 1) * (1 - 0.18 * k));
+    // 重い荷物（大型バッテリー）：ひとりだと遅い。仲間がそばにいれば二人で運べる
+    const heavy = countItem(p.bag, 'rpart3') > 0;
+    const helper = heavy && this.players.some((q) => q !== p && q.status === 'alive' && !q.away && Math.hypot(q.x - p.x, q.y - p.y) < 100);
+    const hv = heavy ? (helper ? 0.9 : 0.55) : 1;
+    if (heavy && !p.heavyTold) {
+      p.heavyTold = true;
+      this.pop(p, '大型バッテリーは重い：ひとりだと遅い。仲間がそばにいれば二人で運べる', '#e0c060');
+    }
+    p.spdMul = r2((p.frac === 1 ? 0.7 : p.frac === 2 ? 0.88 : 1) * (1 - 0.18 * k) * hv);
     p.noDash = p.frac === 1;
   }
 
@@ -2455,7 +2481,7 @@ export class HostSimulation {
   /** 救助の進み具合：stage 0 部品集め・1 修理待ち・2 呼べる・3 呼んだ。day = 救助が来る日（0 = 未定） */
   rescue = { stage: 0, parts: 0, day: 0 };
   /** 救助無線の部品がある場所（通信塔など）。毎朝入れ替わる異変とは別で、ずっと残る */
-  rsites: (SiteSnap & { guards: boolean; crates?: number[] })[] = [];
+  rsites: (SiteSnap & { guards: boolean; crates?: number[]; levers?: number[] })[] = [];
   /** 救助ヘリが着くまでの演出の残り秒 */
   private winT = 0;
   /** 救助を呼ぶ前の確認（もう一度 [F]） */
@@ -2504,7 +2530,35 @@ export class HostSimulation {
         if (k >= 1) addItem(c, 'medkit', 1);
         if (k >= 2) addItem(c, 'upkit', 1);
         this.contents.set(o.id, c);
-        const st = { id: this.siteSeq++, kind: 'tower' as const, name: `${l.name}の${names[k]}`, tx: spot[0], ty: spot[1], crate: o.id, guards: false };
+        const st: SiteSnap & { guards: boolean; levers?: number[] } = { id: this.siteSeq++, kind: 'tower' as const, name: `${l.name}の${names[k]}`, tx: spot[0], ty: spot[1], crate: o.id, guards: false };
+        // 無線基地：箱はシャッターの中。離れた 2 つのレバーを同時に（3 秒以内に）引くと開く。ひとりなら工具で鍵を壊す
+        if (k === 1) {
+          const lv: number[] = [];
+          // 施設の空いたマスから、いちばん離れた 2 つ（ひとりでは同時に引けない距離）
+          const free: [number, number][] = [];
+          for (let y = l.y + 1; y < l.y + l.h - 1; y++)
+            for (let x = l.x + 1; x < l.x + l.w - 1; x++) if (!this.world.solid(x, y) && !this.world.objAt(x, y) && Math.hypot(x - spot[0], y - spot[1]) >= 2) free.push([x, y]);
+          let pair: [number, number][] | null = null;
+          let bestD = 4;
+          for (let i = 0; i < free.length; i += 2)
+            for (let j = i + 1; j < free.length; j += 3) {
+              const d = Math.hypot(free[i][0] - free[j][0], free[i][1] - free[j][1]);
+              if (d > bestD) {
+                bestD = d;
+                pair = [free[i], free[j]];
+              }
+            }
+          for (const [x, y] of pair ?? []) {
+            const lo: SimObj = { id: this.nextObjId++, kind: 'lever', tx: x, ty: y, hp: 1, maxHp: 1, ready: 0, regrowT: 0 };
+            this.world.setObj(lo);
+            this.changed.add(lo.id);
+            lv.push(lo.id);
+          }
+          if (lv.length === 2) {
+            st.levers = lv;
+            this.locks.set(o.id, { levers: lv, pulled: new Map() });
+          }
+        }
         this.rsites = [...this.rsites, st];
         break;
       }
@@ -2889,6 +2943,8 @@ export class HostSimulation {
   /** F キー：いちばん近いドア／入れ物／倉庫を操作。何もなければ回復/食事 */
   private interact(p: SimPlayer): void {
     if (this.talkNpc(p)) return;
+    // 窓の正面なら、窓を越える（仲間がいれば肩車）
+    if (!p.veh && this.tryWindow(p)) return;
     if (p.viewing || p.storage) {
       p.viewing = 0;
       p.storage = 0;
@@ -2923,6 +2979,7 @@ export class HostSimulation {
           o.kind === 'cot' ||
           o.kind === 'sbox' ||
           o.kind === 'radio' ||
+          o.kind === 'lever' ||
           (BUILD_KINDS.has(o.kind) && (o.hp < o.maxHp || (o.kind === 'raintank' && o.ready > 0)));
         if (!usable) continue;
         const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) - (o.kind === 'door' ? 0 : 6);
@@ -2945,6 +3002,8 @@ export class HostSimulation {
       this.useRadio(p);
       return;
     }
+    if (best && best.kind === 'lever') return this.pullLever(p, best);
+    if (best && this.locks.has(best.id)) return this.cutLock(p, best);
     if (best && BUILD_KINDS.has(best.kind)) {
       this.useBuilt(p, best);
       return;
@@ -2983,6 +3042,11 @@ export class HostSimulation {
   }
 
   private openContainer(p: SimPlayer, o: SimObj): void {
+    if (this.locks.has(o.id)) {
+      // 鍵を焼き切った
+      this.locks.delete(o.id);
+      this.events.push({ k: 'feed', cat: 'up', t: `${p.name} がシャッターの鍵を壊した`, c: '#e0c060' });
+    }
     if (!this.contents.has(o.id)) {
       const c = this.rollLoot(o);
       // 目利き：もう一度レアの抽選
@@ -3204,6 +3268,7 @@ export class HostSimulation {
     if (p.veh) dmg *= 0.5; // 車の中は守られている
     p.hp -= dmg;
     p.search = null; // 攻撃されたら探索は中断
+    p.climb = null;
     this.events.push({ k: 'phit', id: p.id });
     this.events.push({ k: 'dmg', x: p.x, y: p.y - 20, v: Math.round(dmg), p: true });
     if (p.hp <= 0) this.downPlayer(p);
@@ -3509,6 +3574,70 @@ export class HostSimulation {
       z.alert = 1;
       return;
     }
+  }
+
+  // ======================== 協力の仕掛け ========================
+  /** シャッター付きの箱：二人でレバーを引く（3 秒以内）か、ひとりなら鍵を壊す */
+  locks = new Map<number, { levers: number[]; pulled: Map<number, number> }>();
+
+  private pullLever(p: SimPlayer, lever: SimObj): void {
+    const entry = [...this.locks.entries()].find(([, v]) => v.levers.includes(lever.id));
+    if (!entry) return this.pop(p, 'レバーはもう動かない（シャッターは開いている）', '#cccccc');
+    const [crate, lk] = entry;
+    lk.pulled.set(lever.id, this.time);
+    lever.ready = 1;
+    this.changed.add(lever.id);
+    this.events.push({ k: 'smash', x: (lever.tx + 0.5) * TILE, y: (lever.ty + 0.5) * TILE, kind: 'lever' });
+    const both = lk.levers.every((id) => this.time - (lk.pulled.get(id) ?? -99) <= 3);
+    if (both) {
+      this.locks.delete(crate);
+      this.events.push({ k: 'feed', cat: 'up', t: 'シャッターが開いた！（二人でレバーを引いた）', c: '#e0c060', snd: 'clear' });
+      for (const q of this.players) if (q.status === 'alive') this.gainXp(q, 1, 10);
+    } else this.pop(p, 'レバーを引いた — 3 秒以内にもう 1 つのレバーも（仲間と同時に）', '#e0c060');
+    // 引いたレバーは少しして戻る
+    setTimeout(() => {
+      lever.ready = 0;
+      this.changed.add(lever.id);
+    }, 3000);
+  }
+
+  /** ひとりの代わりの手段：工具で静かに（20 秒）／バールで速く（8 秒・大きな音） */
+  private cutLock(p: SimPlayer, crate: SimObj): void {
+    const bar = p.mel?.id === 'crowbar' && p.tool === Tool.Melee;
+    if (!bar && countItem(p.bag, 'tools') < 1)
+      return this.pop(p, 'シャッターが閉まっている：離れた 2 つのレバーを仲間と同時に引く／ひとりなら工具セットかバールで鍵を壊す', '#e0c060', 'error');
+    p.search = { cid: crate.id, t: 0, dur: bar ? 8 : 20, x: p.x, y: p.y, loud: bar };
+    this.pop(p, bar ? 'バールで鍵を壊している（8 秒・大きな音）' : '工具セットで鍵を外している（20 秒）', '#e0c060');
+  }
+
+  /** 窓を越える：仲間がそばにいれば肩車ですぐ。ひとりなら 4 秒よじ登る */
+  private tryWindow(p: SimPlayer): boolean {
+    const ca = Math.cos(p.aim);
+    const sa = Math.sin(p.aim);
+    for (const reach of [0.7, 1.2]) {
+      const wx = Math.floor((p.x + ca * reach * TILE) / TILE);
+      const wy = Math.floor((p.y + sa * reach * TILE) / TILE);
+      if (this.world.terrainAt(wx, wy) !== T_WINDOW) continue;
+      // 窓の向こう側
+      const dx = Math.abs(ca) > Math.abs(sa) ? Math.sign(ca) : 0;
+      const dy = dx ? 0 : Math.sign(sa);
+      const ox = wx + dx;
+      const oy = wy + dy;
+      if (this.world.solid(ox, oy)) return false;
+      const toX = (ox + 0.5) * TILE;
+      const toY = (oy + 0.5) * TILE;
+      const ally = this.players.some((q) => q !== p && q.status === 'alive' && !q.away && Math.hypot(q.x - p.x, q.y - p.y) < 70);
+      if (ally) {
+        p.x = toX;
+        p.y = toY;
+        this.pop(p, '肩車で窓を越えた', '#c9e08a');
+      } else {
+        p.climb = { t: 0, dur: 4, x: p.x, y: p.y, toX, toY };
+        this.pop(p, 'ひとりで窓をよじ登っている（4 秒・動くと中断）', '#cccccc');
+      }
+      return true;
+    }
+    return false;
   }
 
   // ======================== 生存者の救出・物資の車列 ========================
