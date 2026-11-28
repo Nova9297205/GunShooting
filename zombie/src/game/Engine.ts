@@ -256,6 +256,9 @@ const FLOW_MAX = Infinity;
 const FLOW_BUDGET = 6000;
 /** この日から冬：菜園が育たず、食料が見つかりにくく、外は冷え、雪に足跡が残る */
 export const WINTER_DAY = 21;
+/** 季節は 30 日でひとめぐり（1〜20 日目は秋、21〜30 日目は冬、31 日目から春 → また秋…）。期限なしモードで冬が終わらない詰みを防ぐ */
+export const SEASON_DAYS = 30;
+const seasonDay = (day: number): number => ((day - 1) % SEASON_DAYS) + 1;
 /** 生存者の役割（名前・毎朝くれる物） */
 const ROLE_NAME: Record<string, string> = { cook: '料理人', gunsmith: '銃職人', nurse: '看護師', scav: '回収屋' };
 const ROLE_GIFT: Record<string, string> = { cook: '缶詰 2', gunsmith: '弾 15', nurse: '包帯 2（ときどき救急キット）', scav: '鉄くず 4・布 2' };
@@ -1215,9 +1218,11 @@ export class HostSimulation {
       }
       this.checkRescueParts();
       this.announceThreat();
-      if (this.day === WINTER_DAY - 3)
-        this.events.push({ k: 'feed', cat: 'danger', t: `あと 3 日で冬（DAY ${WINTER_DAY}〜）：菜園が育たず、食べ物が見つかりにくくなり、外は冷える。缶詰・保存食を備蓄し、コートと焚き火の用意を`, c: '#a8d0f0', snd: 'alarm' });
-      if (this.day === WINTER_DAY)
+      const sd = seasonDay(this.day);
+      if (sd === 1 && this.day > 1) this.events.push({ k: 'banner', t: '春が来た', s: '雪が解けた。菜園がまた育ち、食べ物も見つかるようになる', c: '#c9e08a', snd: 'day' });
+      if (sd === WINTER_DAY - 3)
+        this.events.push({ k: 'feed', cat: 'danger', t: `あと 3 日で冬（DAY ${this.day + 3}〜）：菜園が育たず、食べ物が見つかりにくくなり、外は冷える。缶詰・保存食を備蓄し、コートと焚き火の用意を`, c: '#a8d0f0', snd: 'alarm' });
+      if (sd === WINTER_DAY)
         this.events.push({ k: 'banner', t: '冬が来た', s: '雪が積もった。外は冷え、食べ物は乏しい。足跡を感染体に追われる', c: '#cfe6ff', snd: 'night' });
       this.newJobs(true);
       this.newSites(true);
@@ -3608,7 +3613,7 @@ export class HostSimulation {
 
   // ======================== 冬 ========================
   winter(): boolean {
-    return this.day >= WINTER_DAY;
+    return seasonDay(this.day) >= WINTER_DAY;
   }
   /** 雪の足跡：外を歩くと残る。うろついている感染体が新しい足跡を見つけると、たどって来る */
   private tracks: { x: number; y: number; t: number; id: number }[] = [];

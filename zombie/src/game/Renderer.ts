@@ -3199,7 +3199,21 @@ export class Renderer {
     const x = this.w - pw - 12;
     const y = this.miniBottom + 10 + this.tutH;
     const rowH = 16;
-    const ph = 22 + TUT_STEPS.length * rowH + 18;
+    // 「どうやるか」は 2 行まで折り返す（切れると肝心の数字が読めない）
+    ctx.font = `10px ${UI}`;
+    const howLines: string[] = [];
+    {
+      let rest = this.kw(next.how);
+      while (rest && howLines.length < 2) {
+        let k = rest.length;
+        while (k > 1 && ctx.measureText(rest.slice(0, k)).width > pw - 20) k--;
+        let line = rest.slice(0, k);
+        rest = rest.slice(k);
+        if (howLines.length === 1 && rest) line = line.slice(0, -1) + '…';
+        howLines.push(line);
+      }
+    }
+    const ph = 22 + TUT_STEPS.length * rowH + 6 + howLines.length * 13;
     panel(ctx, x, y, pw, ph);
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
@@ -3221,11 +3235,9 @@ export class Renderer {
       ctx.fillText(`${ok ? '✓' : cur ? '▶' : '・'} ${s.title}`, x + 10, ry);
       ctx.globalAlpha = 1;
     });
-    let how = this.kw(next.how);
     ctx.font = `10px ${UI}`;
-    while (ctx.measureText(how).width > pw - 20 && how.length > 4) how = how.slice(0, -2) + '…';
     ctx.fillStyle = '#e0c060';
-    ctx.fillText(how, x + 10, y + 22 + TUT_STEPS.length * rowH + 7);
+    howLines.forEach((ln, k) => ctx.fillText(ln, x + 10, y + 22 + TUT_STEPS.length * rowH + 7 + k * 13));
     this.tutH += ph + 8;
   }
 
