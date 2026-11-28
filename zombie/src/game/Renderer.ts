@@ -47,7 +47,7 @@ import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
 import { type Glyphs, padText } from '../ui/Gamepad';
-import { TUT_ALL, TUT_STEPS } from './tutorial';
+import { TUT_ALL, TUT_STEPS as TUT_STEPS1, TUT2_ALL, TUT2_STEPS } from './tutorial';
 import { ATTACHMENTS, capacityOf, CONTAINER_NAMES, countItem, loadKg, QUALITY, weaponLabel, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -3171,13 +3171,19 @@ export class Renderer {
   /** はじめの一日：最初の数日、やることのチェックリスト。今やると良い 1 つに「どうやるか」を添える */
   private drawTutorial(view: ViewState, me: PlayerSnap, touch: boolean): void {
     const done = me.tut;
-    if (done === undefined || done === TUT_ALL || view.day > 4) return;
+    if (done === undefined) return;
+    // 1 段目：はじめの一日（4 日目まで）→ 2 段目：生き延びる手引き（8 日目まで）
+    const first = (done & TUT_ALL) !== TUT_ALL && view.day <= 4;
+    const second = !first && (done & TUT2_ALL) !== TUT2_ALL && view.day <= 8;
+    if (!first && !second) return;
+    const TUT_STEPS = first ? TUT_STEPS1 : TUT2_STEPS;
+    const label = first ? 'はじめの一日' : '生き延びる手引き';
     const { ctx } = this;
     const next = TUT_STEPS.find((s) => !(done & s.bit));
     if (!next) return;
     const n = TUT_STEPS.filter((s) => done & s.bit).length;
     if (touch) {
-      const t = `はじめの一日 ${n}/${TUT_STEPS.length}：${next.title} — ${this.touchUI ? next.touch : this.kw(next.how)}`;
+      const t = `${label} ${n}/${TUT_STEPS.length}：${next.title} — ${this.touchUI ? next.touch : this.kw(next.how)}`;
       ctx.font = `bold 11px ${UI}`;
       const tw = ctx.measureText(t).width + 16;
       const { cx, y } = this.slimPos(1);
@@ -3199,7 +3205,7 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = `10px ${MONO}`;
     ctx.fillStyle = '#e0c060';
-    ctx.fillText('// はじめの一日', x + 10, y + 11);
+    ctx.fillText(`// ${label}`, x + 10, y + 11);
     ctx.textAlign = 'right';
     ctx.font = `bold 10px ${UI}`;
     ctx.fillStyle = '#bdb79e';

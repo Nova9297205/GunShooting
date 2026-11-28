@@ -101,7 +101,7 @@ import {
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
 import { hasPerk, PERKS, type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
 import { NOTES } from './notes';
-import { TUT_ALL, TUT_BUILD, TUT_CRAFT, TUT_JOB, TUT_REWARD, TUT_SEARCH, TUT_SLEEP, TUT_STEPS } from './tutorial';
+import { TUT_ALL, TUT_BUILD, TUT_CRAFT, TUT_DANGER, TUT_DRIVE, TUT_EVERY, TUT_HORDE, TUT_JOB, TUT_PART, TUT_REWARD, TUT_SEARCH, TUT_SLEEP, TUT_STEPS, TUT_UPGRADE, TUT2_ALL, TUT2_REWARD, TUT2_STEPS } from './tutorial';
 import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
 
 interface SimPlayer extends PlayerSnap {
@@ -774,8 +774,8 @@ export class HostSimulation {
       if (!s) continue;
       Object.assign(p, { x: s.x, y: s.y, hp: s.hp, maxHp: s.maxHp, hunger: s.hunger, tox: s.tox, bag: s.bag, prim: s.prim, sec: s.sec, tool: s.tool, kills: s.kills });
       p.xp = p.xp.map((v, i) => Math.max(v, s.xp[i] ?? 0));
-      p.tut = TUT_ALL;
-      if (s.body) Object.assign(p, { tut: TUT_ALL, ...s.body });
+      p.tut = TUT_EVERY;
+      if (s.body) Object.assign(p, { tut: TUT_EVERY, ...s.body });
       p.lv = p.xp.map(levelOf);
       sim.applySkills(p);
       // ダウン・戦闘不能のまま保存されていたら、拠点で起き上がった状態から
@@ -963,7 +963,7 @@ export class HostSimulation {
         ...(p.veh !== undefined ? { veh: p.veh, seat: p.seat } : {}),
         ...(p.pack ? { pack: p.pack } : {}),
         ...(p.mel ? { mel: p.mel } : {}),
-        ...((p.tut ?? 0) !== TUT_ALL ? { tut: p.tut ?? 0 } : {}),
+        ...((p.tut ?? 0) !== TUT_EVERY ? { tut: p.tut ?? 0 } : {}),
         ...((p.rested ?? 0) > 0 ? { rested: Math.ceil(p.rested ?? 0) } : {}),
         x: r1(p.x),
         y: r1(p.y),
@@ -1053,6 +1053,7 @@ export class HostSimulation {
     if (this.lit.length || this.alarms.length) this.updatePower(dt);
     this.updateSites(dt);
     if (this.tick % 10 === 0) this.updateTracks();
+    if (this.tick % 30 === 0) for (const p of this.players) if (p.status === 'alive' && !((p.tut ?? 0) & TUT_DANGER) && this.tierAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE)) >= 3) this.tutMark(p, TUT_DANGER);
     this.updateSleep();
     this.updateReturnAdvice();
     if (this.hordeNight && this.hordeWaves > 0) {
@@ -1162,6 +1163,7 @@ export class HostSimulation {
         for (const z of this.zombies) z.keep = false;
         for (const p of this.players) {
           if (p.status !== 'alive') continue;
+          this.tutMark(p, TUT_HORDE);
           this.gainXp(p, 2, 25);
           this.gainXp(p, 1, 15);
         }
@@ -1461,10 +1463,19 @@ export class HostSimulation {
     const cur = p.tut ?? 0;
     if (cur & bit) return;
     p.tut = cur | bit;
-    const step = TUT_STEPS.find((x) => x.bit === bit);
-    const left = TUT_STEPS.filter((x) => !(p.tut! & x.bit)).length;
-    if (step) this.events.push({ k: 'feed', cat: 'up', t: `✓ はじめの一日：${step.title}${left ? `（あと ${left}）` : ''}`, c: '#c9e08a', id: p.id });
-    if (p.tut === TUT_ALL) {
+    const two = !!TUT2_STEPS.find((x) => x.bit === bit);
+    const steps = two ? TUT2_STEPS : TUT_STEPS;
+    const step = steps.find((x) => x.bit === bit);
+    const left = steps.filter((x) => !(p.tut! & x.bit)).length;
+    if (step) this.events.push({ k: 'feed', cat: 'up', t: `✓ ${two ? '生き延びる手引き' : 'はじめの一日'}：${step.title}${left ? `（あと ${left}）` : ''}`, c: '#c9e08a', id: p.id });
+    if (two && (p.tut & TUT2_ALL) === TUT2_ALL) {
+      for (const [id, n] of TUT2_REWARD) {
+        const rest = addItem(p.bag, id as ItemId, n);
+        if (rest > 0) addItem(this.storage.shared, id as ItemId, rest);
+      }
+      this.events.push({ k: 'banner', t: '生き延びる手引きを達成', s: 'ごほうび：武器強化キット・7.62mm弾×20・救急キット。あとは救助まで生き延びろ', c: '#e0c060', snd: 'level' });
+    }
+    if (!two && (p.tut & TUT_ALL) === TUT_ALL) {
       for (const [id, n] of TUT_REWARD) {
         const rest = addItem(p.bag, id as ItemId, n);
         if (rest > 0) addItem(this.storage.shared, id as ItemId, rest);
@@ -1876,6 +1887,7 @@ export class HostSimulation {
         if (def.id === 'storage') this.resizeStorage();
         this.storage.ver++;
         this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が拠点の${def.name}を強化した（Lv${this.base[def.id]}）`, c: '#e0cfa8', snd: 'level' });
+        this.tutMark(p, TUT_UPGRADE);
         this.pop(p, `${def.name} 強化！`, '#e0cfa8', 'craft');
         break;
       }
@@ -1903,6 +1915,7 @@ export class HostSimulation {
           }
           slot.w[att] = 1;
           this.pop(p, `${ITEMS[att].name}を取り付けた`, '#d8c48a', 'craft');
+          this.tutMark(p, TUT_UPGRADE);
         }
         slot.w.mag = Math.min(slot.w.mag, effectiveStats(slot.id, slot.w).magSize);
         break;
@@ -2278,6 +2291,7 @@ export class HostSimulation {
       }
       const driver = v.seats[0] >= 0 ? this.players.find((q) => q.id === v.seats[0]) : undefined;
       const pushing = !!driver && !!v.inp && Math.hypot(v.inp.mx, v.inp.my) > 0.15;
+      if (driver && Math.abs(v.spd) > 80) this.tutMark(driver, TUT_DRIVE);
       const spdBefore = v.spd;
       const hit = stepVehicle(v, driver ? v.inp : null, dt, this.world);
       // 体当たり：道の残骸・木・ドラム缶・木箱は、ぶつかると壊れる（速いほど一撃。押し続けても少しずつ）
@@ -2451,6 +2465,7 @@ export class HostSimulation {
       const crate = this.world.objects.get(st.crate);
       if (!crate || !crate.ready) {
         st.done = true;
+        if (st.kind === 'tower') for (const q of this.players) if (q.status === 'alive') this.tutMark(q, TUT_PART);
         if (st.kind === 'stash') this.events.push({ k: 'feed', cat: 'loot', t: `${st.name}を見つけた`, c: '#7fd8d0', snd: 'clear' });
         else if (st.kind === 'tower') this.events.push({ k: 'feed', cat: 'up', t: `${st.name}を制圧 — 救助無線の部品を拠点の無線へ持ち帰れ`, c: '#f0d070', snd: 'clear' });
         else this.events.push({ k: 'feed', cat: 'up', t: `異変を制圧：${st.name}`, c: '#c08af0', snd: 'clear' });
