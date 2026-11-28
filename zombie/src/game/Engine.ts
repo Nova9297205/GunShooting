@@ -4981,6 +4981,7 @@ export class HostSimulation {
   private destroyObj(o: SimObj): void {
     if (!this.world.objects.has(o.id)) return;
     this.world.removeObj(o.id);
+    this.contents.delete(o.id);
     this.changed.delete(o.id);
     this.removed.push(o.id);
     this.events.push({ k: 'break', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });
