@@ -326,6 +326,8 @@ export interface ViewState {
   rescue?: RescueSnap;
   /** 冬（雪・足跡） */
   winter?: boolean;
+  /** 救助ヘリが着いた（結果画面へ移るまで） */
+  rescued?: boolean;
   /** 救出を待つ生存者（ついてくる人） */
   npcs?: { id: number; x: number; y: number; a: number; hp: number; role: string; follow: number }[];
   /** 二人でレバーを引くまで閉じている箱（ID） */

@@ -951,6 +951,7 @@ export class HostSimulation {
       ...(this.survivors.length ? { survivors: this.survivors } : {}),
       ...(this.locks.size ? { locks: [...this.locks.keys()] } : {}),
       ...(this.winter() ? { winter: true } : {}),
+      ...(this.winT > 0 ? { rescued: true } : {}),
       ...(this.acid.length ? { acid: this.acid.map((a) => ({ x: Math.round(a.x), y: Math.round(a.y), r: a.r, t: r1(a.t) })) } : {}),
       ...(this.spits.length ? { spits: this.spits.map((q) => ({ sx: Math.round(q.sx), sy: Math.round(q.sy), tx: Math.round(q.tx), ty: Math.round(q.ty), p: r2(1 - q.t / q.dur) })) } : {}),
       vehicles: this.vehicles.map((v) => ({ id: v.id, kind: v.kind, x: r1(v.x), y: r1(v.y), a: r2(v.a), spd: Math.round(v.spd), fuel: r1(v.fuel), hp: Math.round(v.hp), maxHp: v.maxHp, broken: v.broken, seats: v.seats })),
