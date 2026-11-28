@@ -250,6 +250,10 @@ const BUILD_RANGE_PX = 6 * TILE + 20;
 export const isHordeDay = (day: number): boolean => day % 4 === 0;
 /** 30 日モードで救助が来る日（その日の朝） */
 export const RESCUE_DAY = 30;
+/** 経路の流れ場を計算する距離の上限（範囲はアクティブなチャンクで決まるので、ここでは切らない。切ると遠くの感染体が一直線に門へ集まる） */
+const FLOW_MAX = Infinity;
+/** 1 フレームに進める流れ場の計算量（取り出すマスの数） */
+const FLOW_BUDGET = 6000;
 /** この日から冬：菜園が育たず、食料が見つかりにくく、外は冷え、雪に足跡が残る */
 export const WINTER_DAY = 21;
 /** 生存者の役割（名前・毎朝くれる物） */
@@ -472,7 +476,7 @@ export class HostSimulation {
   private nextId = 1;
   private nextObjId = BUILD_ID_START;
   // Float64 で保持する（Float32 だとヒープのキーとの丸め誤差で同じノードが何度も再投入され、計算が爆発する）
-  private flow = new Float64Array(MAP_W * MAP_H);
+  private flow: Float64Array = new Float64Array(MAP_W * MAP_H);
   private flowTimer = 0;
   private spawnTimer = 5;
   private lastStorageSent = -1;
@@ -1072,7 +1076,7 @@ export class HostSimulation {
     if (this.flowTimer <= 0) {
       this.computeFlow();
       this.flowTimer = 0.4;
-    }
+    } else if (this.flowRun) this.pumpFlow(FLOW_BUDGET);
     this.updateSpawning(dt);
     this.chunkTimer -= dt;
     if (this.chunkTimer <= 0) {
@@ -2391,7 +2395,21 @@ export class HostSimulation {
   private siteT = 0;
 
   /** その日の異変を 1〜2 か所に起こす（危険な場所・依頼と重ならない所） */
+  /** 前の日の箱が開けられないまま残っていたら片付ける（中身・オブジェクトが日ごとに増え続けないように） */
+  private dropStale(id: number | undefined): void {
+    if (!id) return;
+    const o = this.world.objects.get(id);
+    if (!o || !o.ready) return;
+    const near = this.players.some((p) => p.viewing === id || p.search?.cid === id || Math.hypot(p.x - (o.tx + 0.5) * TILE, p.y - (o.ty + 0.5) * TILE) < 700);
+    if (near) return;
+    this.world.removeObj(id);
+    this.contents.delete(id);
+    this.changed.delete(id);
+    this.removed.push(id);
+  }
+
   private newSites(announce: boolean): void {
+    for (const st of this.sites) if (!st.done) for (const id of st.crates ?? [st.crate]) this.dropStale(id);
     const used = new Set(this.jobs.map((j) => j.loc));
     const cands = this.world.locations.map((l, i) => ({ l, i })).filter(({ l, i }) => l.tier >= 2 && l.kind !== 'base' && l.kind !== 'ruin' && !used.has(i));
     const n = 1 + (Math.random() < 0.5 ? 1 : 0);
@@ -2664,6 +2682,7 @@ export class HostSimulation {
   /** その日の依頼を作り直す（物資箱を施設に置く） */
   private newJobs(announce: boolean): void {
     const lv = radioLevel(this.radioDone);
+    for (const j of this.jobs) if (!j.done) this.dropStale(j.crate);
     const jobs = makeJobs(this.world.locations, this.day, lv, Math.random, this.jobSeq);
     this.jobSeq += jobs.length;
     for (const j of jobs) {
@@ -3403,26 +3422,41 @@ export class HostSimulation {
     return objIsSolid(o) ? -1 : 1;
   }
 
+  /** 流れ場：何フレームかに分けて計算し、できあがったら差し替える（一度に全部解くと 1 フレームが重くなる） */
+  private flowBuf: Float64Array | null = null;
+  private flowRun: { heap: MinHeap; dist: Float64Array } | null = null;
   private computeFlow(): void {
-    const flow = this.flow;
-    flow.fill(Infinity);
+    if (this.flowRun) return; // 前の計算がまだ途中
+    const dist = (this.flowBuf ??= new Float64Array(MAP_W * MAP_H));
+    dist.fill(Infinity);
     const heap = new MinHeap();
     for (const p of this.players) {
       if (p.status !== 'alive' || p.away || this.safeIn(p.x, p.y)) continue;
       const i = Math.floor(p.y / TILE) * MAP_W + Math.floor(p.x / TILE);
-      flow[i] = 0;
+      dist[i] = 0;
       heap.push(0, i);
     }
-    if (heap.size === 0) return;
+    if (heap.size === 0) {
+      this.flow.fill(Infinity);
+      return;
+    }
+    this.flowCost.fill(-2);
+    this.flowRun = { heap, dist };
+    this.pumpFlow(FLOW_BUDGET);
+  }
+
+  private pumpFlow(budget: number): void {
+    const run = this.flowRun;
+    if (!run) return;
+    const { heap, dist } = run;
     const cost = this.flowCost;
-    cost.fill(-2);
     const getCost = (i: number) => {
       if (cost[i] === -2) cost[i] = this.enterCost(i);
       return cost[i];
     };
-    while (heap.size > 0) {
+    while (heap.size > 0 && budget-- > 0) {
       const [d, i] = heap.pop();
-      if (d > flow[i]) continue;
+      if (d > dist[i]) continue;
       const x = i % MAP_W;
       const y = (i - x) / MAP_W;
       for (const [dx, dy, w] of NEIGHBORS) {
@@ -3434,11 +3468,19 @@ export class HostSimulation {
         if (c < 0) continue;
         if (dx && dy && (getCost(y * MAP_W + nx) !== 1 || getCost(ny * MAP_W + x) !== 1)) continue;
         const nd = d + c * w;
-        if (nd < flow[j]) {
-          flow[j] = nd;
+        // 遠すぎる所は計算しない（そこにいる感染体は眠っているか、まっすぐ向かう）
+        if (nd > FLOW_MAX) continue;
+        if (nd < dist[j]) {
+          dist[j] = nd;
           heap.push(nd, j);
         }
       }
+    }
+    if (heap.size === 0) {
+      // できあがり：差し替える
+      this.flowBuf = this.flow;
+      this.flow = dist;
+      this.flowRun = null;
     }
   }
 
