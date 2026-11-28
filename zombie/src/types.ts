@@ -34,6 +34,9 @@ export interface RescueSnap {
 
 /** マップ上のオブジェクト種別（設備・家具・入れ物・ドアなど） */
 export type ObjKind =
+  | 'gen'
+  | 'flood'
+  | 'alarm'
   | 'lever'
   | 'safe'
   | 'barrel'

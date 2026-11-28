@@ -766,6 +766,8 @@ export class HostSimulation {
       sim.radioDone = ex.radioDone ?? 0;
     }
     sim.nextObjId = Math.max(sim.nextObjId, data.nextObjId);
+    // 夜に保存していたら、動いている発電機の電気を戻す（燃料は減らさない）
+    if (sim.phase === 'night') sim.powerUp();
     sim.setWeather(data.weather, true);
     for (const p of sim.players) {
       const s = data.players.find((q) => q.id === p.id);
@@ -1048,6 +1050,7 @@ export class HostSimulation {
     this.updateThrowns(dt);
     this.updateAcid(dt);
     this.updateNpcs(dt);
+    if (this.lit.length || this.alarms.length) this.updatePower(dt);
     this.updateSites(dt);
     if (this.tick % 10 === 0) this.updateTracks();
     this.updateSleep();
@@ -1126,6 +1129,7 @@ export class HostSimulation {
     if (this.phase === 'night') {
       // 夜：大群が押し寄せるのではなく、闇の中で屋外の感染体が鋭くなる（巡回は少しだけ）
       this.spawnPatrols(1);
+      this.powerUp();
       const finalNight = this.rescue.day > 0 && this.day + 1 >= this.rescue.day;
       // ボスの夜：10 日ごと・無線を直した晩・最後の夜。巨像が群れと一緒に来る
       this.bossPending = finalNight || this.day % 10 === 0 || this.bossNightDay === this.day;
@@ -1195,6 +1199,7 @@ export class HostSimulation {
         }
       }
       this.hordeReward = false;
+      this.powerDown();
       // 救助の朝：生き残っていればクリア（少し間をおいて結果へ）
       if (this.rescue.day > 0 && this.day >= this.rescue.day) {
         this.winT = 7;
@@ -2810,6 +2815,15 @@ export class HostSimulation {
   /** [F]：雨水タンクの水を回収／傷んだ物を修理 */
   private useBuilt(p: SimPlayer, o: SimObj): void {
     const def = buildDef(o.kind)!;
+    if (o.kind === 'gen' && o.hp >= o.maxHp * 0.6) {
+      if (o.ready >= 3) return this.pop(p, '発電機の燃料は満タン（3 晩分）', '#cccccc');
+      if (countItem(p.bag, 'fuel') + countItem(this.storage.shared, 'fuel') < 1) return this.pop(p, `発電機：燃料が要る（残り ${o.ready} 晩分）`, '#e0c060', 'error');
+      this.payCost(p, { fuel: 1 });
+      o.ready++;
+      this.changed.add(o.id);
+      if (this.phase === 'night' && !o.regrowT) this.powerUp();
+      return this.pop(p, `発電機に給油した（${o.ready} 晩分）`, '#e0c060', 'craft');
+    }
     if (o.kind === 'raintank' && o.ready > 0) {
       const left = addItem(p.bag, 'water', o.ready);
       const got = o.ready - left;
@@ -2980,6 +2994,7 @@ export class HostSimulation {
           o.kind === 'sbox' ||
           o.kind === 'radio' ||
           o.kind === 'lever' ||
+          o.kind === 'gen' ||
           (BUILD_KINDS.has(o.kind) && (o.hp < o.maxHp || (o.kind === 'raintank' && o.ready > 0)));
         if (!usable) continue;
         const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) - (o.kind === 'door' ? 0 : 6);
@@ -3573,6 +3588,72 @@ export class HostSimulation {
       z.targetY = next.y;
       z.alert = 1;
       return;
+    }
+  }
+
+  // ======================== 拠点の電気 ========================
+  /** いま光っている投光器（夜・電気あり）と、鳴らせる警報 */
+  lit: { x: number; y: number }[] = [];
+  private alarms: { o: SimObj; t: number }[] = [];
+
+  /** 夜の始まり（と夜中の給油）：燃料のある発電機が一晩動き、近くの投光器・警報に電気が届く */
+  private powerUp(): void {
+    const gens = [...this.world.objects.values()].filter((o) => o.kind === 'gen');
+    for (const g of gens)
+      if (!g.regrowT && g.ready > 0) {
+        g.ready--;
+        g.regrowT = 1;
+        this.changed.add(g.id);
+      }
+    const running = gens.filter((g) => g.regrowT === 1);
+    const powered = (o: SimObj) => running.some((g) => Math.hypot(g.tx - o.tx, g.ty - o.ty) <= 14);
+    this.lit = [];
+    this.alarms = [];
+    for (const o of this.world.objects.values()) {
+      if (o.kind !== 'flood' && o.kind !== 'alarm') continue;
+      const on = powered(o) ? 1 : 0;
+      if (o.ready !== on) {
+        o.ready = on;
+        this.changed.add(o.id);
+      }
+      if (!on) continue;
+      if (o.kind === 'flood') this.lit.push({ x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE });
+      else this.alarms.push({ o, t: 0 });
+    }
+    if (running.length) this.events.push({ k: 'feed', cat: 'info', t: `発電機が動いている — 投光器 ${this.lit.length}・警報 ${this.alarms.length}（残りの燃料 ${running.map((g) => g.ready).join('/')} 晩分）`, c: '#e0c060' });
+  }
+
+  private powerDown(): void {
+    for (const o of this.world.objects.values()) {
+      if ((o.kind === 'gen' && o.regrowT) || ((o.kind === 'flood' || o.kind === 'alarm') && o.ready)) {
+        if (o.kind === 'gen') o.regrowT = 0;
+        else o.ready = 0;
+        this.changed.add(o.id);
+      }
+    }
+    this.lit = [];
+    this.alarms = [];
+  }
+
+  inLight(x: number, y: number): boolean {
+    for (const l of this.lit) if (Math.abs(l.x - x) < 280 && Math.abs(l.y - y) < 280 && Math.hypot(l.x - x, l.y - y) < 280) return true;
+    return false;
+  }
+
+  /** 警報：近づく感染体を方角つきで知らせる（20 秒に 1 回）。壊れた機器は外す */
+  private updatePower(dt: number): void {
+    if (this.tick % 15 !== 0) return;
+    this.lit = this.lit.filter((l) => this.world.objAt(Math.floor(l.x / TILE), Math.floor(l.y / TILE))?.kind === 'flood');
+    this.alarms = this.alarms.filter((a) => this.world.objects.get(a.o.id));
+    for (const a of this.alarms) {
+      a.t -= dt * 15;
+      if (a.t > 0) continue;
+      const ax = (a.o.tx + 0.5) * TILE;
+      const ay = (a.o.ty + 0.5) * TILE;
+      const n = this.zombies.filter((z) => !z.dead && Math.abs(z.x - ax) < 240 && Math.abs(z.y - ay) < 240).length;
+      if (!n) continue;
+      a.t = 20;
+      this.events.push({ k: 'feed', cat: 'danger', t: `警報：拠点の${directionName(a.o.tx, a.o.ty)}側に感染体 ${n} 体！`, c: '#e0583e', snd: 'alarm' });
     }
   }
 
@@ -4540,6 +4621,16 @@ export class HostSimulation {
     }
 
     if (dx || dy) z.angle = Math.atan2(dy, dx);
+    // 投光器の光の中：目がくらんで遅く、ときどき獲物を見失う（巨像は平気）
+    if (this.lit.length && z.type !== 'titan' && this.inLight(z.x, z.y)) {
+      speed *= 0.5;
+      if (z.state === 'chase' && Math.random() < dt * 0.35) {
+        z.state = 'search';
+        z.stateT = 2.5;
+        z.targetX = z.x + (Math.random() - 0.5) * 300;
+        z.targetY = z.y + (Math.random() - 0.5) * 300;
+      }
+    }
     const decay = Math.exp(-6 * dt);
     z.kx *= decay;
     z.ky *= decay;
@@ -4599,7 +4690,7 @@ export class HostSimulation {
     }
     if (target) {
       const built = BUILD_KINDS.has(target.kind);
-      target.hp -= st.wallDamage * (built ? BUILD_DAMAGE_MUL : 1);
+      target.hp -= st.wallDamage * (built ? BUILD_DAMAGE_MUL : 1) * (this.lit.length && this.inLight(z.x, z.y) ? 0.6 : 1);
       // 拠点のバリケードが攻撃されている：仲間に知らせる（修理・迎撃の合図）
       if (built && this.time - this.barricadeWarnT > 10) {
         this.barricadeWarnT = this.time;

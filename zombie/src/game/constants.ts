@@ -150,6 +150,9 @@ export const OBJ_HP: Record<ObjKind, number> = {
   wcase: 1,
   safe: 1,
   lever: 1,
+  gen: 250,
+  flood: 120,
+  alarm: 80,
   fridge: 1,
   desk: 1,
   bed: 1,
@@ -170,6 +173,7 @@ export const OBJ_HP: Record<ObjKind, number> = {
 
 /** 衝突する（通れない）オブジェクト */
 export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
+  'gen',
   'safe',
   'barrel',
   'tree',
@@ -278,7 +282,7 @@ export const RECIPES: Recipe[] = [
 ];
 
 // ---------------- 拠点に建てる物 ----------------
-export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'raintank' | 'stove' | 'cot' | 'wbench' | 'sbox' | 'fire';
+export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'raintank' | 'stove' | 'cot' | 'wbench' | 'sbox' | 'fire' | 'gen' | 'flood' | 'alarm';
 export interface BuildDef {
   kind: BuildKind;
   name: string;
@@ -300,6 +304,9 @@ export const BUILDS: BuildDef[] = [
   { kind: 'cot', name: '寝床', role: '睡眠', desc: 'どこでも夜に眠れる。最後に眠った寝床が、戦闘不能から戻る場所になる', cost: { cloth: 6, scrap: 2 }, hp: 150 },
   { kind: 'wbench', name: '作業台', role: 'クラフト', desc: '拠点の外でもクラフト・改造ができる（レベルは拠点の作業台と同じ）', cost: { scrap: 10, parts: 1 }, hp: 300 },
   { kind: 'sbox', name: '保管箱', role: '収納', desc: '16 マスの箱。中身はずっと残る（撤去は空にしてから）', cost: { scrap: 6 }, hp: 300 },
+  { kind: 'gen', name: '発電機', role: '電気', desc: '燃料 1 で一晩、近く（14 マス）の投光器・警報に電気を送る。[F] で給油（3 晩分まで）。作業台Lv2', cost: { scrap: 8, parts: 2, electronics: 2 }, hp: 250, lv: 2 },
+  { kind: 'flood', name: '投光器', role: '電気', desc: '電気があると夜に広く照らす。光の中の感染体は目がくらみ、遅く・壁を壊す力も弱まる。作業台Lv2', cost: { scrap: 3, electronics: 1 }, hp: 120, lv: 2 },
+  { kind: 'alarm', name: '警報', role: '電気', desc: '電気があると、夜に近づく感染体を方角つきで知らせる', cost: { scrap: 2, electronics: 1 }, hp: 80 },
   { kind: 'fire', name: '焚き火', role: '暖・明かり', desc: '体が温まり、そばで食べると休息済み。夜は明るい', cost: { scrap: 2, cloth: 1 }, hp: 120 },
 ];
 export const BUILD_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(BUILDS.map((b) => b.kind));

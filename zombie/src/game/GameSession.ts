@@ -682,7 +682,7 @@ export class GameSession {
       audio.click();
     }
     if (this.buildKind) {
-      for (let i = 0; i < BUILDS.length; i++)
+      for (let i = 0; i < Math.min(10, BUILDS.length); i++)
         if (this.input.consume(`Digit${(i + 1) % 10}`)) {
           this.buildKind = BUILDS[i].kind;
           audio.click();
@@ -1276,6 +1276,7 @@ export class GameSession {
         let h: string | null = null;
         if (ob.kind === 'door') h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
         else if (STORAGE_KINDS.has(ob.kind)) h = '[F] 倉庫を開く（個人・共有）';
+        else if (ob.kind === 'gen') h = ob.hp < ob.maxHp * 0.6 ? `[F] 修理（鉄くず1） ${Math.round((ob.hp / ob.maxHp) * 100)}%` : `[F] 発電機に給油（燃料 → ${ob.ready}/3 晩分）`;
         else if (ob.kind === 'lever') h = '[F] レバーを引く（離れたもう 1 つのレバーと 3 秒以内に — 仲間と同時に）';
         else if ((this.prevView?.locks ?? []).includes(ob.id)) h = '[F] シャッター：仲間と 2 つのレバーを同時に引く／ひとりなら工具セット（20 秒）かバール（8 秒・大きな音）で鍵を壊す';
         else if (ob.kind === 'radio') {

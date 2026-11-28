@@ -493,7 +493,7 @@ export class Renderer {
       ctx.textAlign = 'left';
       ctx.font = `bold 11px ${UI}`;
       ctx.fillStyle = lock ? '#77735f' : sel ? '#ffe0a0' : '#d8d2b8';
-      ctx.fillText(`${(i + 1) % 10} ${d.name}`, x + 8, yy + 12);
+      ctx.fillText(i < 10 ? `${(i + 1) % 10} ${d.name}` : d.name, x + 8, yy + 12);
       ctx.font = `9px ${UI}`;
       ctx.fillStyle = '#9c967c';
       ctx.fillText(lock ? `🔒 作業台Lv${d.lv}` : d.role, x + 8, yy + 26);
@@ -1431,6 +1431,9 @@ export class Renderer {
       if (ob.kind === 'campfire' || ob.kind === 'fire') {
         const flick = 1 + Math.sin(this.time * 11) * 0.03 + Math.sin(this.time * 7.3 + 1) * 0.04;
         out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 300 * flick, warm: 1 });
+      } else if (ob.kind === 'flood' && ob.ready) {
+        // 電気の通った投光器：白く広い光
+        out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 280, warm: 0 });
       } else if (ob.kind === 'torch') {
         const flick = 1 + Math.sin(this.time * 13 + ob.id) * 0.04 + Math.sin(this.time * 8.1 + ob.id * 2) * 0.04;
         out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: TORCH_LIGHT * flick, warm: 0.8 });
