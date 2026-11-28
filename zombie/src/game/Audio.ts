@@ -8,7 +8,7 @@ import type { GameEvent, SoundKey, ViewState, WeaponId } from '../types';
 import { TILE, ZOMBIE } from './constants';
 import { gamepad } from '../ui/Gamepad';
 
-export type MusicMood = 'day' | 'night' | 'horde';
+export type MusicMood = 'day' | 'night' | 'horde' | 'boss' | 'ending';
 
 interface AudioSettings {
   music: number; // 0..1
@@ -561,6 +561,16 @@ export class AudioManager {
     this.tone({ type: 'sawtooth', f: 65, dur: 3, g: 0.12, a: 0.5, rel: 1.5, lp: 300, t });
   }
 
+  /** 救助されたときのファンファーレ（明るい上昇音） */
+  victory(): void {
+    if (!this.ready) return;
+    // 結果画面でも、夜明けの曲を流し続ける
+    this.setMood('ending');
+    const t = this.ctx!.currentTime;
+    [262, 330, 392, 523, 659, 784].forEach((f, i) => this.tone({ type: 'triangle', f, dur: 0.9, g: 0.16, a: 0.01, rel: 0.5, t: t + i * 0.16 }));
+    this.tone({ type: 'sine', f: 131, dur: 2.6, g: 0.12, a: 0.2, rel: 1.2, t });
+  }
+
   /** ゲームイベント → 効果音 */
   handleEvent(ev: GameEvent, localId: number): void {
     if (!this.ready) return;
@@ -722,9 +732,10 @@ export class AudioManager {
         this.tone({ type: 'sawtooth', f: 46 + sp * 70, f2: 48 + sp * 74, dur: 0.16, g: (0.02 + sp * 0.035) * s.k, lp: 380 + sp * 500, pan: s.pan, a: 0.02 });
       }
     }
-    // 追われているときは緊迫した曲調に
+    // 場面で曲を変える：巨像 → 救助の朝 → 大群・追われている → 昼／夜
     const chased = view.zombies.some((z) => z.alert === 2 && Math.hypot(z.x - this.listener.x, z.y - this.listener.y) < 650);
-    this.music?.setMood(chased ? 'horde' : view.phase);
+    const boss = view.zombies.some((z) => z.type === 'titan');
+    this.music?.setMood(boss ? 'boss' : view.rescued ? 'ending' : chased || view.horde ? 'horde' : view.phase);
     // 雨音・雷鳴
     if (view.weather === 'rain' || view.weather === 'storm') {
       this.rainT -= dt;
@@ -797,7 +808,7 @@ class MusicEngine {
   }
 
   private bpm(): number {
-    return this.mood === 'horde' ? 132 : this.mood === 'night' ? 62 : 76;
+    return this.mood === 'horde' ? 132 : this.mood === 'boss' ? 96 : this.mood === 'ending' ? 70 : this.mood === 'night' ? 62 : 76;
   }
 
   private schedule(): void {
@@ -887,6 +898,45 @@ class MusicEngine {
       if (s === 0) for (const n of ch) note(n + 12, { type: 'square', dur: 0.3, g: 0.022, lp: 1700 });
       if (this.bar % 2 === 1 && (s === 0 || s === 3 || s === 6 || s === 10)) {
         note(ch[(s / 3) % 3 | 0] + 24, { type: 'sawtooth', dur: 0.22, g: 0.025, lp: 2200 }, true);
+      }
+    } else if (this.mood === 'boss') {
+      // 巨像：Cm - Ab - Fm - G の重い進行。太鼓は 1 拍目と 3 拍目、地響きのような低音
+      const prog = [
+        [48, 51, 55],
+        [44, 48, 51],
+        [41, 44, 48],
+        [43, 47, 50],
+      ];
+      const ch = prog[this.bar % 4];
+      if (s === 0 || s === 8) {
+        this.a.tone({ f: 55, f2: 30, dur: 0.5, g: 0.2, t, bus: dry });
+        this.a.noise({ dur: 0.3, g: 0.08, filter: 'lowpass', f: 300, t, bus: dry });
+      }
+      if (s === 4 || s === 12) this.a.noise({ dur: 0.18, g: 0.09, filter: 'bandpass', f: 1200, t, bus: dry });
+      if (s === 0) {
+        note(ch[0] - 24, { type: 'sawtooth', dur: barDur * 1.05, g: 0.06, a: 0.1, rel: 0.6, lp: 260 });
+        for (const n of ch) note(n, { type: 'square', dur: barDur * 0.9, g: 0.018, a: 0.3, rel: 0.6, lp: 900 });
+      }
+      if (s % 4 === 2) note(ch[(s / 4) % 3 | 0] + 12, { type: 'sawtooth', dur: 0.2, g: 0.03, lp: 1400 }, true);
+    } else if (this.mood === 'ending') {
+      // 救助の朝：F - C - Dm - Bb の明るく温かい進行と、ゆったりした旋律
+      const prog = [
+        [53, 57, 60],
+        [48, 52, 55],
+        [50, 53, 57],
+        [46, 50, 53],
+      ];
+      const ch = prog[this.bar % 4];
+      if (s === 0) {
+        for (const n of ch) {
+          note(n + 12, { type: 'triangle', dur: barDur * 1.1, g: 0.04, a: 0.8, rel: 1.2, lp: 2000 });
+          note(n, { type: 'sine', dur: barDur * 1.1, g: 0.03, a: 0.8, rel: 1.2 });
+        }
+        note(ch[0] - 12, { type: 'sine', dur: barDur, g: 0.09, a: 0.1, rel: 0.6 });
+      }
+      if (s % 4 === 0) {
+        const mel = [72, 74, 76, 77, 79, 81];
+        note(mel[(this.bar * 2 + s / 4) % mel.length], { type: 'triangle', dur: beat * 1.8, g: 0.05, a: 0.05, rel: 0.6 }, true);
       }
     }
   }

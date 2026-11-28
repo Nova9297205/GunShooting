@@ -12,6 +12,23 @@ export const SKILLS = [
   { id: 'medic', name: '応急処置', desc: '回復量 +10%/Lv・蘇生速度 +12%/Lv', how: '回復・味方の蘇生' },
 ] as const;
 export type SkillId = (typeof SKILLS)[number]['id'];
+
+/** スキルの特典：Lv5 と Lv10 で特別な能力（全部で 8 つ） */
+export const PERKS: { skill: number; lv: number; id: string; name: string; desc: string }[] = [
+  { skill: 0, lv: 5, id: 'eye', name: '目利き', desc: '入れ物から良い物（レア）が出やすい' },
+  { skill: 0, lv: 10, id: 'pick', name: '鍵開け', desc: '工具なしで金庫を静かに開けられる（工具があれば 4 秒）' },
+  { skill: 1, lv: 5, id: 'wind', name: '身軽', desc: '最大スタミナ +15' },
+  { skill: 1, lv: 10, id: 'tough', name: '頑丈', desc: '最大 HP +20' },
+  { skill: 2, lv: 5, id: 'crit', name: '急所狙い', desc: '銃弾の 10% が 2 倍のダメージ' },
+  { skill: 2, lv: 10, id: 'thrift', name: '弾の節約', desc: '20% の確率で弾が減らない' },
+  { skill: 3, lv: 5, id: 'patch', name: '手当て上手', desc: '回復するたびに HP がさらに +15' },
+  { skill: 3, lv: 10, id: 'savior', name: '救命士', desc: '仲間の蘇生が 2 倍速く、起こした仲間は HP 60% で立ち上がる' },
+];
+/** その人が特典を持っているか（xp から計算） */
+export function hasPerk(xp: number[], id: string): boolean {
+  const pk = PERKS.find((q) => q.id === id);
+  return !!pk && levelOf(xp[pk.skill] ?? 0) >= pk.lv;
+}
 export const SKILL_INDEX: Record<SkillId, number> = { search: 0, endurance: 1, handling: 2, medic: 3 };
 export const MAX_SKILL_LV = 10;
 
@@ -166,6 +183,11 @@ export interface RunRecord {
   value: number;
   mode: string;
   players: number;
+  /** 救助されてクリア */
+  won?: boolean;
+  run?: 'd30' | 'endless';
+  /** 読んだ手記の数 */
+  notes?: number;
 }
 const REC_KEY = 'deadnights2d.records';
 
@@ -180,7 +202,7 @@ export function loadRecords(): RunRecord[] {
 
 /** 記録を追加して順位を返す（生存日数 → 持ち帰った価値 → 撃破数の順）。best = 1位になった */
 export function addRecord(rec: RunRecord): { rank: number; best: boolean } {
-  const list = [...loadRecords(), rec].sort((a, b) => b.day - a.day || b.value - a.value || b.kills - a.kills);
+  const list = [...loadRecords(), rec].sort((a, b) => Number(!!b.won) - Number(!!a.won) || b.day - a.day || b.value - a.value || b.kills - a.kills);
   const rank = list.indexOf(rec) + 1;
   try {
     localStorage.setItem(REC_KEY, JSON.stringify(list.slice(0, 10)));

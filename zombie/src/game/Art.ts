@@ -60,7 +60,7 @@ export interface ArtSet {
 // ---------------- ヘルパー ----------------
 
 /** 建てた設備は、同じ役割の既存の絵で描く（寝床＝ベッド、作業台、保管箱＝倉庫、焚き火） */
-const ALIAS: Partial<Record<string, ObjSnap['kind']>> = { cot: 'bed', wbench: 'bench', sbox: 'chest', fire: 'campfire' };
+const ALIAS: Partial<Record<string, ObjSnap['kind']>> = { cot: 'bed', wbench: 'bench', sbox: 'chest', fire: 'campfire', safe: 'wcase', lever: 'radio', gen: 'stove', flood: 'torch', alarm: 'radio' };
 function alias(o: ObjSnap): ObjSnap {
   const k = ALIAS[o.kind];
   return k ? { ...o, kind: k } : o;

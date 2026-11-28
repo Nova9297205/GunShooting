@@ -18,6 +18,8 @@ import type {
   ObjKind,
   ObjSnap,
   PlayerSnap,
+  RescueSnap,
+  RunMode,
   Slot,
   Snapshot,
   SoundKey,
@@ -31,6 +33,8 @@ import type {
 import { Tool } from '../types';
 import {
   AXE,
+  MELEE_STATS,
+  type MeleeId,
   BENCH_RANGE,
   BASE_TX,
   BASE_TY,
@@ -95,12 +99,18 @@ import {
   heldWeapon,
 } from './items';
 import { angleDiff, circleOverlapsTile, moveCircle, stepMovement } from './physics';
-import { type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
-import { TUT_ALL, TUT_BUILD, TUT_CRAFT, TUT_JOB, TUT_REWARD, TUT_SEARCH, TUT_SLEEP, TUT_STEPS } from './tutorial';
+import { hasPerk, PERKS, type Facility, FACILITIES, MED_REGEN, SKILLS, levelOf, sanitizeProfile, skillMods, STORAGE_SIZES } from './progression';
+import { NOTES } from './notes';
+import { TUT_ALL, TUT_BUILD, TUT_CRAFT, TUT_DANGER, TUT_DRIVE, TUT_EVERY, TUT_HORDE, TUT_JOB, TUT_PART, TUT_REWARD, TUT_SEARCH, TUT_SLEEP, TUT_STEPS, TUT_UPGRADE, TUT2_ALL, TUT2_REWARD, TUT2_STEPS } from './tutorial';
 import { BUILD_ID_START, type DistrictKind, districtAt, directionName, EDGE_BAND, edgeDistance, generateWorld, type Location, locationAt, objIsSolid, tierAtDistance, TileWorld } from './world';
 
 interface SimPlayer extends PlayerSnap {
   queue: InputFrame[];
+  /** 酸だまりのダメージ間隔 */
+  acidT?: number;
+  heavyTold?: boolean;
+  /** 窓をひとりでよじ登っている */
+  climb?: { t: number; dur: number; x: number; y: number; toX: number; toY: number } | null;
   /** 骨折が治るまでの秒数 */
   fracT?: number;
   fire: boolean;
@@ -113,7 +123,7 @@ interface SimPlayer extends PlayerSnap {
   useCd: number;
   idle: number;
   reloadSlot: 'prim' | 'sec' | '';
-  search: { cid: number; t: number; dur: number; x: number; y: number } | null;
+  search: { cid: number; t: number; dur: number; x: number; y: number; loud?: boolean; noiseT?: number } | null;
   /** 足音の発生タイマー */
   stepNoiseT: number;
   /** 興奮剤の残り時間 */
@@ -129,6 +139,21 @@ interface SimPlayer extends PlayerSnap {
 type ZState = 'idle' | 'investigate' | 'chase' | 'search';
 
 interface SimZombie extends ZombieSnap {
+  /** ボス（巨像）：予備動作の残り秒・突進の残り秒と向き・次の大技まで・よろめき・突進で当てた相手 */
+  teleT?: number;
+  chargeT?: number;
+  cdx?: number;
+  cdy?: number;
+  bossCd?: number;
+  stunT?: number;
+  hitIds?: number[];
+  /** 酸を吐く者：次に吐けるまで */
+  spitCd?: number;
+  /** 最後に傷ついた時刻（再生の精鋭） */
+  hurtT?: number;
+  /** 突進の精鋭：次の突進まで・構えたときの相手との距離 */
+  dashCd?: number;
+  dashD?: number;
   kx: number;
   ky: number;
   attackCd: number;
@@ -192,7 +217,7 @@ const BENCH_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['bench', 'wbench']);
 const FIRE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['campfire', 'fire']);
 
 /** 漁れる入れ物 */
-export const CONTAINER_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['shelf', 'cabinet', 'locker', 'wcase', 'fridge', 'desk', 'crate', 'mcrate', 'car', 'box', 'bag', 'drop']);
+export const CONTAINER_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['safe', 'shelf', 'cabinet', 'locker', 'wcase', 'fridge', 'desk', 'crate', 'mcrate', 'car', 'box', 'bag', 'drop']);
 /** 拠点の倉庫 */
 export const STORAGE_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(['chest', 'stash']);
 
@@ -223,6 +248,22 @@ const BUILD_RANGE_PX = 6 * TILE + 20;
 
 /** 大群の夜が来る日（4日ごと） */
 export const isHordeDay = (day: number): boolean => day % 4 === 0;
+/** 30 日モードで救助が来る日（その日の朝） */
+export const RESCUE_DAY = 30;
+/** 経路の流れ場を計算する距離の上限（範囲はアクティブなチャンクで決まるので、ここでは切らない。切ると遠くの感染体が一直線に門へ集まる） */
+const FLOW_MAX = Infinity;
+/** 1 フレームに進める流れ場の計算量（取り出すマスの数） */
+const FLOW_BUDGET = 6000;
+/** この日から冬：菜園が育たず、食料が見つかりにくく、外は冷え、雪に足跡が残る */
+export const WINTER_DAY = 21;
+/** 季節は 30 日でひとめぐり（1〜20 日目は秋、21〜30 日目は冬、31 日目から春 → また秋…）。期限なしモードで冬が終わらない詰みを防ぐ */
+export const SEASON_DAYS = 30;
+const seasonDay = (day: number): number => ((day - 1) % SEASON_DAYS) + 1;
+/** 生存者の役割（名前・毎朝くれる物） */
+const ROLE_NAME: Record<string, string> = { cook: '料理人', gunsmith: '銃職人', nurse: '看護師', scav: '回収屋' };
+const ROLE_GIFT: Record<string, string> = { cook: '缶詰 2', gunsmith: '弾 15', nurse: '包帯 2（ときどき救急キット）', scav: '鉄くず 4・布 2' };
+/** 巨像が地形にぶつかる大きさ（見た目と当たり判定は大きいが、大男が通れる所は通れる） */
+const TITAN_BODY = 20;
 
 /** 拠点の敷地内か（安全地帯） */
 export function inBase(x: number, y: number): boolean {
@@ -234,13 +275,14 @@ export function inBase(x: number, y: number): boolean {
 type LootRow = [ItemId | 'weapon' | 'attach', number, number, number];
 const LOOT: Partial<Record<ObjKind, LootRow[]>> = {
   // 序盤の詰まりを減らす：棚・机・木箱・車からも少し弾と包帯が出る。食料は出すぎないように控えめ
-  shelf: [['pack1', 0.25, 1, 1], ['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
+  shelf: [['note', 0.3, 1, 1], ['machete', 0.12, 1, 1], ['pack1', 0.25, 1, 1], ['can', 4, 1, 2], ['cloth', 3, 1, 3], ['scrap', 3, 1, 3], ['bandage', 1.7, 1, 1], ['ammo9', 2.4, 5, 12], ['gunpowder', 1, 1, 1], ['valuables', 0.5, 1, 1], ['tools', 0.15, 1, 1]],
   fridge: [['can', 4.5, 1, 2], ['mre', 1, 1, 1]],
-  cabinet: [['bandage', 5, 1, 2], ['chem', 4, 1, 2], ['medkit', 1.2, 1, 1], ['cloth', 2, 1, 2], ['stim', 0.35, 1, 1]],
-  locker: [['pack1', 0.5, 1, 1], ['pack2', 0.15, 1, 1], ['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
-  desk: [['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
-  crate: [['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
-  car: [['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
+  cabinet: [['note', 0.3, 1, 1], ['bandage', 5, 1, 2], ['chem', 4, 1, 2], ['medkit', 1.2, 1, 1], ['cloth', 2, 1, 2], ['stim', 0.35, 1, 1]],
+  locker: [['note', 0.35, 1, 1], ['fireaxe', 0.3, 1, 1], ['crowbar', 0.25, 1, 1], ['pack1', 0.5, 1, 1], ['pack2', 0.15, 1, 1], ['ammo9', 4, 6, 14], ['cloth', 2, 1, 3], ['bandage', 2, 1, 1], ['parts', 1, 1, 1], ['valuables', 1, 1, 1], ['shells', 1, 2, 5], ['ammo9ap', 0.6, 4, 10], ['holo', 0.2, 1, 1]],
+  desk: [['note', 0.6, 1, 1], ['valuables', 3, 1, 2], ['electronics', 2, 1, 1], ['ammo9', 2.8, 4, 9], ['gunpowder', 1, 1, 2], ['chem', 1, 1, 1], ['bandage', 0.6, 1, 1]],
+  crate: [['crowbar', 0.35, 1, 1], ['fireaxe', 0.12, 1, 1], ['scrap', 5, 2, 5], ['gunpowder', 3, 1, 2], ['parts', 1, 1, 1], ['cloth', 2, 1, 3], ['can', 0.8, 1, 1], ['tools', 0.35, 1, 1], ['ammo9', 1, 4, 8], ['shells', 0.5, 2, 4]],
+  car: [['crowbar', 0.3, 1, 1], ['fuel', 1.6, 1, 1], ['scrap', 5, 2, 4], ['gunpowder', 2, 1, 2], ['electronics', 1.2, 1, 1], ['can', 0.8, 1, 1], ['valuables', 0.6, 1, 1], ['tools', 0.3, 1, 1], ['ammo9', 1.1, 3, 8], ['bandage', 0.7, 1, 1], ['shells', 0.4, 2, 5]],
+  safe: [['valuables', 4, 1, 3], ['weapon', 2.2, 1, 1], ['attach', 2, 1, 1], ['ammo762ap', 1.5, 6, 14], ['ammo9ap', 1.5, 8, 16], ['upkit', 1.2, 1, 1], ['medkit', 1.5, 1, 1], ['stim', 1, 1, 1], ['pack2', 0.6, 1, 1], ['tools', 0.8, 1, 1]],
   wcase: [['ammo762', 4, 8, 20], ['ammo9', 3, 10, 20], ['shells', 3, 4, 8], ['weapon', 2, 1, 1], ['attach', 1.5, 1, 1], ['parts', 2, 1, 2], ['ammo762ap', 1, 5, 12], ['slug', 0.8, 3, 6]],
   mcrate: [['pack3', 0.35, 1, 1], ['pack2', 0.3, 1, 1], ['ammo762', 5, 10, 25], ['shells', 3, 6, 12], ['mre', 2, 1, 2], ['medkit', 2, 1, 1], ['parts', 3, 1, 2], ['attach', 1.2, 1, 1], ['weapon', 0.8, 1, 1], ['ammo762ap', 1.5, 6, 14], ['stim', 0.6, 1, 1], ['tools', 0.6, 1, 1]],
   box: [['can', 3, 1, 2], ['bandage', 2, 1, 1], ['ammo9', 2, 6, 10], ['cloth', 1, 1, 2]],
@@ -260,12 +302,12 @@ const DISTRICT_LOOT: Record<DistrictKind, { mul: LootMul; extra: LootRow[] }> = 
 };
 /** 地区ごとのゾンビの出やすさ（危険度ごとの基本の重みに掛ける・足す） */
 const DISTRICT_ZOMBIES: Record<DistrictKind, { mul: Partial<Record<ZombieType, number>>; add: Partial<Record<ZombieType, number>>; density: number; pack: number }> = {
-  residential: { mul: { walker: 1.7, runner: 1, brute: 0.6, soldier: 0.3 }, add: { screamer: 2 }, density: 1.35, pack: 0.45 },
+  residential: { mul: { walker: 1.7, runner: 1, brute: 0.6, soldier: 0.3 }, add: { screamer: 2, crawler: 6 }, density: 1.35, pack: 0.45 },
   commercial: { mul: { walker: 1, runner: 1.9, brute: 0.6, soldier: 0.4 }, add: { screamer: 9 }, density: 1.1, pack: 0.3 },
-  industrial: { mul: { walker: 1, runner: 0.6, brute: 2.2, soldier: 0.5 }, add: { bloater: 13 }, density: 1, pack: 0.15 },
-  civic: { mul: { walker: 1, runner: 1, brute: 0.8, soldier: 1.5 }, add: { bloater: 8, screamer: 3 }, density: 1.1, pack: 0.2 },
-  military: { mul: { walker: 0.5, runner: 0.6, brute: 1.2, soldier: 2.4 }, add: {}, density: 1.2, pack: 0.2 },
-  forest: { mul: { walker: 0.9, runner: 2.3, brute: 0.5, soldier: 0.3 }, add: { screamer: 2 }, density: 0.7, pack: 0.1 },
+  industrial: { mul: { walker: 1, runner: 0.6, brute: 2.2, soldier: 0.5 }, add: { bloater: 13, spitter: 8 }, density: 1, pack: 0.15 },
+  civic: { mul: { walker: 1, runner: 1, brute: 0.8, soldier: 1.5 }, add: { bloater: 8, screamer: 3, crawler: 5, spitter: 3 }, density: 1.1, pack: 0.2 },
+  military: { mul: { walker: 0.5, runner: 0.6, brute: 1.2, soldier: 2.4 }, add: { spitter: 2 }, density: 1.2, pack: 0.2 },
+  forest: { mul: { walker: 0.9, runner: 2.3, brute: 0.5, soldier: 0.3 }, add: { screamer: 2, crawler: 4 }, density: 0.7, pack: 0.1 },
   wild: { mul: { walker: 1.2, runner: 1.2, brute: 1, soldier: 0.7 }, add: { screamer: 7 }, density: 1.15, pack: 0.4 },
 };
 const BASE_ZOMBIE_WEIGHTS: Record<number, Partial<Record<ZombieType, number>>> = {
@@ -314,7 +356,7 @@ export interface SaveData {
     tool: number;
     kills: number;
     xp: number[];
-    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number; pack?: ItemId; home?: { x: number; y: number }; tut?: number };
+    body?: { fatigue: number; cold: number; bleed: boolean; frac: number; fracT: number; pack?: ItemId; mel?: Slot; home?: { x: number; y: number }; tut?: number };
   }[];
   extra?: Record<string, unknown>;
 }
@@ -437,7 +479,7 @@ export class HostSimulation {
   private nextId = 1;
   private nextObjId = BUILD_ID_START;
   // Float64 で保持する（Float32 だとヒープのキーとの丸め誤差で同じノードが何度も再投入され、計算が爆発する）
-  private flow = new Float64Array(MAP_W * MAP_H);
+  private flow: Float64Array = new Float64Array(MAP_W * MAP_H);
   private flowTimer = 0;
   private spawnTimer = 5;
   private lastStorageSent = -1;
@@ -540,6 +582,7 @@ export class HostSimulation {
     addItem(this.storage.shared, 'scrap', 8);
     addItem(this.storage.shared, 'cloth', 4);
     this.newSites(true);
+    this.newRescueSites();
     this.dayTip();
     // 初日の天候はランダム（霧で始まることもある）
     if (Math.random() < 0.3) this.setWeather(Math.random() < 0.5 ? 'fog' : 'rain', true);
@@ -549,7 +592,8 @@ export class HostSimulation {
   /** スキルを反映（最大スタミナ・回復速度） */
   private applySkills(p: SimPlayer): void {
     const m = skillMods(p.xp);
-    p.stmMax = m.staminaMax;
+    p.stmMax = m.staminaMax + (hasPerk(p.xp, 'wind') ? 15 : 0);
+    if (hasPerk(p.xp, 'tough') && p.maxHp < PLAYER.maxHp + 20) p.maxHp = PLAYER.maxHp + 20;
     p.stmRegen = m.staminaRegenMul * (p.stimT > 0 ? 1.8 : 1) * ((p.rested ?? 0) > 0 ? 1.35 : 1) * ((p.cold ?? 0) >= COLD_SLOW ? 0.6 : 1);
   }
 
@@ -562,6 +606,7 @@ export class HostSimulation {
       this.applySkills(p);
       this.events.push({ k: 'feed', cat: 'up', t: `${p.name}：${SKILLS[i].name} Lv${lv}（${SKILLS[i].desc}）`, c: '#c9e08a', id: p.id, snd: 'level' });
       this.pop(p, `${SKILLS[i].name} Lv${lv}!`, '#c9e08a');
+      for (const pk of PERKS) if (pk.skill === i && pk.lv === lv) this.events.push({ k: 'banner', t: `特典「${pk.name}」を獲得`, s: `${p.name}：${pk.desc}`, c: '#c9e08a', snd: 'level' });
     }
   }
 
@@ -664,7 +709,7 @@ export class HostSimulation {
         tool: p.tool,
         kills: p.kills,
         xp: p.xp,
-        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0, pack: p.pack, home: p.home, tut: p.tut ?? 0 },
+        body: { fatigue: p.fatigue ?? 0, cold: p.cold ?? 0, bleed: !!p.bleed, frac: p.frac ?? 0, fracT: p.fracT ?? 0, pack: p.pack, mel: p.mel, home: p.home, tut: p.tut ?? 0 },
       })),
       extra: this.saveExtra(),
     };
@@ -672,13 +717,31 @@ export class HostSimulation {
 
   /** 追加の保存項目（拡張用） */
   protected saveExtra(): Record<string, unknown> {
-    return { sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
+    return { locks: [...this.locks.entries()].map(([k, v]) => [k, v.levers]), survivors: this.survivors, notesRead: this.notesRead, runMode: this.runMode, rescue: this.rescue, rsites: this.rsites, sites: this.sites, siteSeq: this.siteSeq, jobs: this.jobs, jobSeq: this.jobSeq, radioDone: this.radioDone, vehicles: this.vehicles.map((v) => ({ ...v, seats: [-1, -1, -1], inp: null, spd: 0 })), vehSeq: this.vehSeq };
   }
 
   /** セーブから再開：同じシードで世界を作り直し、変化と状態を戻す。ロビーの各スロットに保存された人を割り当てる */
   static fromSave(lobby: LobbyPlayer[], data: SaveData): HostSimulation {
     const sim = new HostSimulation(lobby, data.seed);
     sim.events = [];
+    const rx = data.extra as { rsites?: (SiteSnap & { guards: boolean })[]; rescue?: { stage: number; parts: number; day: number }; runMode?: RunMode } | undefined;
+    if (rx?.rsites) {
+      // 生成し直したときの通信塔の箱は捨て、保存してあった物を使う
+      for (const st of sim.rsites) {
+        for (const id of st.levers ?? []) sim.world.removeObj(id);
+        sim.world.removeObj(st.crate);
+        sim.contents.delete(st.crate);
+        sim.changed.delete(st.crate);
+      }
+      sim.rsites = rx.rsites.map((x) => ({ ...x, guards: false }));
+    }
+    // 古いセーブは「期限なし」。通信塔は新しく置いたものを使う
+    sim.runMode = rx?.runMode ?? 'endless';
+    if (rx?.rescue) sim.rescue = { ...rx.rescue };
+    sim.notesRead = (data.extra as { notesRead?: number } | undefined)?.notesRead ?? 0;
+    sim.survivors = (data.extra as { survivors?: string[] } | undefined)?.survivors ?? [];
+    const lk = (data.extra as { locks?: [number, number[]][] } | undefined)?.locks;
+    if (lk) sim.locks = new Map(lk.map(([k, v]) => [k, { levers: v, pulled: new Map() }]));
     for (const id of data.removed) {
       sim.world.removeObj(id);
       sim.everRemoved.add(id);
@@ -710,14 +773,16 @@ export class HostSimulation {
       sim.radioDone = ex.radioDone ?? 0;
     }
     sim.nextObjId = Math.max(sim.nextObjId, data.nextObjId);
+    // 夜に保存していたら、動いている発電機の電気を戻す（燃料は減らさない）
+    if (sim.phase === 'night') sim.powerUp();
     sim.setWeather(data.weather, true);
     for (const p of sim.players) {
       const s = data.players.find((q) => q.id === p.id);
       if (!s) continue;
       Object.assign(p, { x: s.x, y: s.y, hp: s.hp, maxHp: s.maxHp, hunger: s.hunger, tox: s.tox, bag: s.bag, prim: s.prim, sec: s.sec, tool: s.tool, kills: s.kills });
       p.xp = p.xp.map((v, i) => Math.max(v, s.xp[i] ?? 0));
-      p.tut = TUT_ALL;
-      if (s.body) Object.assign(p, { tut: TUT_ALL, ...s.body });
+      p.tut = TUT_EVERY;
+      if (s.body) Object.assign(p, { tut: TUT_EVERY, ...s.body });
       p.lv = p.xp.map(levelOf);
       sim.applySkills(p);
       // ダウン・戦闘不能のまま保存されていたら、拠点で起き上がった状態から
@@ -887,7 +952,15 @@ export class HostSimulation {
       base: this.base,
       drop: this.dropPos(),
       jobs: this.jobs,
-      sites: this.sites.map((x) => ({ id: x.id, kind: x.kind, name: x.name, tx: x.tx, ty: x.ty, crate: x.crate, ...(x.done ? { done: true } : {}) })),
+      sites: [...this.sites, ...this.rsites].map((x) => ({ id: x.id, kind: x.kind, name: x.name, tx: x.tx, ty: x.ty, crate: x.crate, ...(x.done ? { done: true } : {}) })),
+      rescue: this.rescueSnap(),
+      ...(this.npcs.length ? { npcs: this.npcs.map((n) => ({ id: n.id, x: Math.round(n.x), y: Math.round(n.y), a: r2(n.a), hp: Math.round(n.hp), role: n.role, follow: n.follow })) } : {}),
+      ...(this.survivors.length ? { survivors: this.survivors } : {}),
+      ...(this.locks.size ? { locks: [...this.locks.keys()] } : {}),
+      ...(this.winter() ? { winter: true } : {}),
+      ...(this.winT > 0 ? { rescued: true } : {}),
+      ...(this.acid.length ? { acid: this.acid.map((a) => ({ x: Math.round(a.x), y: Math.round(a.y), r: a.r, t: r1(a.t) })) } : {}),
+      ...(this.spits.length ? { spits: this.spits.map((q) => ({ sx: Math.round(q.sx), sy: Math.round(q.sy), tx: Math.round(q.tx), ty: Math.round(q.ty), p: r2(1 - q.t / q.dur) })) } : {}),
       vehicles: this.vehicles.map((v) => ({ id: v.id, kind: v.kind, x: r1(v.x), y: r1(v.y), a: r2(v.a), spd: Math.round(v.spd), fuel: r1(v.fuel), hp: Math.round(v.hp), maxHp: v.maxHp, broken: v.broken, seats: v.seats })),
       radio: { done: this.radioDone, lv: radioLevel(this.radioDone) },
       players: this.players.map((p) => ({
@@ -897,7 +970,8 @@ export class HostSimulation {
         ...(p.sleeping ? { sleeping: true } : {}),
         ...(p.veh !== undefined ? { veh: p.veh, seat: p.seat } : {}),
         ...(p.pack ? { pack: p.pack } : {}),
-        ...((p.tut ?? 0) !== TUT_ALL ? { tut: p.tut ?? 0 } : {}),
+        ...(p.mel ? { mel: p.mel } : {}),
+        ...((p.tut ?? 0) !== TUT_EVERY ? { tut: p.tut ?? 0 } : {}),
         ...((p.rested ?? 0) > 0 ? { rested: Math.ceil(p.rested ?? 0) } : {}),
         x: r1(p.x),
         y: r1(p.y),
@@ -952,6 +1026,8 @@ export class HostSimulation {
         alert: z.state === 'chase' ? 2 : z.state === 'investigate' || z.state === 'search' ? 1 : 0,
         atk: z.atk,
         ...(z.elite ? { elite: true } : {}),
+        ...(z.tele ? { tele: z.tele } : {}),
+        ...(z.trait ? { trait: z.trait } : {}),
       })),
       bullets: this.bullets.map((b) => ({ id: b.id, owner: b.owner, x: r1(b.x), y: r1(b.y), vx: Math.round(b.vx), vy: Math.round(b.vy) })),
     };
@@ -969,6 +1045,10 @@ export class HostSimulation {
 
   step(dt: number): void {
     if (this.gameOver) return;
+    if (this.winT > 0) {
+      this.winT -= dt;
+      if (this.winT <= 0) return this.finish(true);
+    }
     this.time += dt;
     this.tick++;
     this.updateClock(dt);
@@ -976,7 +1056,12 @@ export class HostSimulation {
     this.updateJobs(dt);
     this.updateVehicles(dt);
     this.updateThrowns(dt);
+    this.updateAcid(dt);
+    this.updateNpcs(dt);
+    if (this.lit.length || this.alarms.length) this.updatePower(dt);
     this.updateSites(dt);
+    if (this.tick % 10 === 0) this.updateTracks();
+    if (this.tick % 30 === 0) for (const p of this.players) if (p.status === 'alive' && !((p.tut ?? 0) & TUT_DANGER) && this.tierAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE)) >= 3) this.tutMark(p, TUT_DANGER);
     this.updateSleep();
     this.updateReturnAdvice();
     if (this.hordeNight && this.hordeWaves > 0) {
@@ -994,7 +1079,7 @@ export class HostSimulation {
     if (this.flowTimer <= 0) {
       this.computeFlow();
       this.flowTimer = 0.4;
-    }
+    } else if (this.flowRun) this.pumpFlow(FLOW_BUDGET);
     this.updateSpawning(dt);
     this.chunkTimer -= dt;
     if (this.chunkTimer <= 0) {
@@ -1011,10 +1096,18 @@ export class HostSimulation {
     this.zombies = this.zombies.filter((z) => !z.dead);
     this.bullets = this.bullets.filter((b) => !b.dead);
 
-    if (this.players.length > 0 && !this.players.some((p) => p.status === 'alive' || p.status === 'down')) {
+    if (this.players.length > 0 && !this.players.some((p) => p.status === 'alive' || p.status === 'down')) this.finish(false);
+  }
+
+  /** 終わり：救助された（won）／全滅 */
+  private finish(won: boolean): void {
+    {
       this.gameOver = true;
       this.result = {
         day: this.day,
+        won,
+        run: this.runMode,
+        notes: this.notesRead,
         players: this.players.map((p) => ({
           id: p.id,
           name: p.name,
@@ -1045,13 +1138,30 @@ export class HostSimulation {
     if (this.phase === 'night') {
       // 夜：大群が押し寄せるのではなく、闇の中で屋外の感染体が鋭くなる（巡回は少しだけ）
       this.spawnPatrols(1);
-      if (isHordeDay(this.day)) {
+      this.powerUp();
+      const finalNight = this.rescue.day > 0 && this.day + 1 >= this.rescue.day;
+      // ボスの夜：10 日ごと・無線を直した晩・最後の夜。巨像が群れと一緒に来る
+      this.bossPending = finalNight || this.day % 10 === 0 || this.bossNightDay === this.day;
+      const bossBanner = this.bossPending && !finalNight && !isHordeDay(this.day);
+      if (bossBanner) {
+        this.hordeNight = true;
+        this.hordeWaves = 2;
+        this.hordeT = 0;
+        this.events.push({ k: 'banner', t: `DAY ${this.day} - 巨像の夜`, s: '地響きが近づいてくる。巨大な感染体が群れを率いて来る — 突進は横に避け、壁にぶつけろ', c: '#e07a3a', snd: 'horde' });
+      } else if (this.bossPending) this.events.push({ k: 'feed', cat: 'danger', t: '今夜は巨像も来る！ 突進は横に避け、壁にぶつけてよろめいた所を狙え', c: '#e07a3a', snd: 'alarm' });
+      if (finalNight) {
+        // 救助の前の晩：最後の防衛。いつもの大群より多く、長い
+        this.hordeNight = true;
+        this.hordeWaves = 5;
+        this.hordeT = 0;
+        this.events.push({ k: 'banner', t: `DAY ${this.day} - 最後の夜`, s: '夜明けに救助ヘリが来る。それまで拠点を守り抜け！', c: '#f0c040', snd: 'horde' });
+      } else if (isHordeDay(this.day)) {
         // 大群の夜：拠点の柵も破られる。3回に分けて押し寄せる
         this.hordeNight = true;
         this.hordeWaves = 3;
         this.hordeT = 0;
         this.events.push({ k: 'banner', t: `DAY ${this.day} - 大群の夜`, s: '大群が押し寄せる。今夜は拠点の柵も破られる — 朝まで持ちこたえろ', c: '#e0583e', snd: 'horde' });
-      } else this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: '闇が濃くなった。懐中電灯の光はゾンビにも見えている', c: '#aab4c8', snd: 'night' });
+      } else if (!bossBanner) this.events.push({ k: 'banner', t: `DAY ${this.day} - 夜`, s: '闇が濃くなった。懐中電灯の光はゾンビにも見えている', c: '#aab4c8', snd: 'night' });
     } else {
       if (this.hordeNight) {
         // 大群の夜を越えた：生き残った人に経験値、拠点の収納箱に特別な補給
@@ -1061,6 +1171,7 @@ export class HostSimulation {
         for (const z of this.zombies) z.keep = false;
         for (const p of this.players) {
           if (p.status !== 'alive') continue;
+          this.tutMark(p, TUT_HORDE);
           this.gainXp(p, 2, 25);
           this.gainXp(p, 1, 15);
         }
@@ -1098,6 +1209,21 @@ export class HostSimulation {
         }
       }
       this.hordeReward = false;
+      this.powerDown();
+      // 救助の朝：生き残っていればクリア（少し間をおいて結果へ）
+      if (this.rescue.day > 0 && this.day >= this.rescue.day) {
+        this.winT = 7;
+        this.events.push({ k: 'banner', t: '救助ヘリが到着！', s: `DAY ${this.day} — 生き延びた。全員、脱出する`, c: '#f0d070', snd: 'clear' });
+        return;
+      }
+      this.checkRescueParts();
+      this.announceThreat();
+      const sd = seasonDay(this.day);
+      if (sd === 1 && this.day > 1) this.events.push({ k: 'banner', t: '春が来た', s: '雪が解けた。菜園がまた育ち、食べ物も見つかるようになる', c: '#c9e08a', snd: 'day' });
+      if (sd === WINTER_DAY - 3)
+        this.events.push({ k: 'feed', cat: 'danger', t: `あと 3 日で冬（DAY ${this.day + 3}〜）：菜園が育たず、食べ物が見つかりにくくなり、外は冷える。缶詰・保存食を備蓄し、コートと焚き火の用意を`, c: '#a8d0f0', snd: 'alarm' });
+      if (sd === WINTER_DAY)
+        this.events.push({ k: 'banner', t: '冬が来た', s: '雪が積もった。外は冷え、食べ物は乏しい。足跡を感染体に追われる', c: '#cfe6ff', snd: 'night' });
       this.newJobs(true);
       this.newSites(true);
       this.dayTip();
@@ -1202,7 +1328,7 @@ export class HostSimulation {
     const cfx = (CAMPFIRE_TILE.x + 0.5) * TILE;
     const cfy = (CAMPFIRE_TILE.y + 0.5) * TILE;
     const resting = Math.hypot(p.x - cfx, p.y - cfy) < 170 || !!this.nearKind(p, FIRE_KINDS, 170);
-    if (!resting) p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt * ((p.rested ?? 0) > 0 ? 0.75 : 1));
+    if (!resting) p.hunger = Math.max(0, p.hunger - (100 / PLAYER.hungerSeconds) * dt * ((p.rested ?? 0) > 0 ? 0.75 : 1) * (this.winter() ? 1.3 : 1));
     if (p.hunger <= 0) {
       p.hp -= PLAYER.starveDps * dt;
       if (p.warnCd <= 0) {
@@ -1227,10 +1353,30 @@ export class HostSimulation {
         p.search = null;
       } else {
         s.t += dt;
+        // こじ開けの音：周りの感染体を呼び寄せる
+        if (s.loud) {
+          s.noiseT = (s.noiseT ?? 0) - dt;
+          if (s.noiseT <= 0) {
+            s.noiseT = 0.8;
+            this.makeNoise(p.x, p.y, 440, true);
+            this.events.push({ k: 'smash', x: p.x, y: p.y, kind: 'safe' });
+          }
+        }
         if (s.t >= s.dur) {
           p.search = null;
           this.openContainer(p, o);
         }
+      }
+    }
+    // 窓をよじ登る（動いたら中断）
+    if (p.climb) {
+      const c = p.climb;
+      if (Math.hypot(p.x - c.x, p.y - c.y) > 26) p.climb = null;
+      else if ((c.t += dt) >= c.dur) {
+        p.climb = null;
+        p.x = c.toX;
+        p.y = c.toY;
+        this.pop(p, '窓を乗り越えた', '#cccccc');
       }
     }
     // 中身を見ている入れ物から離れたら閉じる
@@ -1260,7 +1406,7 @@ export class HostSimulation {
       case Tool.Melee:
         if (p.swingCd <= 0) {
           this.swingAxe(p);
-          p.swingCd = AXE.interval;
+          p.swingCd = MELEE_STATS[(p.mel?.id as MeleeId) ?? 'none']?.interval ?? AXE.interval;
         }
         break;
       case Tool.Primary:
@@ -1327,10 +1473,19 @@ export class HostSimulation {
     const cur = p.tut ?? 0;
     if (cur & bit) return;
     p.tut = cur | bit;
-    const step = TUT_STEPS.find((x) => x.bit === bit);
-    const left = TUT_STEPS.filter((x) => !(p.tut! & x.bit)).length;
-    if (step) this.events.push({ k: 'feed', cat: 'up', t: `✓ はじめの一日：${step.title}${left ? `（あと ${left}）` : ''}`, c: '#c9e08a', id: p.id });
-    if (p.tut === TUT_ALL) {
+    const two = !!TUT2_STEPS.find((x) => x.bit === bit);
+    const steps = two ? TUT2_STEPS : TUT_STEPS;
+    const step = steps.find((x) => x.bit === bit);
+    const left = steps.filter((x) => !(p.tut! & x.bit)).length;
+    if (step) this.events.push({ k: 'feed', cat: 'up', t: `✓ ${two ? '生き延びる手引き' : 'はじめの一日'}：${step.title}${left ? `（あと ${left}）` : ''}`, c: '#c9e08a', id: p.id });
+    if (two && (p.tut & TUT2_ALL) === TUT2_ALL) {
+      for (const [id, n] of TUT2_REWARD) {
+        const rest = addItem(p.bag, id as ItemId, n);
+        if (rest > 0) addItem(this.storage.shared, id as ItemId, rest);
+      }
+      this.events.push({ k: 'banner', t: '生き延びる手引きを達成', s: 'ごほうび：武器強化キット・7.62mm弾×20・救急キット。あとは救助まで生き延びろ', c: '#e0c060', snd: 'level' });
+    }
+    if (!two && (p.tut & TUT_ALL) === TUT_ALL) {
       for (const [id, n] of TUT_REWARD) {
         const rest = addItem(p.bag, id as ItemId, n);
         if (rest > 0) addItem(this.storage.shared, id as ItemId, rest);
@@ -1378,7 +1533,7 @@ export class HostSimulation {
       }
       // 反動：連射するほどばらつきが増える（グリップ・スキルで軽減）
       p.heat = Math.min(HEAT_MAX[slot.id as WeaponId] ?? 0.35, p.heat + w.recoil * sk.recoilMul);
-      slot.w.mag--;
+      if (!(hasPerk(p.xp, 'thrift') && Math.random() < 0.2)) slot.w.mag--;
       p.shots++;
       p.fireCd += w.fireInterval;
       this.makeNoise(p.x, p.y, w.noiseRadius, true);
@@ -1477,7 +1632,7 @@ export class HostSimulation {
       p.bleed = false;
       this.pop(p, '止血した', '#8fbf8a');
     }
-    const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : id === 'antitox' ? 10 : id === 'herbs' ? 12 : 25) * skillMods(p.xp).healMul);
+    const v = Math.round((id === 'medkit' ? 65 : id === 'stim' ? 15 : id === 'antitox' ? 10 : id === 'herbs' ? 12 : 25) * skillMods(p.xp).healMul) + (hasPerk(p.xp, 'patch') && id !== 'antitox' ? 15 : 0);
     p.hp = Math.min(p.maxHp, p.hp + v);
     if (id === 'medkit') p.tox = Math.max(0, p.tox - 25);
     if (id === 'antitox') p.tox = Math.max(0, p.tox - 60);
@@ -1607,6 +1762,8 @@ export class HostSimulation {
           this.heal(p, s.id);
         } else if (isWeapon(s.id)) this.equip(p, n(a));
         else if (PACKS[s.id]) this.wearPack(p, n(a));
+        else if (MELEE_STATS[s.id as MeleeId]) this.equipMelee(p, n(a));
+        else if (s.id === 'note') this.readNote(p, n(a));
         else if (s.id === 'decoy' || s.id === 'pipebomb') this.throwItem(p, s.id);
         else if (s.id === 'upkit') this.upgradeWeapon(p);
         break;
@@ -1617,6 +1774,14 @@ export class HostSimulation {
       case 'unequip': {
         if (a === 'pack') {
           this.takeOffPack(p);
+          break;
+        }
+        if (a === 'mel') {
+          if (!p.mel) return;
+          if (freeSlots(p.bag) <= 0) return this.pop(p, this.fullMsg(p), '#c87a6a');
+          const i = p.bag.findIndex((q) => !q);
+          p.bag[i] = p.mel;
+          p.mel = undefined;
           break;
         }
         const key = a === 'prim' ? 'prim' : 'sec';
@@ -1732,6 +1897,7 @@ export class HostSimulation {
         if (def.id === 'storage') this.resizeStorage();
         this.storage.ver++;
         this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が拠点の${def.name}を強化した（Lv${this.base[def.id]}）`, c: '#e0cfa8', snd: 'level' });
+        this.tutMark(p, TUT_UPGRADE);
         this.pop(p, `${def.name} 強化！`, '#e0cfa8', 'craft');
         break;
       }
@@ -1759,6 +1925,7 @@ export class HostSimulation {
           }
           slot.w[att] = 1;
           this.pop(p, `${ITEMS[att].name}を取り付けた`, '#d8c48a', 'craft');
+          this.tutMark(p, TUT_UPGRADE);
         }
         slot.w.mag = Math.min(slot.w.mag, effectiveStats(slot.id, slot.w).magSize);
         break;
@@ -1907,7 +2074,15 @@ export class HostSimulation {
   /** 歩く速さの倍率とダッシュ可否（ゲストの予測でも同じ値を使う） */
   private updateMoveMods(p: SimPlayer): void {
     const k = Math.max(0, ((p.fatigue ?? 0) - FATIGUE_BAD) / (100 - FATIGUE_BAD));
-    p.spdMul = r2((p.frac === 1 ? 0.7 : p.frac === 2 ? 0.88 : 1) * (1 - 0.18 * k));
+    // 重い荷物（大型バッテリー）：ひとりだと遅い。仲間がそばにいれば二人で運べる
+    const heavy = countItem(p.bag, 'rpart3') > 0;
+    const helper = heavy && this.players.some((q) => q !== p && q.status === 'alive' && !q.away && Math.hypot(q.x - p.x, q.y - p.y) < 100);
+    const hv = heavy ? (helper ? 0.9 : 0.55) : 1;
+    if (heavy && !p.heavyTold) {
+      p.heavyTold = true;
+      this.pop(p, '大型バッテリーは重い：ひとりだと遅い。仲間がそばにいれば二人で運べる', '#e0c060');
+    }
+    p.spdMul = r2((p.frac === 1 ? 0.7 : p.frac === 2 ? 0.88 : 1) * (1 - 0.18 * k) * hv);
     p.noDash = p.frac === 1;
   }
 
@@ -1934,6 +2109,8 @@ export class HostSimulation {
       if (this.weather === 'storm') gain += 0.38 * this.wx;
       else if (this.weather === 'rain') gain += 0.26 * this.wx;
       if (this.phase === 'night') gain += 0.1;
+      // 冬：晴れていても外は冷える（夜はさらに）
+      if (this.winter()) gain += this.phase === 'night' ? 0.22 : 0.13;
     }
     if (countItem(p.bag, 'coat') > 0) gain *= 0.5;
     const coldBefore = p.cold ?? 0;
@@ -2124,6 +2301,7 @@ export class HostSimulation {
       }
       const driver = v.seats[0] >= 0 ? this.players.find((q) => q.id === v.seats[0]) : undefined;
       const pushing = !!driver && !!v.inp && Math.hypot(v.inp.mx, v.inp.my) > 0.15;
+      if (driver && Math.abs(v.spd) > 80) this.tutMark(driver, TUT_DRIVE);
       const spdBefore = v.spd;
       const hit = stepVehicle(v, driver ? v.inp : null, dt, this.world);
       // 体当たり：道の残骸・木・ドラム缶・木箱は、ぶつかると壊れる（速いほど一撃。押し続けても少しずつ）
@@ -2167,6 +2345,10 @@ export class HostSimulation {
           v.hp -= heavy;
           v.spd *= z.type === 'brute' ? 0.55 : 0.88;
           this.events.push({ k: 'crash', x: z.x, y: z.y, hard: 0.3 });
+        } else if (z.type === 'titan' && d > 0.01) {
+          // 巨像は車を押しのける（動かせなければ乗り越える）。押すたびに車も傷む
+          moveCircle(v, (-dx / d) * (r - d), (-dy / d) * (r - d), VEHICLE.radius, this.world);
+          v.hp = Math.max(0, v.hp - 6 * dt);
         } else if (d > 0.01) {
           z.x = v.x + (dx / d) * r;
           z.y = v.y + (dy / d) * r;
@@ -2213,12 +2395,26 @@ export class HostSimulation {
   }
 
   // ======================== 異変（特定の場所のイベント） ========================
-  sites: (SiteSnap & { guards: boolean })[] = [];
+  sites: (SiteSnap & { guards: boolean; crates?: number[] })[] = [];
   private siteSeq = 1;
   private siteT = 0;
 
   /** その日の異変を 1〜2 か所に起こす（危険な場所・依頼と重ならない所） */
+  /** 前の日の箱が開けられないまま残っていたら片付ける（中身・オブジェクトが日ごとに増え続けないように） */
+  private dropStale(id: number | undefined): void {
+    if (!id) return;
+    const o = this.world.objects.get(id);
+    if (!o || !o.ready) return;
+    const near = this.players.some((p) => p.viewing === id || p.search?.cid === id || Math.hypot(p.x - (o.tx + 0.5) * TILE, p.y - (o.ty + 0.5) * TILE) < 700);
+    if (near) return;
+    this.world.removeObj(id);
+    this.contents.delete(id);
+    this.changed.delete(id);
+    this.removed.push(id);
+  }
+
   private newSites(announce: boolean): void {
+    for (const st of this.sites) if (!st.done) for (const id of st.crates ?? [st.crate]) this.dropStale(id);
     const used = new Set(this.jobs.map((j) => j.loc));
     const cands = this.world.locations.map((l, i) => ({ l, i })).filter(({ l, i }) => l.tier >= 2 && l.kind !== 'base' && l.kind !== 'ruin' && !used.has(i));
     const n = 1 + (Math.random() < 0.5 ? 1 : 0);
@@ -2244,6 +2440,16 @@ export class HostSimulation {
       const name = kind === 'heli' ? `${l.name}に墜落したヘリ` : kind === 'nest' ? `${l.name}の感染体の巣` : `${l.name}の封鎖された武器庫`;
       out.push({ id: this.siteSeq++, kind, name, tx: spot[0], ty: spot[1], crate: o.id, guards: false });
     }
+    // 生存者の救出・物資の車列も、ときどき混ざる
+    this.npcs = this.npcs.filter((n) => n.follow >= 0);
+    if (this.survivors.length < 4 && Math.random() < 0.45) {
+      const st = this.newSurvivorSite();
+      if (st) out.push(st);
+    }
+    if (Math.random() < 0.3) {
+      const st = this.newConvoySite();
+      if (st) out.push(st);
+    }
     this.sites = out;
     if (announce && out.length)
       this.events.push({ k: 'feed', cat: 'danger', t: `無線：異変 — ${out.map((x) => x.name).join('／')}。見張りは手強いが、良い物がある（地図に◆）`, c: '#c08af0', snd: 'alarm' });
@@ -2253,26 +2459,56 @@ export class HostSimulation {
     this.siteT -= dt;
     if (this.siteT > 0) return;
     this.siteT = 0.5;
-    for (const st of this.sites) {
+    for (const st of [...this.sites, ...this.rsites]) {
       if (st.done) continue;
+      if (st.kind === 'survivor') {
+        // 生存者：連れ帰るか、倒れるまで
+        const n = this.npcs.find((q) => q.siteId === st.id);
+        if (!n) st.done = true;
+        else if (!st.guards && this.players.some((p) => p.status === 'alive' && Math.hypot(p.x / TILE - st.tx, p.y / TILE - st.ty) < 40)) {
+          st.guards = true;
+          (['walker', 'runner', 'walker', 'brute', 'runner'] as ZombieType[]).forEach((t, k) => {
+            const a = (k / 5) * Math.PI * 2;
+            const z = this.spawnZombie(t, (st.tx + 0.5 + Math.cos(a) * 5) * TILE, (st.ty + 0.5 + Math.sin(a) * 5) * TILE);
+            moveCircle(z, 0, 0, ZOMBIE[z.type].radius, this.world);
+            z.keep = true;
+          });
+        }
+        continue;
+      }
+      if (st.kind === 'convoy' && this.minute() >= 18 * 60) {
+        // 車列は夕方に去る（開けなかった箱は消える）
+        st.done = true;
+        for (const id of st.crates ?? [st.crate]) {
+          const o = this.world.objects.get(id);
+          if (o && o.ready) this.destroyObj(o);
+        }
+        this.events.push({ k: 'feed', cat: 'info', t: `${st.name}は去った`, c: '#aab4c8' });
+        continue;
+      }
       const crate = this.world.objects.get(st.crate);
       if (!crate || !crate.ready) {
         st.done = true;
-        this.events.push({ k: 'feed', cat: 'up', t: `異変を制圧：${st.name}`, c: '#c08af0', snd: 'clear' });
+        if (st.kind === 'tower') for (const q of this.players) if (q.status === 'alive') this.tutMark(q, TUT_PART);
+        if (st.kind === 'stash') this.events.push({ k: 'feed', cat: 'loot', t: `${st.name}を見つけた`, c: '#7fd8d0', snd: 'clear' });
+        else if (st.kind === 'tower') this.events.push({ k: 'feed', cat: 'up', t: `${st.name}を制圧 — 救助無線の部品を拠点の無線へ持ち帰れ`, c: '#f0d070', snd: 'clear' });
+        else this.events.push({ k: 'feed', cat: 'up', t: `異変を制圧：${st.name}`, c: '#c08af0', snd: 'clear' });
         for (const p of this.players) if (p.status === 'alive') this.gainXp(p, 1, 30);
         continue;
       }
       // 誰かが近づいたら見張りを出す（精鋭を含む）
+      if (st.kind === 'stash') continue;
       if (!st.guards && this.players.some((p) => p.status === 'alive' && Math.hypot(p.x / TILE - st.tx, p.y / TILE - st.ty) < 40)) {
         st.guards = true;
-        const types: ZombieType[] = st.kind === 'nest' ? ['walker', 'runner', 'walker', 'runner', 'bloater', 'walker', 'runner', 'brute'] : st.kind === 'armory' ? ['soldier', 'soldier', 'brute', 'soldier'] : ['soldier', 'runner', 'brute', 'soldier', 'runner'];
+        const tier = this.tierAt(st.tx, st.ty);
+        const types: ZombieType[] = st.kind === 'convoy' ? ['soldier', 'soldier', 'runner', 'soldier', 'brute'] : st.kind === 'tower' ? (['soldier', 'runner', 'brute', 'walker', 'runner', 'soldier', 'brute', 'runner'] as ZombieType[]).slice(0, 4 + tier) : st.kind === 'nest' ? ['walker', 'runner', 'walker', 'runner', 'bloater', 'walker', 'runner', 'brute'] : st.kind === 'armory' ? ['soldier', 'soldier', 'brute', 'soldier'] : ['soldier', 'runner', 'brute', 'soldier', 'runner'];
         types.forEach((t, k) => {
           const a = (k / types.length) * Math.PI * 2;
           for (let r = 2; r < 7; r++) {
             const x = st.tx + 0.5 + Math.cos(a) * r;
             const y = st.ty + 0.5 + Math.sin(a) * r;
             if (this.world.solid(Math.floor(x), Math.floor(y))) continue;
-            const z = this.spawnZombie(t, x * TILE, y * TILE, k < (st.kind === 'nest' ? 1 : 2));
+            const z = this.spawnZombie(t, x * TILE, y * TILE, k < (st.kind === 'tower' ? Math.max(1, tier - 2) : st.kind === 'nest' ? 1 : 2));
             z.keep = true;
             z.homeX = (st.tx + 0.5) * TILE;
             z.homeY = (st.ty + 0.5) * TILE;
@@ -2283,11 +2519,175 @@ export class HostSimulation {
     }
   }
 
+  // ======================== 救助（モード・エンディング） ========================
+  /** 遊び方：30 日目の朝に救助が来る／期限なし */
+  runMode: RunMode = 'endless';
+  /** 救助の進み具合：stage 0 部品集め・1 修理待ち・2 呼べる・3 呼んだ。day = 救助が来る日（0 = 未定） */
+  rescue = { stage: 0, parts: 0, day: 0 };
+  /** 救助無線の部品がある場所（通信塔など）。毎朝入れ替わる異変とは別で、ずっと残る */
+  rsites: (SiteSnap & { guards: boolean; crates?: number[]; levers?: number[] })[] = [];
+  /** 救助ヘリが着くまでの演出の残り秒 */
+  private winT = 0;
+  /** 救助を呼ぶ前の確認（もう一度 [F]） */
+  private callConfirm = new Map<number, number>();
+
+  /** 新しいゲームの遊び方を決める（ソロ・ホスト・ローカル協力の開始時） */
+  setRunMode(m: RunMode): void {
+    this.runMode = m;
+    if (m === 'd30' && !this.rescue.day) this.rescue.day = RESCUE_DAY;
+    this.events.push({
+      k: 'feed',
+      cat: 'info',
+      t: m === 'd30' ? `30日モード：DAY ${RESCUE_DAY} の朝に救助が来る。前の晩が最後の防衛。無線を直せば早く呼べる` : '期限なしモード：救助は来ない。無線の部品を3つ集めて直せば、自分で救助を呼べる',
+      c: '#f0d070',
+    });
+  }
+
+  private rescueSnap(): RescueSnap {
+    return { mode: this.runMode, stage: this.rescue.stage, parts: this.rescue.parts, threat: this.threat(), ...(this.rescue.day ? { day: this.rescue.day } : {}) };
+  }
+
+  /** 部品の置き場所：近い・中くらい・遠いの 3 か所（危険度 2・3・4 の施設） */
+  private newRescueSites(only?: number): void {
+    const used = new Set<number>();
+    const locOf = (st: SiteSnap) => this.world.locations.findIndex((l) => st.tx >= l.x && st.ty >= l.y && st.tx < l.x + l.w && st.ty < l.y + l.h);
+    for (const st of [...this.sites, ...this.rsites]) used.add(locOf(st));
+    for (const j of this.jobs) used.add(j.loc);
+    const names = ['通信塔', '無線基地', '発電所跡'];
+    for (let k = 0; k < 3; k++) {
+      if (only !== undefined && k !== only) continue;
+      const want = 2 + k;
+      const cands = this.world.locations
+        .map((l, i) => ({ l, i }))
+        .filter(({ l, i }) => l.kind !== 'base' && l.kind !== 'ruin' && !used.has(i))
+        .sort((a, b) => Math.abs(a.l.tier - want) - Math.abs(b.l.tier - want) + (Math.random() - 0.5) * 0.9);
+      for (const { l, i } of cands) {
+        const spot = this.crateSpot(i);
+        if (!spot) continue;
+        used.add(i);
+        const o: SimObj = { id: this.nextObjId++, kind: 'mcrate', tx: spot[0], ty: spot[1], hp: 1, maxHp: 1, ready: 1, regrowT: 0 };
+        this.world.setObj(o);
+        this.changed.add(o.id);
+        const c = emptyBag(8);
+        addItem(c, (['rpart1', 'rpart2', 'rpart3'] as ItemId[])[k], 1);
+        addItem(c, 'ammo762', 10 + k * 10);
+        if (k >= 1) addItem(c, 'medkit', 1);
+        if (k >= 2) addItem(c, 'upkit', 1);
+        this.contents.set(o.id, c);
+        const st: SiteSnap & { guards: boolean; levers?: number[] } = { id: this.siteSeq++, kind: 'tower' as const, name: `${l.name}の${names[k]}`, tx: spot[0], ty: spot[1], crate: o.id, guards: false };
+        // 無線基地：箱はシャッターの中。離れた 2 つのレバーを同時に（3 秒以内に）引くと開く。ひとりなら工具で鍵を壊す
+        if (k === 1) {
+          const lv: number[] = [];
+          // 施設の空いたマスから、いちばん離れた 2 つ（ひとりでは同時に引けない距離）
+          const free: [number, number][] = [];
+          for (let y = l.y + 1; y < l.y + l.h - 1; y++)
+            for (let x = l.x + 1; x < l.x + l.w - 1; x++) if (!this.world.solid(x, y) && !this.world.objAt(x, y) && Math.hypot(x - spot[0], y - spot[1]) >= 2) free.push([x, y]);
+          let pair: [number, number][] | null = null;
+          let bestD = 4;
+          for (let i = 0; i < free.length; i += 2)
+            for (let j = i + 1; j < free.length; j += 3) {
+              const d = Math.hypot(free[i][0] - free[j][0], free[i][1] - free[j][1]);
+              if (d > bestD) {
+                bestD = d;
+                pair = [free[i], free[j]];
+              }
+            }
+          for (const [x, y] of pair ?? []) {
+            const lo: SimObj = { id: this.nextObjId++, kind: 'lever', tx: x, ty: y, hp: 1, maxHp: 1, ready: 0, regrowT: 0 };
+            this.world.setObj(lo);
+            this.changed.add(lo.id);
+            lv.push(lo.id);
+          }
+          if (lv.length === 2) {
+            st.levers = lv;
+            this.locks.set(o.id, { levers: lv, pulled: new Map() });
+          }
+        }
+        this.rsites = [...this.rsites, st];
+        break;
+      }
+    }
+  }
+
+  /** その部品がどこかに残っているか（持ち物・倉庫・箱・落とした袋・トランク） */
+  private partExists(id: ItemId): boolean {
+    for (const p of this.players) if (countItem(p.bag, id) > 0) return true;
+    if (countItem(this.storage.shared, id) > 0) return true;
+    for (const b of Object.values(this.storage.personal)) if (countItem(b, id) > 0) return true;
+    for (const c of this.contents.values()) if (countItem(c, id) > 0) return true;
+    return false;
+  }
+
+  /** 毎朝：失くした部品があれば、新しい場所に置き直す（進行不能にしない） */
+  private checkRescueParts(): void {
+    if (this.rescue.stage > 0) return;
+    (['rpart1', 'rpart2', 'rpart3'] as ItemId[]).forEach((id, k) => {
+      if (this.rescue.parts & (1 << k)) return;
+      if (this.partExists(id)) return;
+      // 古い置き場所（箱の中身が入れ替わった・制圧済み）は地図から消す
+      this.rsites = this.rsites.filter((x) => !x.name.endsWith(['通信塔', '無線基地', '発電所跡'][k]));
+      this.newRescueSites(k);
+      this.events.push({ k: 'feed', cat: 'info', t: `無線：失くした「${ITEMS[id].name}」の代わりが見つかった（地図に◆）`, c: '#f0d070' });
+    });
+  }
+
+  /** 拠点の無線：部品の取り付け → 修理 → 救助を呼ぶ */
+  private rescueRadio(p: SimPlayer): boolean {
+    const r = this.rescue;
+    if (r.stage === 0) {
+      const got: string[] = [];
+      (['rpart1', 'rpart2', 'rpart3'] as ItemId[]).forEach((id, k) => {
+        if (r.parts & (1 << k)) return;
+        if (countItem(p.bag, id) + countItem(this.storage.shared, id) < 1) return;
+        this.payCost(p, { [id]: 1 });
+        r.parts |= 1 << k;
+        got.push(ITEMS[id].name);
+      });
+      if (!got.length) return false;
+      const n = [1, 2, 4].filter((b) => r.parts & b).length;
+      if (n >= 3) r.stage = 1;
+      this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が救助無線に ${got.join('・')} を取り付けた（${n}/3）${n >= 3 ? ' — 部品がそろった！ 修理には 工具セット1・電子部品2' : ''}`, c: '#f0d070', snd: 'clear' });
+      return true;
+    }
+    if (r.stage === 1) {
+      const need: Partial<Record<ItemId, number>> = { tools: 1, electronics: 2 };
+      const short = (Object.entries(need) as [ItemId, number][]).find(([m, n]) => countItem(p.bag, m) + countItem(this.storage.shared, m) < n);
+      if (short) {
+        this.pop(p, `救助無線の修理に必要：工具セット1・電子部品2（足りない：${ITEMS[short[0]].name}）`, '#f0d070', 'error');
+        return true;
+      }
+      this.payCost(p, need);
+      r.stage = 2;
+      // 無線が直った晩は、電波に引かれて巨像が来る
+      this.bossNightDay = this.phase === 'night' ? this.day + 1 : this.day;
+      this.events.push({ k: 'feed', cat: 'up', t: `${p.name} が救助無線を直した！ もう一度 無線で [F] — 救助を呼べる`, c: '#f0d070', snd: 'clear' });
+      return true;
+    }
+    if (r.stage === 2) {
+      // 呼ぶと次の朝に救助（夜に呼んだら翌々日の朝）。その前の晩が最後の防衛
+      const rd = this.phase === 'night' ? this.day + 2 : this.day + 1;
+      const last = this.callConfirm.get(p.id) ?? -99;
+      if (this.time - last > 4) {
+        this.callConfirm.set(p.id, this.time);
+        this.pop(p, `もう一度 [F] で救助を呼ぶ — DAY ${rd} の朝に救助。前の晩は最後の防衛（大群）`, '#f0d070');
+        return true;
+      }
+      r.stage = 3;
+      r.day = r.day ? Math.min(r.day, rd) : rd;
+      this.announceThreat();
+      this.events.push({ k: 'banner', t: '救助を呼んだ', s: `救助ヘリは DAY ${r.day} の朝に来る。それまで生き延びろ — 前の晩は最後の防衛`, c: '#f0d070', snd: 'alarm' });
+      return true;
+    }
+    this.pop(p, `救助は DAY ${r.day} の朝に来る`, '#f0d070');
+    return true;
+  }
+
   // ======================== 無線の依頼 ========================
 
   /** その日の依頼を作り直す（物資箱を施設に置く） */
   private newJobs(announce: boolean): void {
     const lv = radioLevel(this.radioDone);
+    for (const j of this.jobs) if (!j.done) this.dropStale(j.crate);
     const jobs = makeJobs(this.world.locations, this.day, lv, Math.random, this.jobSeq);
     this.jobSeq += jobs.length;
     for (const j of jobs) {
@@ -2359,6 +2759,7 @@ export class HostSimulation {
       reported++;
     }
     if (reported) return;
+    if (this.rescueRadio(p)) return;
     const open = this.jobs.filter((j) => !j.done);
     if (!open.length) return this.pop(p, '無線：今日の依頼はすべて達成した。明日の朝に新しい依頼が届く', '#8ac0e0');
     const f = open.find((j) => j.kind === 'fetch');
@@ -2454,6 +2855,15 @@ export class HostSimulation {
   /** [F]：雨水タンクの水を回収／傷んだ物を修理 */
   private useBuilt(p: SimPlayer, o: SimObj): void {
     const def = buildDef(o.kind)!;
+    if (o.kind === 'gen' && o.hp >= o.maxHp * 0.6) {
+      if (o.ready >= 3) return this.pop(p, '発電機の燃料は満タン（3 晩分）', '#cccccc');
+      if (countItem(p.bag, 'fuel') + countItem(this.storage.shared, 'fuel') < 1) return this.pop(p, `発電機：燃料が要る（残り ${o.ready} 晩分）`, '#e0c060', 'error');
+      this.payCost(p, { fuel: 1 });
+      o.ready++;
+      this.changed.add(o.id);
+      if (this.phase === 'night' && !o.regrowT) this.powerUp();
+      return this.pop(p, `発電機に給油した（${o.ready} 晩分）`, '#e0c060', 'craft');
+    }
     if (o.kind === 'raintank' && o.ready > 0) {
       const left = addItem(p.bag, 'water', o.ready);
       const got = o.ready - left;
@@ -2490,6 +2900,19 @@ export class HostSimulation {
   private craft(p: SimPlayer, id: string): void {
     const r = RECIPES.find((x) => x.id === id);
     if (!r) return;
+    if (r.id === 'meleefix') {
+      const ms = p.mel ? MELEE_STATS[p.mel.id as MeleeId] : null;
+      if (!ms) return this.pop(p, '修理する近接武器を装備していない', '#c87a6a');
+      if ((p.mel!.w?.mag ?? ms.dur) >= ms.dur) return this.pop(p, `${ms.name}は傷んでいない`, '#cccccc');
+      if (!this.nearKind(p, BENCH_KINDS, BENCH_RANGE)) return this.pop(p, '作業台の近くでないと修理できない', '#c87a6a');
+      const short = (Object.entries(r.cost) as [ItemId, number][]).find(([m, k]) => countItem(p.bag, m) + countItem(this.storage.shared, m) < k);
+      if (short) return this.pop(p, '素材が足りない', '#c87a6a');
+      this.payCost(p, r.cost);
+      p.mel!.w = { mag: ms.dur };
+      this.pop(p, `${ms.name}を修理した`, '#c9a85a', 'craft');
+      this.tutMark(p, TUT_CRAFT);
+      return;
+    }
     if (r.station === 'stove' && !this.nearKind(p, STOVE_KINDS, BENCH_RANGE)) {
       this.pop(p, '調理かまどの近くで作る（拠点に建てられる）', '#c87a6a');
       return;
@@ -2573,6 +2996,9 @@ export class HostSimulation {
 
   /** F キー：いちばん近いドア／入れ物／倉庫を操作。何もなければ回復/食事 */
   private interact(p: SimPlayer): void {
+    if (this.talkNpc(p)) return;
+    // 窓の正面なら、窓を越える（仲間がいれば肩車）
+    if (!p.veh && this.tryWindow(p)) return;
     if (p.viewing || p.storage) {
       p.viewing = 0;
       p.storage = 0;
@@ -2607,6 +3033,8 @@ export class HostSimulation {
           o.kind === 'cot' ||
           o.kind === 'sbox' ||
           o.kind === 'radio' ||
+          o.kind === 'lever' ||
+          o.kind === 'gen' ||
           (BUILD_KINDS.has(o.kind) && (o.hp < o.maxHp || (o.kind === 'raintank' && o.ready > 0)));
         if (!usable) continue;
         const d = Math.hypot((o.tx + 0.5) * TILE - p.x, (o.ty + 0.5) * TILE - p.y) - (o.kind === 'door' ? 0 : 6);
@@ -2629,6 +3057,8 @@ export class HostSimulation {
       this.useRadio(p);
       return;
     }
+    if (best && best.kind === 'lever') return this.pullLever(p, best);
+    if (best && this.locks.has(best.id)) return this.cutLock(p, best);
     if (best && BUILD_KINDS.has(best.kind)) {
       this.useBuilt(p, best);
       return;
@@ -2647,13 +3077,37 @@ export class HostSimulation {
     const tier = this.tierAt(best.tx, best.ty);
     const fresh = best.ready === 1 && best.kind !== 'bag';
     const base = fresh ? 1.5 + tier * 0.15 + (best.kind === 'wcase' || best.kind === 'mcrate' || best.kind === 'drop' ? 0.5 : 0) : 0.3;
-    const dur = base * skillMods(p.xp).searchMul;
-    p.search = { cid: best.id, t: 0, dur, x: p.x, y: p.y };
+    let dur = base * skillMods(p.xp).searchMul;
+    let loud = false;
+    // 金庫：バールを構えていれば速いがうるさい。工具セットなら遅いが静か。どちらもなければ開かない
+    if (best.kind === 'safe' && fresh) {
+      const bar = p.mel?.id === 'crowbar' && p.tool === Tool.Melee;
+      const pick = hasPerk(p.xp, 'pick');
+      if (!bar && countItem(p.bag, 'tools') < 1 && !pick) {
+        if (p.mel?.id === 'crowbar') return this.pop(p, '金庫：バールを構えて（近接に持ち替えて）[F]', '#e0c060', 'error');
+        return this.pop(p, '金庫：バールでこじ開けるか、工具セットで開ける', '#e0c060', 'error');
+      }
+      loud = bar;
+      dur = bar ? 3 : pick ? (countItem(p.bag, 'tools') > 0 ? 4 : 10) : 8;
+      if (bar && p.mel?.w) p.mel.w.mag = Math.max(1, p.mel.w.mag - 12);
+      this.pop(p, bar ? 'バールで金庫をこじ開けている — 大きな音が響く！' : '工具セットで金庫を静かに開けている（8 秒）', '#e0c060');
+    }
+    p.search = { cid: best.id, t: 0, dur, x: p.x, y: p.y, loud };
     if (fresh) this.events.push({ k: 'search', id: p.id, x: (best.tx + 0.5) * TILE, y: (best.ty + 0.5) * TILE, done: false });
   }
 
   private openContainer(p: SimPlayer, o: SimObj): void {
-    if (!this.contents.has(o.id)) this.contents.set(o.id, this.rollLoot(o));
+    if (this.locks.has(o.id)) {
+      // 鍵を焼き切った
+      this.locks.delete(o.id);
+      this.events.push({ k: 'feed', cat: 'up', t: `${p.name} がシャッターの鍵を壊した`, c: '#e0c060' });
+    }
+    if (!this.contents.has(o.id)) {
+      const c = this.rollLoot(o);
+      // 目利き：もう一度レアの抽選
+      if (hasPerk(p.xp, 'eye') && o.kind !== 'box' && o.kind !== 'bag') this.rareDrop(c, this.tierAt(o.tx, o.ty), 2);
+      this.contents.set(o.id, c);
+    }
     const cj = this.jobs.find((j) => j.crate === o.id && j.kind === 'cache' && !j.done);
     if (cj) this.completeJob(cj, p);
     if (o.ready && o.kind !== 'bag') this.gainXp(p, 0, 4 + this.tierAt(o.tx, o.ty) * 3 + (o.kind === 'drop' ? 15 : 0));
@@ -2664,7 +3118,7 @@ export class HostSimulation {
     if (o.ready && o.kind !== 'bag') {
       o.ready = 0;
       // 探索済みの入れ物は 2〜3日ほどで中身が戻る（長い1日でも同じ所を回るだけにならない）
-      o.regrowT = CYCLE_SECONDS * (2 + Math.random());
+      o.regrowT = o.kind === 'safe' ? 1e12 : CYCLE_SECONDS * (2 + Math.random());
       this.changed.add(o.id);
       this.events.push({ k: 'search', id: p.id, x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, done: true });
       this.tutMark(p, TUT_SEARCH);
@@ -2692,8 +3146,8 @@ export class HostSimulation {
   }
 
   /** レアドロップ：まれに、どの入れ物からも良い物が出る */
-  private rareDrop(out: (Slot | null)[], tier: number): void {
-    if (Math.random() > 0.02 + tier * 0.01) return;
+  private rareDrop(out: (Slot | null)[], tier: number, mul = 1): void {
+    if (Math.random() > (0.02 + tier * 0.01) * mul) return;
     const r = Math.random();
     if (r < 0.45) {
       const pool: WeaponId[] = tier >= 3 ? ['rifle', 'hunting', 'dmr', 'shotgun'] : ['smg', 'shotgun', 'pistol', 'rifle'];
@@ -2746,6 +3200,14 @@ export class HostSimulation {
       }
     }
     if (o.kind !== 'box' && o.kind !== 'bag') this.rareDrop(out, tier);
+    // 冬：食べ物はほとんど見つからない（7 割は空・残りも半分）。秋のうちに備蓄する
+    if (this.winter() && o.kind !== 'box' && o.kind !== 'drop')
+      for (let i = 0; i < out.length; i++) {
+        const sl = out[i];
+        if (!sl || ITEMS[sl.id].cat !== 'food') continue;
+        if (Math.random() < 0.7) out[i] = null;
+        else sl.n = Math.max(1, Math.floor(sl.n / 2));
+      }
     return out;
   }
 
@@ -2782,32 +3244,55 @@ export class HostSimulation {
   // ======================== 近接・ダウン・蘇生 ========================
 
   private swingAxe(p: SimPlayer): void {
-    if (p.stamina < PLAYER.meleeStamina) {
+    const ms = MELEE_STATS[(p.mel?.id as MeleeId) ?? 'none'] ?? MELEE_STATS.none;
+    if (p.stamina < ms.stamina) {
       if (p.warnCd <= 0) {
         this.pop(p, 'スタミナ切れ！', '#c99a5a');
         p.warnCd = 1;
       }
       return;
     }
-    p.stamina -= PLAYER.meleeStamina;
+    p.stamina -= ms.stamina;
     p.staminaDelay = PLAYER.staminaDelay;
     p.swings++;
-    this.makeNoise(p.x, p.y, AXE.noiseRadius, false);
+    this.makeNoise(p.x, p.y, ms.noise, false);
     let hits = 0;
     for (const z of this.zombies) {
-      if (z.dead || hits >= 3) continue;
+      if (z.dead || hits >= ms.hits) continue;
       const r = ZOMBIE[z.type].radius;
       const dx = z.x - p.x;
       const dy = z.y - p.y;
       const d = Math.hypot(dx, dy);
-      if (d > AXE.range + r) continue;
-      if (Math.abs(angleDiff(p.aim, Math.atan2(dy, dx))) > AXE.arc / 2 && d > r + PLAYER.radius) continue;
+      if (d > ms.range + r) continue;
+      if (Math.abs(angleDiff(p.aim, Math.atan2(dy, dx))) > ms.arc / 2 && d > r + PLAYER.radius) continue;
       // 気づいていない相手への奇襲は大ダメージ
       const sneak = z.state !== 'chase' ? 2.2 : 1;
       this.events.push({ k: 'hit', x: z.x - (dx / (d || 1)) * r * 0.6, y: z.y - (dy / (d || 1)) * r * 0.6, o: p.id, a: Math.atan2(dy, dx), m: 1 });
-      this.damageZombie(z, AXE.damage * sneak, p.id, dx, dy, 260);
+      this.damageZombie(z, ms.damage * sneak, p.id, dx, dy, ms.knock);
+      // 近接の手応え：当たると一瞬ひるむ（次の攻撃が遅れる）。巨体はひるみにくい
+      z.attackCd = Math.max(z.attackCd, z.type === 'titan' || z.type === 'brute' ? 0.3 : 0.6);
       hits++;
     }
+    // 耐久：当てた数だけ減る。尽きたら壊れて、ふつうの斧に戻る
+    if (hits && p.mel) {
+      const w = (p.mel.w ??= { mag: ms.dur });
+      w.mag -= hits;
+      if (w.mag <= 0) {
+        this.pop(p, `${ms.name}が壊れた！（作業台で修理できたのに…）`, '#e07a60', 'error');
+        p.mel = undefined;
+      } else if (w.mag === Math.floor(ms.dur * 0.2)) this.pop(p, `${ms.name}が傷んできた（残り 20%）— 作業台で修理`, '#e0a33a');
+    }
+  }
+
+  /** 近接武器を持ち替える（持っていた物はバッグへ） */
+  private equipMelee(p: SimPlayer, idx: number): void {
+    const s = p.bag[idx];
+    if (!s || !MELEE_STATS[s.id as MeleeId]) return;
+    const prev = p.mel;
+    p.mel = { id: s.id, n: 1, w: s.w ?? { mag: MELEE_STATS[s.id as MeleeId].dur } };
+    p.bag[idx] = prev ?? null;
+    p.tool = Tool.Melee;
+    this.pop(p, `${MELEE_STATS[s.id as MeleeId].name}を構えた`, '#c9a85a');
   }
 
   private updateRevive(dt: number): void {
@@ -2815,10 +3300,10 @@ export class HostSimulation {
       if (d.status !== 'down') continue;
       const reviver = this.players.find((p) => p !== d && p.status === 'alive' && p.revive && Math.hypot(p.x - d.x, p.y - d.y) <= PLAYER.reviveRange);
       if (reviver) {
-        d.reviveProgress += dt * skillMods(reviver.xp).reviveMul;
+        d.reviveProgress += dt * skillMods(reviver.xp).reviveMul * (hasPerk(reviver.xp, 'savior') ? 2 : 1);
         if (d.reviveProgress >= PLAYER.reviveTime) {
           d.status = 'alive';
-          d.hp = d.maxHp * PLAYER.reviveHpRatio;
+          d.hp = d.maxHp * (hasPerk(reviver.xp, 'savior') ? 0.6 : PLAYER.reviveHpRatio);
           d.hunger = Math.max(d.hunger, 30);
           d.reviveProgress = 0;
           d.downTimer = 0;
@@ -2838,6 +3323,7 @@ export class HostSimulation {
     if (p.veh) dmg *= 0.5; // 車の中は守られている
     p.hp -= dmg;
     p.search = null; // 攻撃されたら探索は中断
+    p.climb = null;
     this.events.push({ k: 'phit', id: p.id });
     this.events.push({ k: 'dmg', x: p.x, y: p.y - 20, v: Math.round(dmg), p: true });
     if (p.hp <= 0) this.downPlayer(p);
@@ -2941,26 +3427,41 @@ export class HostSimulation {
     return objIsSolid(o) ? -1 : 1;
   }
 
+  /** 流れ場：何フレームかに分けて計算し、できあがったら差し替える（一度に全部解くと 1 フレームが重くなる） */
+  private flowBuf: Float64Array | null = null;
+  private flowRun: { heap: MinHeap; dist: Float64Array } | null = null;
   private computeFlow(): void {
-    const flow = this.flow;
-    flow.fill(Infinity);
+    if (this.flowRun) return; // 前の計算がまだ途中
+    const dist = (this.flowBuf ??= new Float64Array(MAP_W * MAP_H));
+    dist.fill(Infinity);
     const heap = new MinHeap();
     for (const p of this.players) {
       if (p.status !== 'alive' || p.away || this.safeIn(p.x, p.y)) continue;
       const i = Math.floor(p.y / TILE) * MAP_W + Math.floor(p.x / TILE);
-      flow[i] = 0;
+      dist[i] = 0;
       heap.push(0, i);
     }
-    if (heap.size === 0) return;
+    if (heap.size === 0) {
+      this.flow.fill(Infinity);
+      return;
+    }
+    this.flowCost.fill(-2);
+    this.flowRun = { heap, dist };
+    this.pumpFlow(FLOW_BUDGET);
+  }
+
+  private pumpFlow(budget: number): void {
+    const run = this.flowRun;
+    if (!run) return;
+    const { heap, dist } = run;
     const cost = this.flowCost;
-    cost.fill(-2);
     const getCost = (i: number) => {
       if (cost[i] === -2) cost[i] = this.enterCost(i);
       return cost[i];
     };
-    while (heap.size > 0) {
+    while (heap.size > 0 && budget-- > 0) {
       const [d, i] = heap.pop();
-      if (d > flow[i]) continue;
+      if (d > dist[i]) continue;
       const x = i % MAP_W;
       const y = (i - x) / MAP_W;
       for (const [dx, dy, w] of NEIGHBORS) {
@@ -2972,11 +3473,19 @@ export class HostSimulation {
         if (c < 0) continue;
         if (dx && dy && (getCost(y * MAP_W + nx) !== 1 || getCost(ny * MAP_W + x) !== 1)) continue;
         const nd = d + c * w;
-        if (nd < flow[j]) {
-          flow[j] = nd;
+        // 遠すぎる所は計算しない（そこにいる感染体は眠っているか、まっすぐ向かう）
+        if (nd > FLOW_MAX) continue;
+        if (nd < dist[j]) {
+          dist[j] = nd;
           heap.push(nd, j);
         }
       }
+    }
+    if (heap.size === 0) {
+      // できあがり：差し替える
+      this.flowBuf = this.flow;
+      this.flow = dist;
+      this.flowRun = null;
     }
   }
 
@@ -3089,10 +3598,11 @@ export class HostSimulation {
   private typeAt(tier: number, tx: number, ty: number): ZombieType {
     const d = districtAt(this.world.districts, tx, ty);
     if (!d) return this.typeForTier(tier);
+    tier = this.boostTier(tier);
     const tr = DISTRICT_ZOMBIES[d.kind];
     const base = BASE_ZOMBIE_WEIGHTS[Math.max(1, Math.min(4, tier))];
     const w: [ZombieType, number][] = [];
-    for (const t of ['walker', 'runner', 'brute', 'soldier', 'bloater', 'screamer'] as ZombieType[]) {
+    for (const t of ['walker', 'runner', 'brute', 'soldier', 'bloater', 'screamer', 'crawler', 'spitter'] as ZombieType[]) {
       const v = (base[t] ?? 0) * (tr.mul[t] ?? 1) + (tr.add[t] ?? 0) * (tier >= 2 ? 1 : 0.4);
       if (v > 0) w.push([t, v]);
     }
@@ -3101,7 +3611,619 @@ export class HostSimulation {
     return 'walker';
   }
 
+  // ======================== 冬 ========================
+  winter(): boolean {
+    return seasonDay(this.day) >= WINTER_DAY;
+  }
+  /** 雪の足跡：外を歩くと残る。うろついている感染体が新しい足跡を見つけると、たどって来る */
+  private tracks: { x: number; y: number; t: number; id: number }[] = [];
+  private updateTracks(): void {
+    if (!this.winter()) {
+      if (this.tracks.length) this.tracks = [];
+      return;
+    }
+    for (const p of this.players) {
+      if (p.status !== 'alive' || p.veh || p.away) continue;
+      if (INDOOR_FLOORS.has(this.world.terrainAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE)))) continue;
+      const last = this.lastTrack.get(p.id);
+      if (last && Math.hypot(last.x - p.x, last.y - p.y) < 60) continue;
+      const tr = { x: p.x, y: p.y, t: this.time, id: p.id };
+      this.tracks.push(tr);
+      this.lastTrack.set(p.id, tr);
+    }
+    while (this.tracks.length && this.time - this.tracks[0].t > 30) this.tracks.shift();
+    if (this.tracks.length > 400) this.tracks.splice(0, this.tracks.length - 400);
+  }
+  private lastTrack = new Map<number, { x: number; y: number }>();
+  /** うろついている感染体が足跡を見つけたら、その先（新しい方）へ向かう */
+  private followTracks(z: SimZombie): void {
+    if (!this.tracks.length || z.state === 'chase' || z.type === 'titan') return;
+    for (let i = this.tracks.length - 1; i >= 0; i--) {
+      const tr = this.tracks[i];
+      if (Math.abs(tr.x - z.x) > 110 || Math.abs(tr.y - z.y) > 110) continue;
+      if (Math.hypot(tr.x - z.x, tr.y - z.y) > 110) continue;
+      // 同じ人の、もっと新しい足跡（数歩先）へ
+      let next = tr;
+      for (let k = i + 1, n = 0; k < this.tracks.length && n < 4; k++) if (this.tracks[k].id === tr.id) ((next = this.tracks[k]), n++);
+      z.state = 'investigate';
+      z.stateT = 6;
+      z.targetX = next.x;
+      z.targetY = next.y;
+      z.alert = 1;
+      return;
+    }
+  }
+
+  // ======================== 拠点の電気 ========================
+  /** いま光っている投光器（夜・電気あり）と、鳴らせる警報 */
+  lit: { x: number; y: number }[] = [];
+  private alarms: { o: SimObj; t: number }[] = [];
+
+  /** 夜の始まり（と夜中の給油）：燃料のある発電機が一晩動き、近くの投光器・警報に電気が届く */
+  private powerUp(): void {
+    const gens = [...this.world.objects.values()].filter((o) => o.kind === 'gen');
+    for (const g of gens)
+      if (!g.regrowT && g.ready > 0) {
+        g.ready--;
+        g.regrowT = 1;
+        this.changed.add(g.id);
+      }
+    const running = gens.filter((g) => g.regrowT === 1);
+    const powered = (o: SimObj) => running.some((g) => Math.hypot(g.tx - o.tx, g.ty - o.ty) <= 14);
+    this.lit = [];
+    this.alarms = [];
+    for (const o of this.world.objects.values()) {
+      if (o.kind !== 'flood' && o.kind !== 'alarm') continue;
+      const on = powered(o) ? 1 : 0;
+      if (o.ready !== on) {
+        o.ready = on;
+        this.changed.add(o.id);
+      }
+      if (!on) continue;
+      if (o.kind === 'flood') this.lit.push({ x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE });
+      else this.alarms.push({ o, t: 0 });
+    }
+    if (running.length) this.events.push({ k: 'feed', cat: 'info', t: `発電機が動いている — 投光器 ${this.lit.length}・警報 ${this.alarms.length}（残りの燃料 ${running.map((g) => g.ready).join('/')} 晩分）`, c: '#e0c060' });
+  }
+
+  private powerDown(): void {
+    for (const o of this.world.objects.values()) {
+      if ((o.kind === 'gen' && o.regrowT) || ((o.kind === 'flood' || o.kind === 'alarm') && o.ready)) {
+        if (o.kind === 'gen') o.regrowT = 0;
+        else o.ready = 0;
+        this.changed.add(o.id);
+      }
+    }
+    this.lit = [];
+    this.alarms = [];
+  }
+
+  inLight(x: number, y: number): boolean {
+    for (const l of this.lit) if (Math.abs(l.x - x) < 280 && Math.abs(l.y - y) < 280 && Math.hypot(l.x - x, l.y - y) < 280) return true;
+    return false;
+  }
+
+  /** 警報：近づく感染体を方角つきで知らせる（20 秒に 1 回）。壊れた機器は外す */
+  private updatePower(dt: number): void {
+    if (this.tick % 15 !== 0) return;
+    this.lit = this.lit.filter((l) => this.world.objAt(Math.floor(l.x / TILE), Math.floor(l.y / TILE))?.kind === 'flood');
+    this.alarms = this.alarms.filter((a) => this.world.objects.get(a.o.id));
+    for (const a of this.alarms) {
+      a.t -= dt * 15;
+      if (a.t > 0) continue;
+      const ax = (a.o.tx + 0.5) * TILE;
+      const ay = (a.o.ty + 0.5) * TILE;
+      const n = this.zombies.filter((z) => !z.dead && Math.abs(z.x - ax) < 240 && Math.abs(z.y - ay) < 240).length;
+      if (!n) continue;
+      a.t = 20;
+      this.events.push({ k: 'feed', cat: 'danger', t: `警報：拠点の${directionName(a.o.tx, a.o.ty)}側に感染体 ${n} 体！`, c: '#e0583e', snd: 'alarm' });
+    }
+  }
+
+  // ======================== 協力の仕掛け ========================
+  /** シャッター付きの箱：二人でレバーを引く（3 秒以内）か、ひとりなら鍵を壊す */
+  locks = new Map<number, { levers: number[]; pulled: Map<number, number> }>();
+
+  private pullLever(p: SimPlayer, lever: SimObj): void {
+    const entry = [...this.locks.entries()].find(([, v]) => v.levers.includes(lever.id));
+    if (!entry) return this.pop(p, 'レバーはもう動かない（シャッターは開いている）', '#cccccc');
+    const [crate, lk] = entry;
+    lk.pulled.set(lever.id, this.time);
+    lever.ready = 1;
+    this.changed.add(lever.id);
+    this.events.push({ k: 'smash', x: (lever.tx + 0.5) * TILE, y: (lever.ty + 0.5) * TILE, kind: 'lever' });
+    const both = lk.levers.every((id) => this.time - (lk.pulled.get(id) ?? -99) <= 3);
+    if (both) {
+      this.locks.delete(crate);
+      this.events.push({ k: 'feed', cat: 'up', t: 'シャッターが開いた！（二人でレバーを引いた）', c: '#e0c060', snd: 'clear' });
+      for (const q of this.players) if (q.status === 'alive') this.gainXp(q, 1, 10);
+    } else this.pop(p, 'レバーを引いた — 3 秒以内にもう 1 つのレバーも（仲間と同時に）', '#e0c060');
+    // 引いたレバーは少しして戻る
+    setTimeout(() => {
+      lever.ready = 0;
+      this.changed.add(lever.id);
+    }, 3000);
+  }
+
+  /** ひとりの代わりの手段：工具で静かに（20 秒）／バールで速く（8 秒・大きな音） */
+  private cutLock(p: SimPlayer, crate: SimObj): void {
+    const bar = p.mel?.id === 'crowbar' && p.tool === Tool.Melee;
+    if (!bar && countItem(p.bag, 'tools') < 1)
+      return this.pop(p, 'シャッターが閉まっている：離れた 2 つのレバーを仲間と同時に引く／ひとりなら工具セットかバールで鍵を壊す', '#e0c060', 'error');
+    p.search = { cid: crate.id, t: 0, dur: bar ? 8 : 20, x: p.x, y: p.y, loud: bar };
+    this.pop(p, bar ? 'バールで鍵を壊している（8 秒・大きな音）' : '工具セットで鍵を外している（20 秒）', '#e0c060');
+  }
+
+  /** 窓を越える：仲間がそばにいれば肩車ですぐ。ひとりなら 4 秒よじ登る */
+  private tryWindow(p: SimPlayer): boolean {
+    const ca = Math.cos(p.aim);
+    const sa = Math.sin(p.aim);
+    for (const reach of [0.7, 1.2]) {
+      const wx = Math.floor((p.x + ca * reach * TILE) / TILE);
+      const wy = Math.floor((p.y + sa * reach * TILE) / TILE);
+      if (this.world.terrainAt(wx, wy) !== T_WINDOW) continue;
+      // 窓の向こう側
+      const dx = Math.abs(ca) > Math.abs(sa) ? Math.sign(ca) : 0;
+      const dy = dx ? 0 : Math.sign(sa);
+      const ox = wx + dx;
+      const oy = wy + dy;
+      if (this.world.solid(ox, oy)) return false;
+      const toX = (ox + 0.5) * TILE;
+      const toY = (oy + 0.5) * TILE;
+      const ally = this.players.some((q) => q !== p && q.status === 'alive' && !q.away && Math.hypot(q.x - p.x, q.y - p.y) < 70);
+      if (ally) {
+        p.x = toX;
+        p.y = toY;
+        this.pop(p, '肩車で窓を越えた', '#c9e08a');
+      } else {
+        p.climb = { t: 0, dur: 4, x: p.x, y: p.y, toX, toY };
+        this.pop(p, 'ひとりで窓をよじ登っている（4 秒・動くと中断）', '#cccccc');
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // ======================== 生存者の救出・物資の車列 ========================
+  /** 拠点にいる生存者の役割（毎朝の物資が増える） */
+  survivors: string[] = [];
+  npcs: { id: number; x: number; y: number; a: number; hp: number; role: string; follow: number; siteId: number }[] = [];
+  private npcSeq = 1;
+
+  private newSurvivorSite(): (SiteSnap & { guards: boolean }) | null {
+    const cands = this.world.locations.map((l, i) => ({ l, i })).filter(({ l }) => l.kind !== 'base' && l.kind !== 'ruin' && l.tier >= 1 && l.tier <= 3);
+    for (let t = 0; t < 10 && cands.length; t++) {
+      const { l, i } = cands.splice(Math.floor(Math.random() * cands.length), 1)[0];
+      const spot = this.crateSpot(i);
+      if (!spot) continue;
+      const roles = ['cook', 'gunsmith', 'nurse', 'scav'];
+      const role = roles[Math.floor(Math.random() * roles.length)];
+      const st = { id: this.siteSeq++, kind: 'survivor' as const, name: `${l.name}に取り残された${ROLE_NAME[role]}`, tx: spot[0], ty: spot[1], crate: 0, guards: false };
+      this.npcs.push({ id: this.npcSeq++, x: (spot[0] + 0.5) * TILE, y: (spot[1] + 0.5) * TILE, a: 0, hp: 100, role, follow: -1, siteId: st.id });
+      return st;
+    }
+    return null;
+  }
+
+  private newConvoySite(): (SiteSnap & { guards: boolean; crates?: number[] }) | null {
+    // 道路の上に、物資を積んだ車列（箱 3 つ）。夕方には去る
+    for (let t = 0; t < 60; t++) {
+      const x = 20 + Math.floor(Math.random() * (MAP_W - 40));
+      const y = 20 + Math.floor(Math.random() * (MAP_H - 40));
+      if (this.world.terrainAt(x, y) !== T_ROAD || tierAtDistance(Math.hypot(x - BASE_TX, y - BASE_TY)) < 2) continue;
+      if (![0, 1, 2].every((k) => this.world.terrainAt(x + k, y) === T_ROAD && !this.world.objAt(x + k, y))) continue;
+      const crates: number[] = [];
+      for (let k = 0; k < 3; k++) {
+        const o: SimObj = { id: this.nextObjId++, kind: 'mcrate', tx: x + k, ty: y, hp: 1, maxHp: 1, ready: 1, regrowT: 0 };
+        this.world.setObj(o);
+        this.changed.add(o.id);
+        const c = emptyBag(8);
+        addItem(c, (['ammo762', 'ammo9', 'shells'] as ItemId[])[k], 20 + Math.floor(Math.random() * 20));
+        addItem(c, (['can', 'mre', 'medkit'] as ItemId[])[k], k === 2 ? 1 : 3);
+        addItem(c, (['parts', 'fuel', 'electronics'] as ItemId[])[k], 2);
+        if (Math.random() < 0.35) addItem(c, ATTACHMENTS[Math.floor(Math.random() * ATTACHMENTS.length)], 1);
+        this.contents.set(o.id, c);
+        crates.push(o.id);
+      }
+      return { id: this.siteSeq++, kind: 'convoy', name: `${directionName(x, y)}の道で立ち往生した物資の車列`, tx: x + 1, ty: y, crate: crates[1], crates, guards: false };
+    }
+    return null;
+  }
+
+  /** 生存者に話しかける：ついてくる／待つ */
+  private talkNpc(p: SimPlayer): boolean {
+    const n = this.npcs.find((q) => Math.hypot(q.x - p.x, q.y - p.y) < 60);
+    if (!n) return false;
+    if (n.follow === p.id) {
+      n.follow = -1;
+      this.pop(p, `${ROLE_NAME[n.role]}：「ここで待っている」`, '#9fd0f0');
+    } else {
+      n.follow = p.id;
+      this.pop(p, `${ROLE_NAME[n.role]}：「助かった…ついていく！」 拠点まで連れて帰れ`, '#9fd0f0', 'level');
+    }
+    return true;
+  }
+
+  private updateNpcs(dt: number): void {
+    if (!this.npcs.length) return;
+    for (const n of this.npcs) {
+      const lead = this.players.find((q) => q.id === n.follow && q.status === 'alive');
+      if (lead) {
+        const d = Math.hypot(lead.x - n.x, lead.y - n.y);
+        if (d > 56) {
+          const sp = Math.min(PLAYER.speed * 0.95, d * 3);
+          const ax = (lead.x - n.x) / d;
+          const ay = (lead.y - n.y) / d;
+          moveCircle(n, ax * sp * dt, ay * sp * dt, 12, this.world);
+          n.a = Math.atan2(ay, ax);
+        }
+        // 遠く離れすぎたら、その場で待つ
+        if (d > 700) n.follow = -1;
+      }
+      // 感染体に触れられると傷つく
+      for (const z of this.zombies) {
+        if (z.dead || Math.abs(z.x - n.x) > 40 || Math.abs(z.y - n.y) > 40) continue;
+        if (z.attackCd > 0 || Math.hypot(z.x - n.x, z.y - n.y) > ZOMBIE[z.type].radius + 16) continue;
+        // プレイヤーと同じように殴る（攻撃の間隔あり）
+        n.hp -= ZOMBIE[z.type].damage;
+        z.attackCd = ZOMBIE[z.type].attackInterval;
+        z.atk++;
+        z.angle = Math.atan2(n.y - z.y, n.x - z.x);
+      }
+      // 拠点に着いた：保護
+      if (inBase(n.x, n.y)) {
+        n.hp = -999;
+        this.survivors.push(n.role);
+        this.events.push({ k: 'banner', t: '生存者を保護した', s: `${ROLE_NAME[n.role]}が拠点に加わった — 毎朝、収納箱に${ROLE_GIFT[n.role]}を入れてくれる`, c: '#9fd0f0', snd: 'clear' });
+        for (const q of this.players) if (q.status === 'alive') this.gainXp(q, 3, 30);
+      } else if (n.hp <= 0) this.events.push({ k: 'feed', cat: 'danger', t: `${ROLE_NAME[n.role]}が感染体に襲われた…`, c: '#e07a60' });
+    }
+    this.npcs = this.npcs.filter((n) => n.hp > 0);
+  }
+
+  // ======================== 手記と隠し物資 ========================
+  /** これまでに読んだ手記の数（話の続き・戦績） */
+  notesRead = 0;
+  /** 手記を読む：話の続きと、隠し物資の場所（地図に印） */
+  private readNote(p: SimPlayer, idx: number): void {
+    const s = p.bag[idx];
+    if (!s || s.id !== 'note') return;
+    s.n--;
+    if (s.n <= 0) p.bag[idx] = null;
+    const n = this.notesRead % NOTES.length;
+    this.notesRead++;
+    // 隠し物資：まだ使っていない施設（近い所から遠い所まで）
+    const used = new Set([...this.sites, ...this.rsites].map((x) => `${x.tx},${x.ty}`));
+    const cands = this.world.locations.map((l, i) => ({ l, i })).filter(({ l }) => l.kind !== 'base' && l.tier <= 3 && !used.has(`${l.x},${l.y}`));
+    let place = '';
+    for (let t = 0; t < 12 && cands.length; t++) {
+      const { l, i } = cands.splice(Math.floor(Math.random() * cands.length), 1)[0];
+      const spot = this.crateSpot(i);
+      if (!spot) continue;
+      const o: SimObj = { id: this.nextObjId++, kind: 'crate', tx: spot[0], ty: spot[1], hp: 1, maxHp: 1, ready: 1, regrowT: 0 };
+      this.world.setObj(o);
+      this.changed.add(o.id);
+      const c = emptyBag(8);
+      addItem(c, 'can', 2 + Math.floor(Math.random() * 2));
+      addItem(c, Math.random() < 0.5 ? 'ammo9' : 'ammo762', 15 + Math.floor(Math.random() * 15));
+      addItem(c, Math.random() < 0.5 ? 'bandage' : 'medkit', Math.random() < 0.5 ? 2 : 1);
+      addItem(c, (['parts', 'tools', 'electronics', 'gunpowder'] as ItemId[])[Math.floor(Math.random() * 4)], 2);
+      if (Math.random() < 0.3) addItem(c, 'upkit', 1);
+      this.contents.set(o.id, c);
+      place = l.name;
+      this.rsites.push({ id: this.siteSeq++, kind: 'stash', name: `${l.name}の隠し物資`, tx: spot[0], ty: spot[1], crate: o.id, guards: false });
+      break;
+    }
+    const note = NOTES[n];
+    this.events.push({ k: 'note', id: p.id, n: n + 1, title: note.title, text: note.text.replace('{loc}', place || 'どこか') });
+    if (place) this.events.push({ k: 'feed', cat: 'info', t: `${p.name} が手記を読んだ（${this.notesRead}/${NOTES.length}）— ${place}に隠し物資（地図に◆）`, c: '#7fd8d0' });
+  }
+
+  // ======================== 精鋭の特性 ========================
+  /** 再生：3 秒傷つかなければ毎秒 5% 回復（撃ち続けて一気に倒す）。突進：構えてから飛びかかる（横に避ける） */
+  private updateTrait(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): void {
+    if (z.trait === 'regen' && z.hp < z.maxHp && this.time - (z.hurtT ?? -99) > 3) z.hp = Math.min(z.maxHp, z.hp + z.maxHp * 0.05 * dt);
+    if (z.trait !== 'dash') return;
+    z.dashCd = (z.dashCd ?? 2) - dt;
+    if ((z.teleT ?? 0) > 0 && z.tele === 5) {
+      z.teleT! -= dt;
+      if (z.teleT! <= 0) {
+        z.tele = 0;
+        // 構えたときの向きへ飛ぶ（構えの間に横へずれれば外れる）
+        // 構えたときの相手の位置まで届く勢い（勢いは毎秒 e^-6 で落ちるので 距離×6.3）
+        const imp = Math.min(2300, Math.max(700, (z.dashD ?? 250) * 6.3));
+        z.kx += Math.cos(z.angle) * imp;
+        z.ky += Math.sin(z.angle) * imp;
+        z.dashCd = 3.5;
+      }
+      return;
+    }
+    if (near && z.state === 'chase' && z.dashCd <= 0 && near.d > 110 && near.d < 360 && this.world.lineWalkable(z.x, z.y, near.p.x, near.p.y)) {
+      z.tele = 5;
+      z.teleT = 0.5;
+      z.dashD = near.d;
+      z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+    }
+  }
+
+  // ======================== 這う者・酸を吐く者 ========================
+  /** 這う者：伏せたまま動かない。近づいた人に、ぴくっと動いてから噛みつく（出血） */
+  private updateCrawler(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): boolean {
+    if ((z.teleT ?? 0) > 0) {
+      z.teleT! -= dt;
+      if (z.teleT! > 0) return true;
+      z.tele = 0;
+      if (near && near.d < 100) {
+        this.damagePlayer(near.p, ZOMBIE.crawler.damage * (z.elite ? 1.4 : 1));
+        this.injure(near.p, 0, 0.6);
+        this.pop(near.p, '足を噛まれた！', '#e07a60');
+      }
+      z.atk++;
+      z.attackCd = ZOMBIE.crawler.attackInterval;
+      this.startChase(z);
+      return true;
+    }
+    if (near && near.d < 72 && z.attackCd <= 0) {
+      z.tele = 3;
+      z.teleT = 0.45;
+      z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+      return true;
+    }
+    // 待ち伏せ：撃たれるか、すぐ近く（200px）に来るまでは伏せたまま動かない
+    if (z.hp >= z.maxHp && (!near || near.d > 200)) return true;
+    return z.state !== 'chase';
+  }
+
+  /** 酸を吐く者：間合いを保ち、構えてから酸を放る（着いた所に酸だまり）。近寄られると下がる */
+  private updateSpitter(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): boolean {
+    z.spitCd = (z.spitCd ?? 1.5) - dt;
+    if ((z.teleT ?? 0) > 0) {
+      z.teleT! -= dt;
+      if (near) z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+      if (z.teleT! > 0) return true;
+      z.tele = 0;
+      if (near) {
+        // いる場所に吐く（飛ぶのに時間がかかるので、動き続ければ避けられる）
+        const tx = near.p.x;
+        const ty = near.p.y;
+        const dur = 0.55 + near.d / 900;
+        this.spits.push({ sx: z.x, sy: z.y, tx, ty, t: dur, dur });
+      }
+      z.spitCd = 3.4;
+      return true;
+    }
+    if (z.state !== 'chase' || !near) return false;
+    const clear = this.world.lineClear(z.x, z.y, near.p.x, near.p.y);
+    if (clear && near.d > 150 && near.d < 430 && z.spitCd <= 0 && this.zActive(z)) {
+      z.tele = 4;
+      z.teleT = 0.7;
+      return true;
+    }
+    // 近すぎたら下がる
+    if (clear && near.d < 210) {
+      const sp = (this.phase === 'night' ? ZOMBIE.spitter.nightSpeed : ZOMBIE.spitter.daySpeed) * z.speedMul * 0.9;
+      const ax = (z.x - near.p.x) / (near.d || 1);
+      const ay = (z.y - near.p.y) / (near.d || 1);
+      moveCircle(z, ax * sp * dt, ay * sp * dt, ZOMBIE.spitter.radius, this.world);
+      z.angle = Math.atan2(-ay, -ax);
+      // 追い詰められたら殴り返す
+      if (near.d < ZOMBIE.spitter.radius + PLAYER.radius + 6 && z.attackCd <= 0) {
+        this.damagePlayer(near.p, ZOMBIE.spitter.damage);
+        z.attackCd = ZOMBIE.spitter.attackInterval;
+        z.atk++;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /** 飛んでいる酸と、地面の酸だまり */
+  private spits: { sx: number; sy: number; tx: number; ty: number; t: number; dur: number }[] = [];
+  acid: { x: number; y: number; r: number; t: number }[] = [];
+  private updateAcid(dt: number): void {
+    for (const q of this.spits) {
+      q.t -= dt;
+      if (q.t > 0) continue;
+      this.acid.push({ x: q.tx, y: q.ty, r: 46, t: 4.5 });
+      this.events.push({ k: 'gas', x: q.tx, y: q.ty });
+    }
+    this.spits = this.spits.filter((q) => q.t > 0);
+    for (const a of this.acid) a.t -= dt;
+    this.acid = this.acid.filter((a) => a.t > 0);
+    if (!this.acid.length) return;
+    for (const p of this.players) {
+      if (p.status !== 'alive' || p.away || p.veh) continue;
+      const inAcid = this.acid.some((a) => Math.hypot(p.x - a.x, p.y - a.y) < a.r + PLAYER.radius * 0.5);
+      if (!inAcid) continue;
+      p.tox = Math.min(100, (p.tox ?? 0) + 4 * dt);
+      p.acidT = (p.acidT ?? 0) - dt;
+      if (p.acidT <= 0) {
+        p.acidT = 0.5;
+        this.damagePlayer(p, 5);
+        if (Math.random() < 0.3) this.pop(p, '酸で焼ける！ 離れろ', '#a8d060');
+      }
+    }
+  }
+
+  // ======================== ボス（巨像） ========================
+  private bossPending = false;
+  /** 無線を直した晩（ボスの夜） */
+  private bossNightDay = 0;
+
+  /** 巨像を群れの外側に出す。体力は人数に合わせる（1 人でも罠と壁で倒せるように） */
+  spawnTitan(alive: SimPlayer[]): SimZombie | null {
+    const p = alive[Math.floor(Math.random() * alive.length)];
+    for (let t = 0; t < 30; t++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = 700 + Math.random() * 250;
+      const x = p.x + Math.cos(a) * d;
+      const y = p.y + Math.sin(a) * d;
+      if (this.world.solid(Math.floor(x / TILE), Math.floor(y / TILE)) || inBase(x, y)) continue;
+      const z = this.spawnZombie('titan', x, y);
+      const scale = [0.55, 0.8, 1][Math.min(3, this.players.filter((q) => !q.away).length) - 1] ?? 1;
+      z.hp = z.maxHp = ZOMBIE.titan.hp * scale * this.hpMul();
+      z.elite = false;
+      z.keep = true;
+      z.state = 'chase';
+      z.stateT = 999;
+      z.bossCd = 3;
+      this.events.push({ k: 'feed', cat: 'danger', t: `巨像が現れた！（${directionName(x / TILE, y / TILE)}）`, c: '#e07a3a', snd: 'alarm' });
+      return z;
+    }
+    return null;
+  }
+
+  /** 巨像の行動：突進（構え 0.9 秒 → 一直線に走り、壁を壊す）と地鳴り（構え 0.8 秒 → 周りを吹き飛ばす）。処理したら true */
+  private updateTitan(z: SimZombie, dt: number, near: { p: SimPlayer; d: number } | null): boolean {
+    z.state = 'chase';
+    z.stateT = 999;
+    if (near) {
+      z.targetX = near.p.x;
+      z.targetY = near.p.y;
+    }
+    z.bossCd = (z.bossCd ?? 3) - dt;
+    // 釘の罠：巨体の下にある罠すべてが深く刺さる（ボスは罠で削れる）
+    const tx0 = Math.floor(z.x / TILE);
+    const ty0 = Math.floor(z.y / TILE);
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        const o = this.world.objAt(tx0 + dx, ty0 + dy);
+        if (!o || o.kind !== 'spike' || this.distToTile(z, o.tx, o.ty) > ZOMBIE.titan.radius * 0.7) continue;
+        o.hp -= 12 * dt;
+        if (Math.random() < dt * 4) this.changed.add(o.id);
+        this.damageZombie(z, 110 * dt, -1, 0, 0, 0, true);
+        if (o.hp <= 0) this.destroyObj(o);
+      }
+    if (z.dead) return true;
+    // よろめき（突進で壁にぶつかった）：動けない
+    if ((z.stunT ?? 0) > 0) {
+      z.stunT! -= dt;
+      z.tele = 0;
+      return true;
+    }
+    // 予備動作
+    if ((z.teleT ?? 0) > 0) {
+      z.teleT! -= dt;
+      if (z.tele === 1 && near) z.angle = Math.atan2(near.p.y - z.y, near.p.x - z.x);
+      if (z.teleT! > 0) return true;
+      if (z.tele === 1) {
+        z.chargeT = 1.1;
+        z.cdx = Math.cos(z.angle);
+        z.cdy = Math.sin(z.angle);
+        z.hitIds = [];
+      } else this.titanSlam(z);
+      z.tele = 0;
+      return true;
+    }
+    // 突進中
+    if ((z.chargeT ?? 0) > 0) {
+      z.chargeT! -= dt;
+      const sp = 560;
+      const collided: { tx: number; ty: number }[] = [];
+      const px = z.x;
+      const py = z.y;
+      moveCircle(z, z.cdx! * sp * dt, z.cdy! * sp * dt, TITAN_BODY, this.world, collided);
+      // 建てた物・壊せる物は突き破る（地形の壁にぶつかったら、よろめく）
+      for (const c of collided) {
+        const o = this.world.objAt(c.tx, c.ty);
+        if (o && BREAKABLE_KINDS.has(o.kind)) {
+          o.hp -= 420;
+          this.changed.add(o.id);
+          this.events.push({ k: 'smash', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });
+          if (o.hp <= 0) this.destroyObj(o);
+        }
+      }
+      for (const q of this.players) {
+        if (q.status !== 'alive' || q.away || z.hitIds!.includes(q.id)) continue;
+        if (Math.hypot(q.x - z.x, q.y - z.y) < ZOMBIE.titan.radius + PLAYER.radius + 4) {
+          z.hitIds!.push(q.id);
+          this.damagePlayer(q, 38);
+          this.injure(q, 0.5, 0.3);
+          moveCircle(q, z.cdx! * 90, z.cdy! * 90, PLAYER.radius, this.world);
+        }
+      }
+      const moved = Math.hypot(z.x - px, z.y - py);
+      if (moved < sp * dt * 0.3) {
+        // 止められた：よろめいて隙ができる
+        z.chargeT = 0;
+        z.stunT = 2.2;
+        z.bossCd = 4;
+        this.events.push({ k: 'crash', x: z.x, y: z.y, hard: 1 });
+        this.events.push({ k: 'feed', cat: 'info', t: '巨像がよろめいた！ 今が攻撃のチャンス', c: '#e0c060' });
+      } else if (z.chargeT! <= 0) z.bossCd = 3.5;
+      return true;
+    }
+    // 次の大技
+    if (near && z.bossCd <= 0 && this.zActive(z)) {
+      if (near.d < 135) {
+        z.tele = 2;
+        z.teleT = 0.8;
+        return true;
+      }
+      if (near.d < 560 && this.world.lineWalkable(z.x, z.y, near.p.x, near.p.y)) {
+        z.tele = 1;
+        z.teleT = 0.9;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 地鳴り：周りの人を吹き飛ばし、建てた物にも響く */
+  private titanSlam(z: SimZombie): void {
+    this.events.push({ k: 'crash', x: z.x, y: z.y, hard: 1 });
+    for (const q of this.players) {
+      if (q.status !== 'alive' || q.away) continue;
+      const d = Math.hypot(q.x - z.x, q.y - z.y);
+      if (d > 160) continue;
+      this.damagePlayer(q, 34 * (1 - d / 240));
+      const k = (160 - d) * 0.9;
+      moveCircle(q, ((q.x - z.x) / (d || 1)) * k, ((q.y - z.y) / (d || 1)) * k, PLAYER.radius, this.world);
+    }
+    const tx0 = Math.floor(z.x / TILE);
+    const ty0 = Math.floor(z.y / TILE);
+    for (let dy = -3; dy <= 3; dy++)
+      for (let dx = -3; dx <= 3; dx++) {
+        const o = this.world.objAt(tx0 + dx, ty0 + dy);
+        if (!o || !BUILD_KINDS.has(o.kind) || Math.hypot(dx, dy) > 3.2) continue;
+        o.hp -= 90;
+        this.changed.add(o.id);
+        if (o.hp <= 0) this.destroyObj(o);
+      }
+    z.bossCd = 3.2;
+  }
+
+  // ======================== 脅威の段階（日数と救助の進み具合で難しくなる） ========================
+  /** 0 = 1〜10 日・1 = 11〜20 日・2 = 21 日〜。救助を呼ぶと +1（無線の電波に寄ってくる） */
+  threat(): number {
+    const band = this.day <= 10 ? 0 : this.day <= 20 ? 1 : 2;
+    return Math.min(3, band + (this.rescue.stage >= 3 ? 1 : 0));
+  }
+  /** 体力の倍率：段階ごとに少しずつ。30 日目でも 1 日目の 2 倍未満（弾を撃ち込むだけの作業にしない） */
+  private hpMul(): number {
+    return [1, 1.2, 1.4, 1.6][this.threat()] * (1 + 0.02 * ((Math.max(1, this.day) - 1) % 10));
+  }
+  /** 出てくる種類：段階が上がるほど、危険な地区の顔ぶれに近づく */
+  private boostTier(tier: number): number {
+    const t = this.threat();
+    const up = t >= 3 ? (Math.random() < 0.3 ? 2 : 1) : t >= 2 ? 1 : t >= 1 ? (Math.random() < 0.35 ? 1 : 0) : 0;
+    return Math.max(1, Math.min(4, tier + up));
+  }
+  private lastThreat = 0;
+  /** 段階が上がったら知らせる（朝・救助を呼んだとき） */
+  private announceThreat(): void {
+    const t = this.threat();
+    if (t <= this.lastThreat) {
+      this.lastThreat = t;
+      return;
+    }
+    this.lastThreat = t;
+    const msg = ['', '感染が広がった — 走る個体・大男が増え、群れも大きくなる', '感染が拠点の近くまで来た — 精鋭がどこにでも現れる', '無線の電波に感染体が集まってくる — 救助まで持ちこたえろ'][t];
+    this.events.push({ k: 'feed', cat: 'danger', t: `脅威 Lv${t + 1}：${msg}`, c: '#e0583e', snd: 'alarm' });
+  }
+
   private typeForTier(tier: number): ZombieType {
+    tier = this.boostTier(tier);
     const r = Math.random();
     if (tier >= 4) return r < 0.45 ? 'soldier' : r < 0.7 ? 'brute' : r < 0.92 ? 'runner' : 'walker';
     if (tier >= 3) return r < 0.5 ? 'soldier' : r < 0.68 ? 'brute' : r < 0.88 ? 'runner' : 'walker';
@@ -3184,7 +4306,7 @@ export class HostSimulation {
     }
     const outdoor = this.zombies.filter((z) => this.zActive(z) && !this.world.buildingAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE))).length;
     // アクティブな範囲の広さに比例（仲間と離れて探索していると、それぞれの周りに湧く）
-    const per = (this.phase === 'night' ? 1.4 : 0.9) + this.day * 0.05 + (this.weather === 'storm' ? 0.4 : 0);
+    const per = (this.phase === 'night' ? 1.4 : 0.9) + Math.min(0.6, this.day * 0.03) + this.threat() * 0.2 + (this.weather === 'storm' ? 0.4 : 0);
     const want = Math.round(this.stats.active * per);
     if (outdoor < want) this.spawnOutdoor(650);
   }
@@ -3195,8 +4317,9 @@ export class HostSimulation {
     const elite = loc?.hot ? 1.3 : 1;
     // 精鋭（ハクスラ）：まれに現れる手強い個体。倒すと良い戦利品を必ず落とす
     const tier = this.tierAt(Math.floor(x / TILE), Math.floor(y / TILE));
-    const isElite = forceElite || tier >= 2 && type !== 'screamer' && type !== 'bloater' && Math.random() < 0.015 + tier * 0.008 + (this.phase === 'night' ? 0.01 : 0);
-    const hp = ZOMBIE[type].hp * (1 + 0.06 * (this.day - 1)) * elite * (isElite ? 3.2 : 1);
+    const th = this.threat();
+    const isElite = forceElite || (tier >= 2 || th >= 2) && type !== 'screamer' && type !== 'bloater' && Math.random() < 0.015 + tier * 0.008 + th * 0.008 + (this.phase === 'night' ? 0.01 : 0);
+    const hp = ZOMBIE[type].hp * this.hpMul() * elite * (isElite ? 3.2 : 1);
     this.zombies.push({
       id: this.nextId++,
       type,
@@ -3221,7 +4344,7 @@ export class HostSimulation {
       wanderT: Math.random() * 3,
       senseT: Math.random() * 0.3,
       speedMul: (0.85 + Math.random() * 0.3) * (isElite ? 1.15 : 1),
-      ...(isElite ? { elite: true } : {}),
+      ...(isElite ? { elite: true, trait: (['dash', 'regen', 'split', 'armor'] as const)[Math.floor(Math.random() * 4)] } : {}),
       stuckT: 0,
       route: null,
       routeI: 0,
@@ -3352,10 +4475,22 @@ export class HostSimulation {
     if (this.base.med >= 1) addItem(c, 'bandage', 2);
     if (this.base.med >= 2) addItem(c, 'medkit', 1);
     // 菜園の収穫
-    if (this.base.garden >= 1) {
+    if (this.base.garden >= 1 && !this.winter()) {
       addItem(c, 'can', this.base.garden >= 2 ? 4 : 2);
       addItem(c, 'herbs', this.base.garden >= 2 ? 2 : 1);
       if (this.base.garden >= 2) addItem(c, 'mre', 1);
+    }
+    // 拠点の生存者：毎朝それぞれの役割で物を作ってくれる
+    for (const r of this.survivors) {
+      if (r === 'cook') addItem(c, 'can', 2);
+      else if (r === 'gunsmith') addItem(c, Math.random() < 0.5 ? 'ammo9' : 'ammo762', 15);
+      else if (r === 'nurse') {
+        addItem(c, 'bandage', 2);
+        if (Math.random() < 0.35) addItem(c, 'medkit', 1);
+      } else if (r === 'scav') {
+        addItem(c, 'scrap', 4);
+        addItem(c, 'cloth', 2);
+      }
     }
     // 大群の夜を越えた褒美
     if (this.hordeReward) {
@@ -3403,7 +4538,11 @@ export class HostSimulation {
   private spawnHordeWave(): void {
     const alive = this.players.filter((p) => p.status === 'alive' && !p.away);
     if (!alive.length) return;
-    const total = Math.min(48, 10 + this.day * 2);
+    if (this.bossPending) {
+      this.bossPending = false;
+      this.spawnTitan(alive);
+    }
+    const total = Math.min(56, 10 + Math.min(19, this.day) * 2 + this.threat() * 4);
     for (const p of alive) {
       const n = Math.ceil(total / alive.length);
       for (let k = 0; k < n && this.zombies.length < MAX_ZOMBIES; k++) {
@@ -3454,6 +4593,7 @@ export class HostSimulation {
     z.senseT -= dt;
     if (z.senseT <= 0) {
       z.senseT = 0.2;
+      if (this.tracks.length && Math.random() < 0.25) this.followTracks(z);
       for (const p of this.players) {
         if (p.status !== 'alive' || p.away || this.safeIn(p.x, p.y)) continue;
         if (this.canSee(z, p)) {
@@ -3475,6 +4615,11 @@ export class HostSimulation {
     }
 
     const near = this.nearestAlive(z.x, z.y);
+    if (z.type === 'titan' && this.updateTitan(z, dt, near)) return;
+    if (z.type === 'crawler' && this.updateCrawler(z, dt, near)) return;
+    if (z.type === 'spitter' && this.updateSpitter(z, dt, near)) return;
+    if (z.trait) this.updateTrait(z, dt, near);
+    if ((z.teleT ?? 0) > 0 && z.tele === 5) return;
     let speed = (night ? st.nightSpeed : st.daySpeed) * z.speedMul * this.world.speedAt(Math.floor(z.x / TILE), Math.floor(z.y / TILE));
     let dx = 0;
     let dy = 0;
@@ -3539,6 +4684,16 @@ export class HostSimulation {
     }
 
     if (dx || dy) z.angle = Math.atan2(dy, dx);
+    // 投光器の光の中：目がくらんで遅く、ときどき獲物を見失う（巨像は平気）
+    if (this.lit.length && z.type !== 'titan' && this.inLight(z.x, z.y)) {
+      speed *= 0.5;
+      if (z.state === 'chase' && Math.random() < dt * 0.35) {
+        z.state = 'search';
+        z.stateT = 2.5;
+        z.targetX = z.x + (Math.random() - 0.5) * 300;
+        z.targetY = z.y + (Math.random() - 0.5) * 300;
+      }
+    }
     const decay = Math.exp(-6 * dt);
     z.kx *= decay;
     z.ky *= decay;
@@ -3551,11 +4706,11 @@ export class HostSimulation {
       speed *= 0.4;
       trap.hp -= 9 * dt;
       if (Math.random() < dt * 4) this.changed.add(trap.id);
-      this.damageZombie(z, 60 * dt, -1, 0, 0, 0, true);
+      if (z.type !== 'titan') this.damageZombie(z, 60 * dt, -1, 0, 0, 0, true);
       if (trap.hp <= 0) this.destroyObj(trap);
       if (z.dead) return;
     }
-    moveCircle(z, (dx * speed + z.kx) * dt, (dy * speed + z.ky) * dt, st.radius, this.world, collided);
+    moveCircle(z, (dx * speed + z.kx) * dt, (dy * speed + z.ky) * dt, z.type === 'titan' ? TITAN_BODY : st.radius, this.world, collided);
     // 拠点（安全地帯）には入れない（大群の夜は除く）
     if (this.safeIn(z.x, z.y)) {
       z.x = px;
@@ -3598,7 +4753,7 @@ export class HostSimulation {
     }
     if (target) {
       const built = BUILD_KINDS.has(target.kind);
-      target.hp -= st.wallDamage * (built ? BUILD_DAMAGE_MUL : 1);
+      target.hp -= st.wallDamage * (built ? BUILD_DAMAGE_MUL : 1) * (this.lit.length && this.inLight(z.x, z.y) ? 0.6 : 1);
       // 拠点のバリケードが攻撃されている：仲間に知らせる（修理・迎撃の合図）
       if (built && this.time - this.barricadeWarnT > 10) {
         this.barricadeWarnT = this.time;
@@ -3675,8 +4830,14 @@ export class HostSimulation {
 
   private damageZombie(z: SimZombie, dmg: number, owner: number, dirX: number, dirY: number, knock: number, ap = true): void {
     if (z.dead) return;
+    // 巨像はよろめいている間、大きく傷つく（壁にぶつけさせる意味）
+    if (z.type === 'titan' && (z.stunT ?? 0) > 0) dmg *= 1.5;
+    // 巨像は弾で押し戻されない（撃ち続けるだけで近寄らせない、を防ぐ）
+    if (z.type === 'titan') knock *= 0.1;
     // 装甲：通常弾は軽減される（徹甲弾・近接は無視）
-    const armor = ZOMBIE[z.type].armor;
+    // 重装の精鋭：通常弾はほとんど通らない（徹甲弾・近接・爆発で）
+    const armor = z.trait === 'armor' ? Math.max(ZOMBIE[z.type].armor, 0.7) : ZOMBIE[z.type].armor;
+    z.hurtT = this.time;
     if (!ap && armor > 0) {
       dmg *= 1 - armor;
       this.events.push({ k: 'ricochet', x: z.x, y: z.y });
@@ -3699,10 +4860,23 @@ export class HostSimulation {
 
   private killZombie(z: SimZombie, owner: number, dx = 0, dy = 0): void {
     z.dead = true;
+    // 分裂の精鋭：倒すと 2 体の走る者に分かれる（まとめて撃てる位置で倒す）
+    if (z.trait === 'split') {
+      for (const side of [-1, 1]) {
+        const c = this.spawnZombie('runner', z.x + side * 14, z.y - side * 10);
+        c.elite = false;
+        delete c.trait;
+        c.hp = c.maxHp = c.maxHp * 0.8;
+        c.keep = z.keep;
+        this.startChase(c);
+        c.targetX = z.targetX;
+        c.targetY = z.targetY;
+      }
+    }
     const killer = this.players.find((p) => p.id === owner);
     if (killer) {
       killer.kills++;
-      const xp = z.type === 'brute' ? 12 : z.type === 'soldier' ? 9 : z.type === 'bloater' ? 7 : z.type === 'runner' || z.type === 'screamer' ? 4 : 3;
+      const xp = z.type === 'brute' ? 12 : z.type === 'soldier' ? 9 : z.type === 'bloater' || z.type === 'spitter' ? 7 : z.type === 'crawler' ? 5 : z.type === 'runner' || z.type === 'screamer' ? 4 : 3;
       this.gainXp(killer, killer.tool === Tool.Melee ? 1 : 2, xp);
     }
     this.events.push({ k: 'kill', x: z.x, y: z.y, r: ZOMBIE[z.type].radius, o: owner, t: z.type, id: z.id, a: z.angle, dx: r2(dx), dy: r2(dy) });
@@ -3719,8 +4893,21 @@ export class HostSimulation {
       }
       for (const o of this.zombies) if (!o.dead && o !== z && Math.hypot(o.x - z.x, o.y - z.y) < 120) this.damageZombie(o, 25, -1, o.x - z.x, o.y - z.y, 120, true);
     }
-    // 精鋭：良い武器・アタッチメント・リュックを必ず落とす
-    if (z.elite) {
+    // 巨像：伝説の武器・強化キット・巨像の心臓を必ず落とす。全員に経験値
+    if (z.type === 'titan') {
+      const bag = this.groundBag(z.x, z.y);
+      if (bag) {
+        const c = this.contents.get(bag.id)!;
+        const pool: WeaponId[] = ['rifle', 'dmr', 'shotgun', 'hunting'];
+        const wid = pool[Math.floor(Math.random() * pool.length)];
+        addItem(c, wid, 1, { mag: 0, ...rollQuality(4) });
+        addItem(c, ammoOf(wid), 30);
+        addItem(c, 'upkit', 2);
+        addItem(c, 'bheart', 1);
+      }
+      for (const q of this.players) if (q.status === 'alive') this.gainXp(q, 2, 60);
+      this.events.push({ k: 'banner', t: '巨像を倒した！', s: '伝説の武器と「巨像の心臓」が落ちた', c: '#f0c040', snd: 'clear' });
+    } else if (z.elite) {
       const bag = this.groundBag(z.x, z.y);
       if (bag) {
         const c = this.contents.get(bag.id)!;
@@ -3779,7 +4966,9 @@ export class HostSimulation {
           if ((z.x - b.x) ** 2 + (z.y - b.y) ** 2 < r * r) {
             b.hit.push(z.id);
             this.events.push({ k: 'hit', x: b.x, y: b.y, o: b.owner, a: Math.atan2(b.vy, b.vx) });
-            this.damageZombie(z, b.dmg, b.owner, b.vx, b.vy, b.knock, b.ap);
+            const shooter = this.players.find((q) => q.id === b.owner);
+            const crit = shooter && hasPerk(shooter.xp, 'crit') && Math.random() < 0.1;
+            this.damageZombie(z, b.dmg * (crit ? 2 : 1), b.owner, b.vx, b.vy, b.knock, b.ap);
             // 貫通：威力を落としながら次の敵へ
             if (b.pierce > 0) {
               b.pierce--;
@@ -3797,6 +4986,7 @@ export class HostSimulation {
   private destroyObj(o: SimObj): void {
     if (!this.world.objects.has(o.id)) return;
     this.world.removeObj(o.id);
+    this.contents.delete(o.id);
     this.changed.delete(o.id);
     this.removed.push(o.id);
     this.events.push({ k: 'break', x: (o.tx + 0.5) * TILE, y: (o.ty + 0.5) * TILE, kind: o.kind });

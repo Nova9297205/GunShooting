@@ -4,6 +4,14 @@
 // ============================================================
 
 export type ItemId =
+  | 'bheart'
+  | 'note'
+  | 'crowbar'
+  | 'machete'
+  | 'fireaxe'
+  | 'rpart1'
+  | 'rpart2'
+  | 'rpart3'
   | 'ammo9'
   | 'ammo9ap'
   | 'ammo762'
@@ -129,6 +137,14 @@ export const ITEMS: Record<ItemId, ItemDef> = {
   salve: D('salve', '薬草の軟膏', 5, 'med', 8, 0, '出血を止める・HP +15（薬草2・布1で作れる）'),
   decoy: D('decoy', 'おとり時計', 3, 'misc', 10, 1, '[X]/右クリックで狙った所へ投げる。10秒間鳴り続け、ゾンビを引き寄せる'),
   pipebomb: D('pipebomb', 'パイプ爆弾', 3, 'misc', 25, 2, '[X]/右クリックで狙った所へ投げる。2秒後に爆発（近づきすぎに注意）'),
+  crowbar: D('crowbar', 'バール', 1, 'misc', 25, 1, '近接武器：重い一撃で大きく押し返す。[X]/右クリックで装備（耐久あり・作業台で修理）'),
+  machete: D('machete', 'マチェテ', 1, 'misc', 30, 1, '近接武器：速く広く振れて音が小さい。[X]/右クリックで装備（耐久あり・作業台で修理）'),
+  fireaxe: D('fireaxe', '消防斧', 1, 'misc', 45, 2, '近接武器：遅いが一撃が重く、まとめて斬り、装甲も通る。[X]/右クリックで装備（耐久あり・作業台で修理）'),
+  note: D('note', '手記', 5, 'misc', 2, 1, '誰かの書き残したメモ。[X]/右クリックで読むと、隠し物資の場所が地図に出る'),
+  bheart: D('bheart', '巨像の心臓', 1, 'misc', 150, 3, '巨像を倒した証。持ち帰ると価値が高い。作業台（Lv2）で強化キット 2 つにできる'),
+  rpart1: D('rpart1', '通信塔のアンテナ', 1, 'misc', 0, 3, '救助無線の部品（1/3）。拠点の無線に [F] で取り付ける'),
+  rpart2: D('rpart2', '送信機の基板', 1, 'misc', 0, 3, '救助無線の部品（2/3）。拠点の無線に [F] で取り付ける'),
+  rpart3: D('rpart3', '大型バッテリー', 1, 'misc', 0, 3, '救助無線の部品（3/3）。重い。拠点の無線に [F] で取り付ける'),
   upkit: D('upkit', '武器強化キット', 3, 'misc', 30, 2, '[X]/右クリックで、手に持っている武器の品質を 1 段上げる（希少まで）'),
   pack1: D('pack1', '学生かばん', 1, 'misc', 15, 0, '背負うと バッグ +3マス・+6kg（[X]/右クリックで背負う）'),
   pack2: D('pack2', '登山リュック', 1, 'misc', 40, 1, '背負うと バッグ +6マス・+13kg'),
@@ -201,6 +217,7 @@ export function capacityOf(pack: ItemId | null | undefined): { slots: number; kg
 }
 /** 1 個あたりの重さ（kg） */
 const KG: Partial<Record<ItemId, number>> = {
+  bheart: 2, crowbar: 1.6, machete: 0.9, fireaxe: 2.4, rpart1: 1.5, rpart2: 0.5, rpart3: 4,
   ammo9: 0.012, ammo9ap: 0.014, ammo762: 0.025, ammo762ap: 0.028, shells: 0.045, slug: 0.05,
   bandage: 0.05, medkit: 0.6, stim: 0.1, antitox: 0.15, herbs: 0.05, splint: 0.3,
   can: 0.4, mre: 0.5, stew: 0.6, tea: 0.3, water: 0.8,
@@ -411,6 +428,7 @@ export const CONTAINER_NAMES: Record<string, string> = {
   cabinet: '薬品棚',
   locker: 'ロッカー',
   wcase: '武器ケース',
+  safe: '金庫',
   fridge: '冷蔵庫',
   desk: '机',
   crate: '物資クレート',

@@ -1159,8 +1159,37 @@ export function generateWorld(seed: number): GeneratedWorld {
   // 拠点の無線機（依頼の報告）。既存のセーブと番号がずれないよう、最後に置く
   addObj('radio', SAFEHOUSE.x + 2 + 4, SAFEHOUSE.y + 2 + 1, 1);
 
+  // ---- 金庫：危険な地区ほど多い。生成の乱数とは別の流れで最後に置く（既存のセーブ・同期を崩さない） ----
+  {
+    const srnd = mulberry32((seed ^ 0x5afe5afe) >>> 0);
+    let sid = SAFE_ID_START;
+    for (const l of locations) {
+      if (l.kind === 'base' || l.kind === 'ruin') continue;
+      const chance = SAFE_CHANCE[Math.min(4, Math.max(0, l.tier))] * (l.kind === 'police' || l.kind === 'military' || l.kind === 'market' ? 1.5 : 1);
+      if (srnd() >= chance) continue;
+      for (let t = 0; t < 40; t++) {
+        const tx = l.x + 1 + Math.floor(srnd() * Math.max(1, l.w - 2));
+        const ty = l.y + 1 + Math.floor(srnd() * Math.max(1, l.h - 2));
+        const tt = terrain[idx(tx, ty)];
+        if (tt !== T_FLOOR && tt !== T_WOOD && tt !== T_TILE) continue;
+        if (occupied[idx(tx, ty)]) continue;
+        const nearWall = terrain[idx(tx - 1, ty)] === T_WALL || terrain[idx(tx + 1, ty)] === T_WALL || terrain[idx(tx, ty - 1)] === T_WALL || terrain[idx(tx, ty + 1)] === T_WALL;
+        if (!nearWall) continue;
+        // 出入口をふさがない（隣に扉・物があるマスは避ける）
+        if (occupied[idx(tx - 1, ty)] + occupied[idx(tx + 1, ty)] + occupied[idx(tx, ty - 1)] + occupied[idx(tx, ty + 1)] > 1) continue;
+        occupied[idx(tx, ty)] = 1;
+        objs.push({ id: sid++, kind: 'safe', tx, ty, hp: 1, maxHp: 1, ready: 1 });
+        break;
+      }
+    }
+  }
   return { terrain, objs, locations, buildings, landmarks, districts, features, vec };
 }
+
+/** 金庫の ID（生成オブジェクトの後ろ・実行中に作る物の前） */
+const SAFE_ID_START = 95000;
+/** 危険度ごとの、施設に金庫がある確率 */
+const SAFE_CHANCE = [0.04, 0.08, 0.16, 0.26, 0.38];
 
 /** オブジェクトIDの開始値（実行中に作るオブジェクト用。生成オブジェクトと衝突しない値） */
 export const BUILD_ID_START = 100000;

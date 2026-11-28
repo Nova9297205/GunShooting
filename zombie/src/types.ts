@@ -13,12 +13,32 @@ export interface Vec2 {
 
 export type PlayerStatus = 'alive' | 'down' | 'dead';
 /** walker=徘徊型 / runner=俊敏型 / brute=重装型 / soldier=感染兵士 */
-export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier' | 'bloater' | 'screamer';
+export type ZombieType = 'walker' | 'runner' | 'brute' | 'soldier' | 'bloater' | 'screamer' | 'titan' | 'crawler' | 'spitter';
 export type TimePhase = 'day' | 'night';
 export type GameMode = 'solo' | 'host' | 'guest';
+/** 遊び方：30 日目に救助が来る／期限なし（無線を直して自分で呼ぶ） */
+export type RunMode = 'd30' | 'endless';
+
+/** 救助の進み具合 */
+export interface RescueSnap {
+  mode: RunMode;
+  /** 0 = 部品集め・1 = 修理待ち・2 = 呼べる・3 = 呼んだ（救助を待つ） */
+  stage: number;
+  /** 取り付けた部品（ビット 1,2,4） */
+  parts: number;
+  /** 救助が来る日（その日の朝） */
+  day?: number;
+  /** 脅威の段階（0〜3） */
+  threat?: number;
+}
 
 /** マップ上のオブジェクト種別（設備・家具・入れ物・ドアなど） */
 export type ObjKind =
+  | 'gen'
+  | 'flood'
+  | 'alarm'
+  | 'lever'
+  | 'safe'
   | 'barrel'
   | 'tree'
   | 'car'
@@ -138,6 +158,8 @@ export interface PlayerSnap extends MoveBody {
   tut?: number;
   /** 背負っているリュック（バッグのマスと重さが増える） */
   pack?: ItemId;
+  /** 装備している近接武器（耐久は w.mag に入れる） */
+  mel?: Slot;
   /** 乗っている車の ID と座席（0 = 運転席） */
   veh?: number;
   seat?: number;
@@ -191,6 +213,10 @@ export interface ZombieSnap {
   atk: number;
   /** 精鋭（手強く、良い戦利品を落とす） */
   elite?: boolean;
+  /** 精鋭の特性：突進・再生・分裂・重装 */
+  trait?: 'dash' | 'regen' | 'split' | 'armor';
+  /** 予備動作（1 = 巨像の突進・2 = 巨像の地鳴り・3 = 這う者の噛みつき・4 = 酸を吐く者の構え） */
+  tele?: number;
 }
 
 export interface BulletSnap {
@@ -243,6 +269,7 @@ export type GameEvent =
   /** 拠点に建てた・修理した */
   | { k: 'built'; x: number; y: number; kind: ObjKind; id: number; repair?: boolean }
   | { k: 'break'; x: number; y: number; kind: ObjKind }
+  | { k: 'note'; id: number; n: number; title: string; text: string }
   | { k: 'pop'; x: number; y: number; t: string; c: string; id: number; s?: SoundKey }
   | { k: 'banner'; t: string; s: string; c: string; snd?: SoundKey }
   | { k: 'burn'; x: number; y: number }
@@ -295,6 +322,21 @@ export interface ViewState {
   vehicles?: VehicleSnap[];
   /** 異変（特定の場所のイベント） */
   sites?: SiteSnap[];
+  /** 救助の進み具合（モード） */
+  rescue?: RescueSnap;
+  /** 冬（雪・足跡） */
+  winter?: boolean;
+  /** 救助ヘリが着いた（結果画面へ移るまで） */
+  rescued?: boolean;
+  /** 救出を待つ生存者（ついてくる人） */
+  npcs?: { id: number; x: number; y: number; a: number; hp: number; role: string; follow: number }[];
+  /** 二人でレバーを引くまで閉じている箱（ID） */
+  locks?: number[];
+  /** 拠点にいる生存者の役割 */
+  survivors?: string[];
+  /** 酸だまり（地面）と、飛んでいる酸 */
+  acid?: { x: number; y: number; r: number; t: number }[];
+  spits?: { sx: number; sy: number; tx: number; ty: number; p: number }[];
   /** 無線の信頼度：達成した依頼の数とレベル */
   radio?: { done: number; lv: number };
 }
@@ -302,7 +344,7 @@ export interface ViewState {
 /** 異変：墜落したヘリ・感染体の巣・封鎖された武器庫。見張りを倒して箱を開けると制圧 */
 export interface SiteSnap {
   id: number;
-  kind: 'heli' | 'nest' | 'armory';
+  kind: 'heli' | 'nest' | 'armory' | 'tower' | 'stash' | 'survivor' | 'convoy';
   name: string;
   tx: number;
   ty: number;
@@ -391,6 +433,11 @@ export interface StartInfo {
 
 export interface GameResult {
   day: number;
+  /** 救助されてクリア */
+  won?: boolean;
+  /** 読んだ手記の数 */
+  notes?: number;
+  run?: RunMode;
   players: { id: number; name: string; kills: number; value: number; xp: number[] }[];
 }
 

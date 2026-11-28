@@ -76,6 +76,15 @@ export const AXE = {
   noiseRadius: 160,
 };
 
+/** 近接武器の性能（none = 何も持っていないときの斧。壊れない） */
+export type MeleeId = 'crowbar' | 'machete' | 'fireaxe';
+export const MELEE_STATS: Record<MeleeId | 'none', { name: string; interval: number; range: number; arc: number; damage: number; hits: number; knock: number; noise: number; stamina: number; dur: number }> = {
+  none: { name: '斧', interval: AXE.interval, range: AXE.range, arc: AXE.arc, damage: AXE.damage, hits: 3, knock: 260, noise: AXE.noiseRadius, stamina: 8, dur: 0 },
+  crowbar: { name: 'バール', interval: 0.5, range: 60, arc: Math.PI * 0.55, damage: 36, hits: 2, knock: 440, noise: 170, stamina: 9, dur: 240 },
+  machete: { name: 'マチェテ', interval: 0.3, range: 56, arc: Math.PI * 0.8, damage: 25, hits: 3, knock: 160, noise: 100, stamina: 6, dur: 170 },
+  fireaxe: { name: '消防斧', interval: 0.72, range: 66, arc: Math.PI * 0.65, damage: 64, hits: 4, knock: 380, noise: 210, stamina: 13, dur: 200 },
+};
+
 /** 火薬 → 弾薬クラフト */
 export const CRAFT = { gunpowder: 2, ammo: 12 };
 
@@ -103,6 +112,12 @@ export const ZOMBIE: Record<ZombieType, ZombieStats> = {
   bloater: { radius: 18, hp: 130, daySpeed: 30, nightSpeed: 56, damage: 9, wallDamage: 20, attackInterval: 1.2, color: '#4e5a3a', skin: '#9aa06a', armor: 0 },
   /** 叫び屋：獲物を見つけると叫び、周りのゾンビを呼び寄せる（商業地区・荒野） */
   screamer: { radius: 12, hp: 45, daySpeed: 52, nightSpeed: 112, damage: 5, wallDamage: 6, attackInterval: 0.8, color: '#5a5450', skin: '#b8b0a0', armor: 0 },
+  /** 這う者：床に伏せて動かない。近づくと噛みつく（出血）。暗いと見えにくい（住宅・病院・森） */
+  crawler: { radius: 13, hp: 70, daySpeed: 26, nightSpeed: 48, damage: 16, wallDamage: 4, attackInterval: 1.6, color: '#3e3a34', skin: '#8e8270', armor: 0 },
+  /** 酸を吐く者：距離をとって酸を吐き、床に酸だまりを残す。近寄られると弱い（工業地区） */
+  spitter: { radius: 14, hp: 85, daySpeed: 40, nightSpeed: 70, damage: 6, wallDamage: 6, attackInterval: 1.0, color: '#3c4a30', skin: '#9ab070', armor: 0 },
+  /** 巨像（ボス）：ボスの夜にだけ現れる。突進で壁を破り、地鳴りで周りを吹き飛ばす */
+  titan: { radius: 34, hp: 7000, daySpeed: 40, nightSpeed: 58, damage: 30, wallDamage: 160, attackInterval: 1.5, color: '#3a3c34', skin: '#8a7e6a', armor: 0.35 },
 };
 
 export const ZOMBIE_SENSE = {
@@ -133,6 +148,11 @@ export const OBJ_HP: Record<ObjKind, number> = {
   cabinet: 1,
   locker: 1,
   wcase: 1,
+  safe: 1,
+  lever: 1,
+  gen: 250,
+  flood: 120,
+  alarm: 80,
   fridge: 1,
   desk: 1,
   bed: 1,
@@ -153,6 +173,8 @@ export const OBJ_HP: Record<ObjKind, number> = {
 
 /** 衝突する（通れない）オブジェクト */
 export const SOLID_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>([
+  'gen',
+  'safe',
   'barrel',
   'tree',
   'car',
@@ -247,6 +269,10 @@ export const RECIPES: Recipe[] = [
   { id: 'decoy', name: 'おとり時計', desc: '投げた所で10秒鳴り、ゾンビを引き寄せる', bench: true, cost: { electronics: 1, scrap: 1 }, out: { id: 'decoy', n: 1 } },
   { id: 'pipebomb', name: 'パイプ爆弾', desc: '投げて2秒後に爆発。群れをまとめて倒す', bench: true, lv: 2, cost: { gunpowder: 3, scrap: 2, chem: 1 }, out: { id: 'pipebomb', n: 1 } },
   { id: 'upkit', name: '武器強化キット', desc: '手に持っている武器の品質を1段上げる（希少まで）', bench: true, lv: 2, cost: { parts: 3, scrap: 4, tools: 1 }, out: { id: 'upkit', n: 1 } },
+  { id: 'heartkit', name: '強化キット ×2', desc: '巨像の心臓から武器強化キットを作る', bench: true, lv: 2, cost: { bheart: 1 }, out: { id: 'upkit', n: 2 } },
+  { id: 'crowbar', name: 'バール', desc: '鉄くずを叩いて作る近接武器', bench: true, cost: { scrap: 6 }, out: { id: 'crowbar', n: 1 } },
+  { id: 'machete', name: 'マチェテ', desc: '速く静かに振れる近接武器', bench: true, lv: 2, cost: { scrap: 5, cloth: 2, tools: 1 }, out: { id: 'machete', n: 1 } },
+  { id: 'meleefix', name: '近接武器の修理', desc: '装備している近接武器の耐久を元に戻す', bench: true, cost: { scrap: 3, cloth: 1 }, out: { id: 'scrap', n: 0 } },
   { id: 'pack1', name: '学生かばん', desc: '背負うとバッグ +3マス・+6kg', bench: false, cost: { cloth: 5, scrap: 1 }, out: { id: 'pack1', n: 1 } },
   { id: 'pack2', name: '登山リュック', desc: '背負うとバッグ +6マス・+13kg', bench: true, lv: 2, cost: { cloth: 9, scrap: 4, parts: 1 }, out: { id: 'pack2', n: 1 } },
   { id: 'coat', name: '防寒コート', desc: '持っているだけで雨・夜の冷えが半分に', bench: true, cost: { cloth: 6, scrap: 1 }, out: { id: 'coat', n: 1 } },
@@ -256,7 +282,7 @@ export const RECIPES: Recipe[] = [
 ];
 
 // ---------------- 拠点に建てる物 ----------------
-export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'raintank' | 'stove' | 'cot' | 'wbench' | 'sbox' | 'fire';
+export type BuildKind = 'woodWall' | 'ironWall' | 'spike' | 'torch' | 'raintank' | 'stove' | 'cot' | 'wbench' | 'sbox' | 'fire' | 'gen' | 'flood' | 'alarm';
 export interface BuildDef {
   kind: BuildKind;
   name: string;
@@ -278,6 +304,9 @@ export const BUILDS: BuildDef[] = [
   { kind: 'cot', name: '寝床', role: '睡眠', desc: 'どこでも夜に眠れる。最後に眠った寝床が、戦闘不能から戻る場所になる', cost: { cloth: 6, scrap: 2 }, hp: 150 },
   { kind: 'wbench', name: '作業台', role: 'クラフト', desc: '拠点の外でもクラフト・改造ができる（レベルは拠点の作業台と同じ）', cost: { scrap: 10, parts: 1 }, hp: 300 },
   { kind: 'sbox', name: '保管箱', role: '収納', desc: '16 マスの箱。中身はずっと残る（撤去は空にしてから）', cost: { scrap: 6 }, hp: 300 },
+  { kind: 'gen', name: '発電機', role: '電気', desc: '燃料 1 で一晩、近く（14 マス）の投光器・警報に電気を送る。[F] で給油（3 晩分まで）。作業台Lv2', cost: { scrap: 8, parts: 2, electronics: 2 }, hp: 250, lv: 2 },
+  { kind: 'flood', name: '投光器', role: '電気', desc: '電気があると夜に広く照らす。光の中の感染体は目がくらみ、遅く・壁を壊す力も弱まる。作業台Lv2', cost: { scrap: 3, electronics: 1 }, hp: 120, lv: 2 },
+  { kind: 'alarm', name: '警報', role: '電気', desc: '電気があると、夜に近づく感染体を方角つきで知らせる', cost: { scrap: 2, electronics: 1 }, hp: 80 },
   { kind: 'fire', name: '焚き火', role: '暖・明かり', desc: '体が温まり、そばで食べると休息済み。夜は明るい', cost: { scrap: 2, cloth: 1 }, hp: 120 },
 ];
 export const BUILD_KINDS: ReadonlySet<ObjKind> = new Set<ObjKind>(BUILDS.map((b) => b.kind));

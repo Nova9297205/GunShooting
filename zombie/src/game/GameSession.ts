@@ -30,7 +30,7 @@ import { Tool } from '../types';
 import { audio } from './Audio';
 import { CraftMenu } from '../ui/CraftMenu';
 import { InventoryPanel } from '../ui/InventoryPanel';
-import { BUILD_KINDS, BUILDS, type BuildKind, PLAYER_COLORS, AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
+import { BUILD_KINDS, BUILDS, type BuildKind, PLAYER_COLORS, AXE, BENCH_RANGE, INTERP_DELAY, MUZZLE, PLAYER, SNAPSHOT_EVERY, TICK_DT, T_WINDOW, TILE, USABLE_SLOTS, ZOMBIE } from './constants';
 import { CONTAINER_KINDS, GIVE_RANGE, STORAGE_KINDS } from './Engine';
 import { CONTAINER_NAMES, countItem, effectiveStats, heldWeapon, ITEMS } from './items';
 import { loadProfile, saveProfile } from './progression';
@@ -309,6 +309,7 @@ export class GameSession {
 
   /** イベントを演出（パーティクル等）と効果音の両方へ */
   private onEvent(ev: GameEvent): void {
+    if (ev.k === 'note' && ev.id === this.o.localId) this.showNote(ev);
     this.effects.handleEvent(ev, this.o.localId);
     audio.handleEvent(ev, this.o.localId);
     // ローカル協力：同じ画面のほかの人の演出にも渡す（音は 1 回だけ）
@@ -317,8 +318,37 @@ export class GameSession {
 
   /** ローカル協力の 2 人目以降：演出と、自分のコントローラーの振動 */
   localEvent(ev: GameEvent): void {
+    if (ev.k === 'note' && ev.id === this.o.localId) this.showNote(ev);
     this.effects.handleEvent(ev, this.o.localId);
     if (ev.k === 'phit' && ev.id === this.o.localId) this.pad?.rumble(0.6, 0.4, 160);
+  }
+
+  /** 手記を読んだ：画面に紙のメモを出す（ゲームは止まらない。クリック・Esc・時間で閉じる） */
+  private noteEl: HTMLDivElement | null = null;
+  private noteTimer = 0;
+  private showNote(ev: { n: number; title: string; text: string }): void {
+    this.noteEl?.remove();
+    const el = document.createElement('div');
+    el.className = 'note-card';
+    const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+    el.innerHTML = `<div class="note-n">手記 ${ev.n}/24</div><h3>${esc(ev.title)}</h3><p>${esc(ev.text)}</p><small>クリック／Esc で閉じる</small>`;
+    (this.o.root ?? document.body).appendChild(el);
+    this.noteEl = el;
+    const close = () => {
+      el.remove();
+      if (this.noteEl === el) this.noteEl = null;
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Escape' && this.noteEl === el) {
+        e.stopImmediatePropagation();
+        close();
+      }
+    };
+    el.addEventListener('click', close);
+    window.addEventListener('keydown', onKey, true);
+    window.clearTimeout(this.noteTimer);
+    this.noteTimer = window.setTimeout(close, 25000);
   }
 
   // ---------------- ネットワークからの呼び出し ----------------
@@ -559,6 +589,15 @@ export class GameSession {
       drop: L.drop,
       jobs: L.jobs,
       sites: L.sites,
+      rescue: L.rescue,
+      npcs: L.npcs,
+      survivors: L.survivors,
+      locks: L.locks,
+      horde: L.horde,
+      winter: L.winter,
+      rescued: L.rescued,
+      acid: L.acid,
+      spits: L.spits,
       vehicles,
       radio: L.radio,
       cont: L.cont,
@@ -646,7 +685,7 @@ export class GameSession {
       audio.click();
     }
     if (this.buildKind) {
-      for (let i = 0; i < BUILDS.length; i++)
+      for (let i = 0; i < Math.min(10, BUILDS.length); i++)
         if (this.input.consume(`Digit${(i + 1) % 10}`)) {
           this.buildKind = BUILDS[i].kind;
           audio.click();
@@ -1194,6 +1233,18 @@ export class GameSession {
   private interactHint(me: PlayerSnap): string | null {
     if (me.searchId) return null;
     // 車：乗っている間は降りる案内。近くにあれば、位置と状態で何ができるか
+    // 生存者：声をかけるとついてくる（もう一度で待たせる）
+    const npc = (this.prevView?.npcs ?? []).find((n) => Math.hypot(n.x - me.x, n.y - me.y) < 60);
+    for (const reach of [0.7, 1.2]) {
+      if (me.veh !== undefined) break;
+      const wx = Math.floor((me.x + Math.cos(me.aim) * reach * TILE) / TILE);
+      const wy = Math.floor((me.y + Math.sin(me.aim) * reach * TILE) / TILE);
+      if (this.world.terrainAt(wx, wy) === T_WINDOW) {
+        const ally = (this.prevView?.players ?? []).some((q) => q.id !== me.id && q.status === 'alive' && Math.hypot(q.x - me.x, q.y - me.y) < 70);
+        return ally ? '[F] 肩車で窓を越える' : '[F] 窓をよじ登る（ひとりだと 4 秒・仲間がいればすぐ）';
+      }
+    }
+    if (npc && me.veh === undefined) return npc.follow === me.id ? '[F] ここで待たせる' : '[F] 生存者に声をかける（ついてくる。拠点まで連れて帰ると、毎朝物資を作ってくれる）';
     if (me.veh !== undefined) return me.seat === 0 ? '[F] 降りる ・ 移動キーの方向へ走る（後ろへ倒すと U ターン・ぶつかると自動で切り返し）' : '[F] 降りる ・ 窓から撃てる';
     let nv: VehicleSnap | null = null;
     let nd = 62;
@@ -1228,6 +1279,9 @@ export class GameSession {
         let h: string | null = null;
         if (ob.kind === 'door') h = ob.ready ? '[F] ドアを閉める' : '[F] ドアを開ける（音が出る）';
         else if (STORAGE_KINDS.has(ob.kind)) h = '[F] 倉庫を開く（個人・共有）';
+        else if (ob.kind === 'gen') h = ob.hp < ob.maxHp * 0.6 ? `[F] 修理（鉄くず1） ${Math.round((ob.hp / ob.maxHp) * 100)}%` : `[F] 発電機に給油（燃料 → ${ob.ready}/3 晩分）`;
+        else if (ob.kind === 'lever') h = '[F] レバーを引く（離れたもう 1 つのレバーと 3 秒以内に — 仲間と同時に）';
+        else if ((this.prevView?.locks ?? []).includes(ob.id)) h = '[F] シャッター：仲間と 2 つのレバーを同時に引く／ひとりなら工具セット（20 秒）かバール（8 秒・大きな音）で鍵を壊す';
         else if (ob.kind === 'radio') {
           const ready = (this.prevView?.jobs ?? []).some((j) => !j.done && j.kind === 'fetch' && (j.have ?? 0) >= (j.need ?? 1));
           h = ready ? '[F] 無線で依頼の品を報告する' : '[F] 無線：今日の依頼を確認';
@@ -1241,7 +1295,7 @@ export class GameSession {
         }
         else if (CONTAINER_KINDS.has(ob.kind) && (ob.kind !== 'car' || ob.hp > 0)) {
           const name = CONTAINER_NAMES[ob.kind] ?? '入れ物';
-          h = ob.kind === 'bag' ? `[F] ${name}を調べる` : ob.ready ? `[F] ${name}を探索する` : `[F] ${name}（探索済み）`;
+          h = ob.kind === 'safe' && ob.ready ? '[F] 金庫を開ける — バールを構えて：速いが音が出る／工具セット：遅いが静か' : ob.kind === 'bag' ? `[F] ${name}を調べる` : ob.ready ? `[F] ${name}を探索する` : `[F] ${name}（探索済み）`;
         }
         if (h) {
           bd = d;

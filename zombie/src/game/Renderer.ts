@@ -12,6 +12,9 @@ import {
   BASE_TX,
   BASE_TY,
   CYCLE_SECONDS,
+  INDOOR_FLOORS,
+  MELEE_STATS,
+  type MeleeId,
   DAY_SECONDS,
   MAP_H,
   MAP_W,
@@ -44,7 +47,7 @@ import type { TerrainCache } from './TerrainArt';
 import { DISTRICT_INFO, districtAt, directionName, EDGE_BAND, edgeDistance, TIER_RINGS, tierAtDistance } from './world';
 import { skillMods } from './progression';
 import { type Glyphs, padText } from '../ui/Gamepad';
-import { TUT_ALL, TUT_STEPS } from './tutorial';
+import { TUT_ALL, TUT_STEPS as TUT_STEPS1, TUT2_ALL, TUT2_STEPS } from './tutorial';
 import { ATTACHMENTS, capacityOf, CONTAINER_NAMES, countItem, loadKg, QUALITY, weaponLabel, effectiveStats, heldWeapon, ITEMS, type ItemId, WEAPON_STATS as WEAPONS } from './items';
 import { CONTAINER_KINDS } from './Engine';
 
@@ -134,6 +137,10 @@ export function formatClock(m: number): string {
   const mm = Math.floor(m % 60);
   return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
+
+/** 精鋭の特性の名前 */
+const TRAIT_NAME = { dash: '突進', regen: '再生', split: '分裂', armor: '重装' } as const;
+const NPC_ROLE: Record<string, string> = { cook: '料理人', gunsmith: '銃職人', nurse: '看護師', scav: '回収屋' };
 
 export class Renderer {
   art: ArtSet = new VectorArt();
@@ -486,7 +493,7 @@ export class Renderer {
       ctx.textAlign = 'left';
       ctx.font = `bold 11px ${UI}`;
       ctx.fillStyle = lock ? '#77735f' : sel ? '#ffe0a0' : '#d8d2b8';
-      ctx.fillText(`${(i + 1) % 10} ${d.name}`, x + 8, yy + 12);
+      ctx.fillText(i < 10 ? `${(i + 1) % 10} ${d.name}` : d.name, x + 8, yy + 12);
       ctx.font = `9px ${UI}`;
       ctx.fillStyle = '#9c967c';
       ctx.fillText(lock ? `🔒 作業台Lv${d.lv}` : d.role, x + 8, yy + 26);
@@ -685,8 +692,10 @@ export class Renderer {
     const vy1 = vy0 + this.h + TILE * 4;
     this.drawTerrainChunks(vx0, vy0, vx1, vy1);
     this.drawWaterShimmer(vx0, vy0, vx1, vy1);
+    if (view.winter) this.drawSnowGround(view, vx0, vy0, vx1, vy1, o.dt);
 
     this.drawDecals(fx.decals, vx0, vy0, vx1, vy1);
+    this.drawAcid(view);
     if (view.base.garden >= 1) this.drawGarden(view.base.garden);
     for (const c of fx.corpses) if (c.x > vx0 && c.y > vy0 && c.x < vx1 && c.y < vy1) this.art.drawCorpse(ctx, c);
     this.drawParticles(fx, false, true);
@@ -725,6 +734,24 @@ export class Renderer {
     for (const v of view.vehicles ?? []) if (v.x > vx0 - 60 && v.y > vy0 - 60 && v.x < vx1 + 60 && v.y < vy1 + 60) this.drawVehicle(v, view);
     for (const p of view.players) if (p.veh === undefined) this.drawPlayerMarker(p, p.id === o.localId);
     for (const p of view.players) if (p.veh === undefined) this.art.drawPlayer(ctx, p, PLAYER_COLORS[p.id] ?? '#fff', this.getPAnim(p.id), this.time);
+    // 生存者（救出を待つ・ついてくる人）
+    for (const n of view.npcs ?? []) {
+      const fake = { id: 1000 + n.id, x: n.x, y: n.y, bodyAngle: n.a, aim: n.a, status: 'alive', tool: 0, hp: n.hp, maxHp: 100, bag: [], prim: null, sec: null } as unknown as PlayerSnap;
+      this.art.drawPlayer(ctx, fake, '#cfc2a0', this.getPAnim(1000 + n.id), this.time);
+      ctx.font = `bold 10px ${UI}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      const t = n.follow >= 0 ? `生存者（${NPC_ROLE[n.role] ?? ''}・同行中）` : `生存者（${NPC_ROLE[n.role] ?? ''}）[F]`;
+      ctx.strokeText(t, n.x, n.y - 30);
+      ctx.fillStyle = '#9fd0f0';
+      ctx.fillText(t, n.x, n.y - 30);
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(n.x - 15, n.y + 22, 30, 4);
+      ctx.fillStyle = n.hp > 40 ? '#7fd07f' : '#e07a60';
+      ctx.fillRect(n.x - 15, n.y + 22, 30 * Math.max(0, n.hp) / 100, 4);
+    }
     for (const ob of tall) this.art.drawTallObject(ctx, ob, this.time, ob.kind === 'turret' ? fx.turretAim.get(ob.id) : undefined);
     this.drawParticles(fx, false);
     if (o.build) this.drawBuildGhost(o.build, visible);
@@ -1404,6 +1431,9 @@ export class Renderer {
       if (ob.kind === 'campfire' || ob.kind === 'fire') {
         const flick = 1 + Math.sin(this.time * 11) * 0.03 + Math.sin(this.time * 7.3 + 1) * 0.04;
         out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 300 * flick, warm: 1 });
+      } else if (ob.kind === 'flood' && ob.ready) {
+        // 電気の通った投光器：白く広い光
+        out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: 280, warm: 0 });
       } else if (ob.kind === 'torch') {
         const flick = 1 + Math.sin(this.time * 13 + ob.id) * 0.04 + Math.sin(this.time * 8.1 + ob.id * 2) * 0.04;
         out.push({ x: (ob.tx + 0.5) * TILE, y: (ob.ty + 0.5) * TILE, r: TORCH_LIGHT * flick, warm: 0.8 });
@@ -1562,12 +1592,89 @@ export class Renderer {
   // ---------------- 天候 ----------------
 
   private rain: { x: number; y: number; s: number }[] = [];
+  /** 冬：雪の足跡（見えている人の通った跡。新しいほど濃い） */
+  private prints: { x: number; y: number; a: number; t: number; side: number }[] = [];
+  private printLast = new Map<number, { x: number; y: number; side: number }>();
+
+  /** 冬：外の地面に雪を積もらせ、足跡を描く */
+  private drawSnowGround(view: ViewState, vx0: number, vy0: number, vx1: number, vy1: number, dt: number): void {
+    const { ctx } = this;
+    const tx0 = Math.max(0, Math.floor(vx0 / TILE));
+    const ty0 = Math.max(0, Math.floor(vy0 / TILE));
+    const tx1 = Math.min(MAP_W - 1, Math.floor(vx1 / TILE));
+    const ty1 = Math.min(MAP_H - 1, Math.floor(vy1 / TILE));
+    ctx.fillStyle = 'rgba(228,234,242,0.42)';
+    ctx.beginPath();
+    for (let ty = ty0; ty <= ty1; ty++)
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const t = this.world.terrainAt(tx, ty);
+        if (t === T_WATER || t === T_SHALLOW || INDOOR_FLOORS.has(t) || t === T_WALL || t === T_WINDOW) continue;
+        ctx.rect(tx * TILE, ty * TILE, TILE, TILE);
+      }
+    ctx.fill();
+    // 足跡：歩いた人の後ろに左右交互
+    const now = this.time;
+    for (const p of view.players) {
+      if (p.status === 'dead' || p.veh !== undefined) continue;
+      if (INDOOR_FLOORS.has(this.world.terrainAt(Math.floor(p.x / TILE), Math.floor(p.y / TILE)))) continue;
+      const last = this.printLast.get(p.id);
+      if (!last || Math.hypot(last.x - p.x, last.y - p.y) > 16) {
+        const side = last ? -last.side : 1;
+        const a = last ? Math.atan2(p.y - last.y, p.x - last.x) : p.bodyAngle;
+        this.prints.push({ x: p.x - Math.sin(a) * 5 * side, y: p.y + Math.cos(a) * 5 * side, a, t: now, side });
+        this.printLast.set(p.id, { x: p.x, y: p.y, side });
+      }
+    }
+    while (this.prints.length && now - this.prints[0].t > 30) this.prints.shift();
+    if (this.prints.length > 900) this.prints.splice(0, this.prints.length - 900);
+    for (const f of this.prints) {
+      if (f.x < vx0 || f.y < vy0 || f.x > vx1 || f.y > vy1) continue;
+      ctx.fillStyle = `rgba(70,78,90,${0.45 * (1 - (now - f.t) / 30)})`;
+      ctx.beginPath();
+      ctx.ellipse(f.x, f.y, 4.5, 2.6, f.a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    void dt;
+  }
+
+  /** 冬の雪（晴れでも少し、雨・嵐の日は激しく） */
+  private drawSnowfall(view: ViewState, dt: number): void {
+    const { ctx, w, h } = this;
+    const wet = view.weather === 'rain' || view.weather === 'storm' ? view.wx : 0;
+    const want = Math.floor(70 + wet * (view.weather === 'storm' ? 420 : 240));
+    while (this.rain.length < want) this.rain.push({ x: Math.random() * w, y: Math.random() * h, s: 0.5 + Math.random() * 0.9 });
+    if (this.rain.length > want) this.rain.length = want;
+    const vx = view.weather === 'storm' ? -160 : -30;
+    ctx.fillStyle = 'rgba(240,246,255,0.75)';
+    ctx.beginPath();
+    for (const r of this.rain) {
+      r.x += (vx + Math.sin(this.time * 1.3 + r.s * 9) * 18) * r.s * dt;
+      r.y += 70 * r.s * dt;
+      if (r.y > h || r.x < -20) {
+        r.x = Math.random() * (w + 200);
+        r.y = -10;
+      }
+      ctx.moveTo(r.x + 1.6 * r.s, r.y);
+      ctx.arc(r.x, r.y, 1.6 * r.s, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    if (view.weather === 'storm') {
+      ctx.fillStyle = `rgba(220,228,240,${0.12 * view.wx})`;
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
   private lightning = 0;
 
   /** 霧（白いもや）・雨（斜めの雨筋）・嵐（雨＋雷光）を画面に重ねる */
   private drawWeather(view: ViewState, dark: number, dt: number): void {
     const { ctx, w, h } = this;
     const k = view.wx;
+    // 冬：雨の代わりに雪（霧の日は霧も重ねる）
+    if (view.winter && view.weather !== 'fog') {
+      this.lightning = 0;
+      this.drawSnowfall(view, dt);
+      return;
+    }
     if (k <= 0.01) {
       this.lightning = 0;
       return;
@@ -1859,6 +1966,47 @@ export class Renderer {
     const { ctx } = this;
     for (const z of zs) {
       const r = ZOMBIE[z.type].radius;
+      // 酸を吐く者の構え：喉が緑に光る／這う者の構え：足元に小さな警告
+      if (z.tele === 4) {
+        const g = 0.5 + Math.sin(this.time * 18) * 0.3;
+        ctx.fillStyle = `rgba(160,230,80,${g * 0.5})`;
+        ctx.beginPath();
+        ctx.arc(z.x + Math.cos(z.angle) * r * 0.6, z.y + Math.sin(z.angle) * r * 0.6, r * 0.9, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (z.tele === 3) {
+        ctx.strokeStyle = `rgba(240,90,60,${0.5 + Math.sin(this.time * 30) * 0.4})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(z.x, z.y, r + 10, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      // 巨像の予備動作：突進は向きの矢印、地鳴りは広がる輪（どちらも赤く点滅）
+      if (z.type === 'titan' && z.tele) {
+        const blink = 0.5 + Math.sin(this.time * 22) * 0.35;
+        ctx.save();
+        ctx.strokeStyle = `rgba(240,80,50,${blink})`;
+        ctx.fillStyle = `rgba(240,80,50,${blink * 0.18})`;
+        ctx.lineWidth = 4;
+        if (z.tele === 2) {
+          ctx.beginPath();
+          ctx.arc(z.x, z.y, 160, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          const L = 420;
+          const ca = Math.cos(z.angle);
+          const sa = Math.sin(z.angle);
+          ctx.beginPath();
+          ctx.moveTo(z.x - sa * 30, z.y + ca * 30);
+          ctx.lineTo(z.x - sa * 30 + ca * L, z.y + ca * 30 + sa * L);
+          ctx.lineTo(z.x + sa * 30 + ca * L, z.y - ca * 30 + sa * L);
+          ctx.lineTo(z.x + sa * 30, z.y - ca * 30);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
       // 精鋭：紫の光の輪と名札
       if (z.elite) {
         const pulse = 0.55 + Math.sin(this.time * 5 + z.id) * 0.25;
@@ -1872,12 +2020,26 @@ export class Renderer {
         ctx.textBaseline = 'middle';
         ctx.lineWidth = 3;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        ctx.strokeText('精鋭', z.x, z.y + r + 12);
+        const tag = `精鋭${z.trait ? `・${TRAIT_NAME[z.trait]}` : ''}`;
+        ctx.strokeText(tag, z.x, z.y + r + 12);
         ctx.fillStyle = '#d6a8ff';
-        ctx.fillText('精鋭', z.x, z.y + r + 12);
+        ctx.fillText(tag, z.x, z.y + r + 12);
+        // 再生中は緑の＋、突進の構えは赤い輪
+        if (z.trait === 'regen' && z.hp < z.maxHp) {
+          ctx.fillStyle = `rgba(120,230,120,${0.5 + Math.sin(this.time * 6) * 0.3})`;
+          ctx.fillText('＋', z.x + r + 6, z.y - r);
+        }
+      }
+      if (z.tele === 5) {
+        ctx.strokeStyle = `rgba(240,90,60,${0.5 + Math.sin(this.time * 26) * 0.4})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(z.x, z.y);
+        ctx.lineTo(z.x + Math.cos(z.angle) * 160, z.y + Math.sin(z.angle) * 160);
+        ctx.stroke();
       }
       if (z.hp < z.maxHp) {
-        const w = z.type === 'brute' ? 40 : 24;
+        const w = z.type === 'titan' ? 0 : z.type === 'brute' ? 40 : 24;
         const y = z.y - r - 10;
         ctx.globalAlpha = dark > 0.5 ? 0.5 : 1;
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
@@ -1933,6 +2095,7 @@ export class Renderer {
 
     this.updateExplored(o.dt);
     if (!o.panelOpen) this.withUiScale(() => this.drawCompass(view, me, o.localId));
+    if (!o.panelOpen) this.withUiScale(() => this.drawBossBar(view));
     // パネルを開いている間は入場通知を出さない（閉じたあとに古い通知が出ないよう捨てる）
     if (o.panelOpen) this.locToast = null;
     // 補給物資などの通知は、入場通知と同じ上部の細い帯で（入場通知が出ていなければすぐ）
@@ -2193,8 +2356,9 @@ export class Renderer {
       this.drawHotbar(o, view);
       this.drawMinimap(view, o.localId);
       this.tutH = 0;
-      // 縦が足りない枠（画面分割）では、はじめの一日・依頼を 1 行ずつに
+      // 縦が足りない枠（画面分割）・スマホでは、救助・はじめの一日・依頼を 1 行ずつに
       const slim = !!o.touch || this.h < 600;
+      if (!o.mapOpen) this.drawRescue(view, slim);
       if (me && !o.mapOpen) this.drawTutorial(view, me, slim);
       if (me && !o.mapOpen) this.drawJobs(view, me, slim);
       // モード表示
@@ -2859,10 +3023,17 @@ export class Renderer {
       const cx = x + size / 2;
       const cy = yy + size / 2 - 4;
       switch (t.id) {
-        case Tool.Melee:
+        case Tool.Melee: {
           drawSlotIcon(ctx, 'axe', cx, cy);
-          label = 'MELEE';
+          // 近接武器：名前と耐久（残り%）
+          const mm = me.mel ? MELEE_STATS[me.mel.id as MeleeId] : null;
+          if (mm) {
+            const pct = Math.round(((me.mel!.w?.mag ?? mm.dur) / mm.dur) * 100);
+            label = `${mm.name} ${pct}%`;
+            warn = pct <= 20;
+          } else label = 'MELEE';
           break;
+        }
         case Tool.Primary:
         case Tool.Secondary: {
           const s = heldWeapon({ ...me, tool: t.id });
@@ -2994,19 +3165,25 @@ export class Renderer {
   private hotbarTop = 0;
   /** 1 行表示の置き場所：スマホは上部中央、画面分割の枠は武器欄の上 */
   private slimPos(row: number): { cx: number; y: number } {
-    if (this.touchUI || this.h >= 600) return { cx: this.w / 2, y: row === 0 ? 58 : 82 };
+    if (this.touchUI || this.h >= 600) return { cx: this.w / 2, y: row === 0 ? 58 : row === 1 ? 82 : 106 };
     return { cx: this.hotbarCX, y: this.hotbarTop - 56 - row * 24 };
   }
   /** はじめの一日：最初の数日、やることのチェックリスト。今やると良い 1 つに「どうやるか」を添える */
   private drawTutorial(view: ViewState, me: PlayerSnap, touch: boolean): void {
     const done = me.tut;
-    if (done === undefined || done === TUT_ALL || view.day > 4) return;
+    if (done === undefined) return;
+    // 1 段目：はじめの一日（4 日目まで）→ 2 段目：生き延びる手引き（8 日目まで）
+    const first = (done & TUT_ALL) !== TUT_ALL && view.day <= 4;
+    const second = !first && (done & TUT2_ALL) !== TUT2_ALL && view.day <= 8;
+    if (!first && !second) return;
+    const TUT_STEPS = first ? TUT_STEPS1 : TUT2_STEPS;
+    const label = first ? 'はじめの一日' : '生き延びる手引き';
     const { ctx } = this;
     const next = TUT_STEPS.find((s) => !(done & s.bit));
     if (!next) return;
     const n = TUT_STEPS.filter((s) => done & s.bit).length;
     if (touch) {
-      const t = `はじめの一日 ${n}/${TUT_STEPS.length}：${next.title} — ${this.touchUI ? next.touch : this.kw(next.how)}`;
+      const t = `${label} ${n}/${TUT_STEPS.length}：${next.title} — ${this.touchUI ? next.touch : this.kw(next.how)}`;
       ctx.font = `bold 11px ${UI}`;
       const tw = ctx.measureText(t).width + 16;
       const { cx, y } = this.slimPos(1);
@@ -3020,15 +3197,29 @@ export class Renderer {
     }
     const pw = 236;
     const x = this.w - pw - 12;
-    const y = this.miniBottom + 10;
+    const y = this.miniBottom + 10 + this.tutH;
     const rowH = 16;
-    const ph = 22 + TUT_STEPS.length * rowH + 18;
+    // 「どうやるか」は 2 行まで折り返す（切れると肝心の数字が読めない）
+    ctx.font = `10px ${UI}`;
+    const howLines: string[] = [];
+    {
+      let rest = this.kw(next.how);
+      while (rest && howLines.length < 2) {
+        let k = rest.length;
+        while (k > 1 && ctx.measureText(rest.slice(0, k)).width > pw - 20) k--;
+        let line = rest.slice(0, k);
+        rest = rest.slice(k);
+        if (howLines.length === 1 && rest) line = line.slice(0, -1) + '…';
+        howLines.push(line);
+      }
+    }
+    const ph = 22 + TUT_STEPS.length * rowH + 6 + howLines.length * 13;
     panel(ctx, x, y, pw, ph);
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
     ctx.font = `10px ${MONO}`;
     ctx.fillStyle = '#e0c060';
-    ctx.fillText('// はじめの一日', x + 10, y + 11);
+    ctx.fillText(`// ${label}`, x + 10, y + 11);
     ctx.textAlign = 'right';
     ctx.font = `bold 10px ${UI}`;
     ctx.fillStyle = '#bdb79e';
@@ -3044,12 +3235,65 @@ export class Renderer {
       ctx.fillText(`${ok ? '✓' : cur ? '▶' : '・'} ${s.title}`, x + 10, ry);
       ctx.globalAlpha = 1;
     });
-    let how = this.kw(next.how);
     ctx.font = `10px ${UI}`;
-    while (ctx.measureText(how).width > pw - 20 && how.length > 4) how = how.slice(0, -2) + '…';
     ctx.fillStyle = '#e0c060';
-    ctx.fillText(how, x + 10, y + 22 + TUT_STEPS.length * rowH + 7);
-    this.tutH = ph + 8;
+    howLines.forEach((ln, k) => ctx.fillText(ln, x + 10, y + 22 + TUT_STEPS.length * rowH + 7 + k * 13));
+    this.tutH += ph + 8;
+  }
+
+  /** 救助の進み具合（モード・残り日数・次にやること） */
+  private drawRescue(view: ViewState, slim: boolean): void {
+    const r = view.rescue;
+    if (!r) return;
+    const { ctx } = this;
+    const n = [1, 2, 4].filter((b) => r.parts & b).length;
+    const left = r.day ? r.day - view.day : 0;
+    const when = r.day ? (left <= 0 ? '今朝' : left === 1 ? '明日の朝' : `あと ${left} 日（DAY ${r.day} の朝）`) : '';
+    const step =
+      r.stage === 0
+        ? `無線の部品 ${n}/3 — 地図の金色の◆へ`
+        : r.stage === 1
+          ? '部品がそろった：拠点の無線を修理（工具1・電子部品2）'
+          : r.stage === 2
+            ? '無線が直った：拠点の無線で救助を呼べる'
+            : '救助を呼んだ — 前の晩は最後の防衛';
+    const head = r.day ? `救助まで ${when}` : '救助：まだ呼んでいない';
+    if (slim) {
+      const t = `${head} ・ ${step}`;
+      ctx.font = `bold 11px ${UI}`;
+      const tw = ctx.measureText(t).width + 16;
+      const { cx, y } = this.slimPos(2);
+      panel(ctx, cx - tw / 2, y, tw, 20);
+      ctx.fillStyle = '#f0d070';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(t, cx, y + 10.5);
+      return;
+    }
+    const pw = 236;
+    const x = this.w - pw - 12;
+    const y = this.miniBottom + 10;
+    const ph = 50;
+    panel(ctx, x, y, pw, ph);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `10px ${MONO}`;
+    ctx.fillStyle = '#f0d070';
+    ctx.fillText('// RESCUE 救助', x + 10, y + 11);
+    ctx.textAlign = 'right';
+    ctx.font = `bold 10px ${UI}`;
+    ctx.fillStyle = '#bdb79e';
+    ctx.fillText(`${r.mode === 'd30' ? '30日モード' : '期限なし'}・脅威 Lv${(r.threat ?? 0) + 1}`, x + pw - 10, y + 11);
+    ctx.textAlign = 'left';
+    ctx.font = `bold 11px ${UI}`;
+    ctx.fillStyle = r.day && left <= 1 ? '#f0a040' : '#f0e6c0';
+    ctx.fillText(head, x + 10, y + 26);
+    let t = step;
+    ctx.font = `10px ${UI}`;
+    while (ctx.measureText(t).width > pw - 20 && t.length > 4) t = t.slice(0, -2) + '…';
+    ctx.fillStyle = '#c9c2a0';
+    ctx.fillText(t, x + 10, y + 41);
+    this.tutH += ph + 8;
   }
 
   private drawJobs(view: ViewState, me: PlayerSnap, touch: boolean): void {
@@ -3119,6 +3363,69 @@ export class Renderer {
       ctx.fillText(j.done ? '達成' : ready ? `そろった！ 拠点の無線で報告 ・ ${distTo(j)}m` : `${what(j)} ・ ${distTo(j)}m`, x + 22, ry + 21);
       ctx.globalAlpha = 1;
     });
+  }
+
+  /** 酸だまり（地面の緑の泡）と、放物線で飛ぶ酸 */
+  private drawAcid(view: ViewState): void {
+    const { ctx } = this;
+    for (const a of view.acid ?? []) {
+      const fade = Math.min(1, a.t / 1.5);
+      const g = ctx.createRadialGradient(a.x, a.y, 4, a.x, a.y, a.r);
+      g.addColorStop(0, `rgba(170,230,70,${0.55 * fade})`);
+      g.addColorStop(0.7, `rgba(120,190,50,${0.35 * fade})`);
+      g.addColorStop(1, 'rgba(100,160,40,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(a.x, a.y, a.r, a.r * 0.8, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 泡
+      for (let i = 0; i < 5; i++) {
+        const ph = (this.time * 0.8 + i * 0.37 + a.x * 0.01) % 1;
+        ctx.fillStyle = `rgba(210,250,130,${0.6 * (1 - ph) * fade})`;
+        ctx.beginPath();
+        ctx.arc(a.x + Math.cos(i * 2.4) * a.r * 0.5, a.y + Math.sin(i * 1.7) * a.r * 0.4, 2 + ph * 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    for (const q of view.spits ?? []) {
+      const x = q.sx + (q.tx - q.sx) * q.p;
+      const y = q.sy + (q.ty - q.sy) * q.p - Math.sin(q.p * Math.PI) * 70;
+      // 落ちる所の印（よければ避けられる）
+      ctx.strokeStyle = `rgba(170,230,70,${0.25 + q.p * 0.5})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(q.tx, q.ty, 40, 32, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#b8f060';
+      ctx.beginPath();
+      ctx.arc(x, y, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  /** ボスの体力（画面上部・コンパスの下） */
+  private drawBossBar(view: ViewState): void {
+    const z = view.zombies.find((q) => q.type === 'titan');
+    if (!z) return;
+    const { ctx } = this;
+    const w = Math.min(420, this.w - 120);
+    const x = this.w / 2 - w / 2;
+    const y = 58;
+    ctx.fillStyle = 'rgba(10,10,8,0.75)';
+    ctx.fillRect(x - 2, y - 2, w + 4, 12);
+    ctx.fillStyle = '#5a1e14';
+    ctx.fillRect(x, y, w, 8);
+    ctx.fillStyle = z.tele ? '#f07a3a' : '#d0402a';
+    ctx.fillRect(x, y, w * clamp(z.hp / z.maxHp, 0, 1), 8);
+    ctx.font = `bold 11px ${UI}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    const t = `巨像 ${z.tele === 1 ? '— 突進の構え！' : z.tele === 2 ? '— 地鳴りの構え！' : ''}`;
+    ctx.strokeText(t, this.w / 2, y + 12);
+    ctx.fillStyle = '#f0c8a0';
+    ctx.fillText(t, this.w / 2, y + 12);
   }
 
   /** ミニマップ：自分の周り（約 96×72 マス）だけを追従表示。地図の外は霞 */
@@ -3208,7 +3515,7 @@ export class Renderer {
       if (st.done) continue;
       const sx = X(st.tx + 0.5);
       const sy = Y(st.ty + 0.5);
-      ctx.fillStyle = '#c08af0';
+      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : st.kind === 'stash' ? '#7fd8d0' : '#c08af0';
       ctx.beginPath();
       ctx.moveTo(sx, sy - 5);
       ctx.lineTo(sx + 5, sy);
@@ -3440,7 +3747,7 @@ export class Renderer {
       if (best) marker(best.x, best.y, '#7fa6d0', '橋 ', 'dot');
     }
     if (view.drop) marker(view.drop.x, view.drop.y, '#e07050', '', 'drop');
-    for (const st of view.sites ?? []) if (!st.done) marker((st.tx + 0.5) * TILE, (st.ty + 0.5) * TILE, '#c08af0', '◆ ', 'dot');
+    for (const st of view.sites ?? []) if (!st.done) marker((st.tx + 0.5) * TILE, (st.ty + 0.5) * TILE, st.kind === 'tower' ? '#f0c040' : st.kind === 'stash' ? '#7fd8d0' : '#c08af0', '◆ ', 'dot');
     if (me.veh === undefined) {
       let best: VehicleSnap | null = null;
       let bd = 70 * TILE;
@@ -3571,7 +3878,7 @@ export class Renderer {
       const sx = X(st.tx + 0.5);
       const sy = Y(st.ty + 0.5);
       ctx.globalAlpha = st.done ? 0.35 : 1;
-      ctx.fillStyle = '#c08af0';
+      ctx.fillStyle = st.kind === 'tower' ? '#f0c040' : st.kind === 'stash' ? '#7fd8d0' : '#c08af0';
       ctx.strokeStyle = '#140a1c';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -3695,7 +4002,8 @@ export class Renderer {
     placed.push({ x: X(BASE_TX) - 10, y: Y(BASE_TY) - 10, w: 20, h: 20 });
     for (const st of view.sites ?? []) {
       if (st.done) continue;
-      put({ text: `◆ ${st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
+      const tw = st.kind === 'tower';
+      put({ text: `◆ ${st.kind === 'survivor' ? '生存者' : st.kind === 'convoy' ? '物資の車列（18:00 まで）' : st.kind === 'stash' ? '隠し物資' : tw ? `救助無線の部品（${st.name}）` : st.kind === 'heli' ? '墜落ヘリ' : st.kind === 'nest' ? '感染体の巣' : '封鎖された武器庫'}`, x: X(st.tx + 0.5), y: Y(st.ty + 0.5) - 20, fg: '#140a1c', bg: tw ? 'rgba(240,192,64,0.94)' : st.kind === 'stash' ? 'rgba(127,216,208,0.92)' : 'rgba(192,138,240,0.92)', font: `bold 10px ${UI}` }, [[0, 0], [0, 40], [70, 20], [-70, 20]]);
     }
     // 依頼の目的地の名前
     (view.jobs ?? []).forEach((j, i) => {

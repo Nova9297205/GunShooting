@@ -635,19 +635,25 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
 
   ctx.save();
   ctx.translate(z.x, z.y);
-  softShadow(ctx, r * 1.35, r * 1.05, z.type === 'brute' ? 0.45 : 0.36);
+  softShadow(ctx, r * 1.35, r * 1.05, (z.type === 'brute' || z.type === 'titan') ? 0.45 : 0.36);
   // 被弾：小刻みに揺れる
   if (hit > 0) ctx.translate((h2(id, Math.floor(t * 40)) - 0.5) * 3 * hit, (h2(id, Math.floor(t * 40), 3) - 0.5) * 3 * hit);
   ctx.rotate(z.angle - hit * 0.25);
+  // 這う者：床に伏せて平たい。待ち伏せ中は暗がりに溶けて見えにくい（構えるとぴくっと動く）
+  if (z.type === 'crawler') {
+    if (z.tele === 3) ctx.translate((h2(id, Math.floor(t * 50)) - 0.5) * 4, (h2(id, Math.floor(t * 50), 2) - 0.5) * 4);
+    else if (z.alert !== 2) ctx.globalAlpha *= 0.55;
+    ctx.scale(1.5, 0.78);
+  }
   ctx.lineJoin = 'round';
 
   // ---- 脚（引きずる歩き方） ----
-  const stride = z.type === 'runner' ? 1.3 : z.type === 'brute' ? 0.7 : 1;
+  const stride = z.type === 'runner' ? 1.3 : (z.type === 'brute' || z.type === 'titan') ? 0.7 : 1;
   const step = Math.sin(wc * stride) * r * (z.type === 'runner' ? 0.55 : 0.32) * mv;
   const pants = W(z.type === 'soldier' ? '#3d4230' : PANTS[(id >> 2) % PANTS.length]);
   for (const side of [-1, 1]) {
     const fx = step * side - (z.type === 'walker' && side > 0 ? r * 0.15 : 0); // ウォーカーは片足を引きずる
-    limb(ctx, -r * 0.15, side * r * 0.3, fx, side * r * 0.4, r * (z.type === 'brute' ? 0.42 : 0.34), pants, OUT);
+    limb(ctx, -r * 0.15, side * r * 0.3, fx, side * r * 0.4, r * ((z.type === 'brute' || z.type === 'titan') ? 0.42 : 0.34), pants, OUT);
     ctx.beginPath();
     ctx.ellipse(fx + r * 0.12, side * r * 0.4, r * 0.24, r * 0.17, 0, 0, Math.PI * 2);
     ctx.fillStyle = W(z.type === 'soldier' ? '#26241f' : '#1f1d1a');
@@ -664,7 +670,7 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
   const swing = (side: number) => Math.sin(wc * stride + (side > 0 ? Math.PI : 0)) * mv;
   const arm = (side: number, wid: number, len: number, dangle: number) => {
     const sx = 0;
-    const sy = side * r * (z.type === 'brute' ? 0.75 : 0.62);
+    const sy = side * r * ((z.type === 'brute' || z.type === 'titan') ? 0.75 : 0.62);
     // だらりとした位置と、前に突き出した位置を補間
     const relaxX = r * 0.25 + swing(side) * r * 0.25;
     const relaxY = side * r * (0.85 + dangle);
@@ -676,7 +682,7 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
     return [hx, hy];
   };
 
-  if (z.type === 'brute') {
+  if ((z.type === 'brute' || z.type === 'titan')) {
     // ---- ブルート：巨体・膨れた上半身・こん棒のような拳・小さな頭 ----
     const hands = [-1, 1].map((s) => arm(s, 0.55, 1.05, 0.15));
     for (const [hx, hy] of hands) {
@@ -828,6 +834,20 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
     ctx.beginPath();
     ctx.arc(r * 0.62, 0, r * 0.3, 0, Math.PI * 2);
     blob(ctx, skinD, OUT, 1.3);
+  } else if (z.type === 'spitter') {
+    // ---- 酸を吐く者：痩せた体・膨らんだ緑の喉袋（構えると光る） ----
+    arm(-1, 0.24, 0.9, 0.1);
+    arm(1, 0.24, 0.9, 0.1);
+    ctx.beginPath();
+    ctx.ellipse(-r * 0.1, 0, r * 0.5, r * 0.7, 0, 0, Math.PI * 2);
+    blob(ctx, W('#4a5838'), OUT, 1.3);
+    const sw = 1 + (z.tele === 4 ? 0.35 + Math.sin(t * 20) * 0.1 : Math.sin(t * 2 + id) * 0.05);
+    ctx.beginPath();
+    ctx.arc(r * 0.35, 0, r * 0.42 * sw, 0, Math.PI * 2);
+    blob(ctx, flash ? '#fff' : z.tele === 4 ? '#c8f070' : '#9ab860', OUT, 1.2);
+    ctx.beginPath();
+    ctx.arc(r * 0.62, 0, r * 0.3, 0, Math.PI * 2);
+    blob(ctx, skin, OUT, 1.3);
   } else if (z.type === 'screamer') {
     // ---- 叫び屋：痩せこけた体・異様に大きく開いた口 ----
     arm(-1, 0.22, 1.0, -0.2);
@@ -908,8 +928,8 @@ export function drawZombie(ctx: CanvasRenderingContext2D, z: ZombieSnap, anim: Z
   }
 
   // ---- 目（追跡中は赤く光る）と口 ----
-  const ex = z.type === 'brute' ? r * 0.62 : z.type === 'runner' ? r * 0.62 : r * 0.5;
-  const ey = z.type === 'brute' ? r * 0.12 : r * 0.16;
+  const ex = (z.type === 'brute' || z.type === 'titan') ? r * 0.62 : z.type === 'runner' ? r * 0.62 : r * 0.5;
+  const ey = (z.type === 'brute' || z.type === 'titan') ? r * 0.12 : r * 0.16;
   if (z.type !== 'soldier') {
     ctx.fillStyle = z.alert === 2 ? '#f07050' : z.alert === 1 ? '#e8d070' : '#bdb68a';
     ctx.beginPath();
@@ -936,7 +956,7 @@ export function drawCorpse(ctx: CanvasRenderingContext2D, c: Corpse): void {
   const r = st.radius;
   const a = Math.min(1, c.life / 3);
   const skin = shade(st.skin, -0.3);
-  const cloth = c.type === 'brute' ? '#4a3a34' : c.type === 'soldier' ? '#3f4430' : c.type === 'bloater' ? '#5a6440' : c.type === 'screamer' ? '#55524c' : shade(SHIRTS[c.id % SHIRTS.length], -0.3);
+  const cloth = (c.type === 'brute' || c.type === 'titan') ? '#4a3a34' : c.type === 'soldier' ? '#3f4430' : c.type === 'bloater' ? '#5a6440' : c.type === 'screamer' ? '#55524c' : shade(SHIRTS[c.id % SHIRTS.length], -0.3);
   ctx.save();
   ctx.globalAlpha = a * 0.92;
   ctx.translate(c.x, c.y);

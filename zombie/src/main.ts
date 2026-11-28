@@ -13,7 +13,7 @@ import { padSettings } from './ui/Gamepad';
 import { type LocalPlayerCfg, LocalSetup } from './ui/LocalSetup';
 import { clearSave, describeSave, loadSave } from './game/save';
 import type { SaveData } from './game/Engine';
-import type { GameMode, ObjKind, GameResult, LobbyPlayer, StartInfo } from './types';
+import type { GameMode, ObjKind, GameResult, LobbyPlayer, RunMode, StartInfo } from './types';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const NAME_KEY = 'deadnights2d.name';
@@ -99,7 +99,7 @@ function renderProfile(): void {
   const recs = loadRecords().slice(0, 3);
   const recHtml = recs.length
     ? `<div class="pb-recs"><span>戦績 TOP3</span>${recs
-        .map((r, i) => `<div class="pb-rec"><i>${i + 1}</i>DAY ${r.day}・撃破 ${r.kills}・価値 ${r.value}<small>${r.mode === 'solo' ? 'ソロ' : `${r.players}人`}・${new Date(r.at).toLocaleDateString()}</small></div>`)
+        .map((r, i) => `<div class="pb-rec"><i>${i + 1}</i>${r.won ? '🚁 救助 ' : ''}DAY ${r.day}・撃破 ${r.kills}・価値 ${r.value}${r.notes ? `・手記 ${r.notes}` : ''}<small>${r.mode === 'solo' ? 'ソロ' : `${r.players}人`}・${new Date(r.at).toLocaleDateString()}</small></div>`)
         .join('')}</div>`
     : '';
   box.innerHTML = `<div class="pb-title"><span>保存済みの記録</span><span>最長生存 <b>${prof.bestDay}</b> 日 ・ 持ち帰り総額 <b>${prof.banked}</b></span></div>${SKILLS.map(
@@ -114,6 +114,30 @@ function skillPips(prof: Profile | undefined): string {
     return `<div class="op-skill">${sk.name} <span>Lv${lv}</span><div class="pipbar">${Array.from({ length: 10 }, (_, k) => `<i class="${k < lv ? 'on' : ''}"></i>`).join('')}</div></div>`;
   }).join('');
 }
+
+// ---------------- モード（新しく始めるとき：30 日で救助／期限なし） ----------------
+let runMode: RunMode = 'd30';
+try {
+  const v = localStorage.getItem('dn2d.run');
+  if (v === 'd30' || v === 'endless') runMode = v;
+} catch {
+  /* 既定値 */
+}
+function renderRunMode(): void {
+  for (const b of document.querySelectorAll<HTMLElement>('[data-run]')) b.classList.toggle('on', b.dataset.run === runMode);
+}
+document.getElementById('run-row')?.addEventListener('click', (e) => {
+  const b = (e.target as HTMLElement).closest<HTMLElement>('[data-run]');
+  if (!b) return;
+  runMode = b.dataset.run === 'endless' ? 'endless' : 'd30';
+  try {
+    localStorage.setItem('dn2d.run', runMode);
+  } catch {
+    /* 無視 */
+  }
+  renderRunMode();
+});
+renderRunMode();
 
 const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
@@ -171,6 +195,7 @@ function startSession(m: GameMode, info: StartInfo, localId: number, sim?: HostS
 /** ソロ/ホスト：シミュレーションを作って開始 */
 function startAsHost(m: 'solo' | 'host', players: LobbyPlayer[], save: SaveData | null = null): void {
   const sim = save ? HostSimulation.fromSave(players, save) : new HostSimulation(players, (Math.random() * 0x7fffffff) | 0);
+  if (!save) sim.setRunMode(runMode);
   // 続きからのときは、生成直後からの変化をすべてゲストに渡す
   const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, ...sim.fullWorldDiff() };
   if (m === 'host') net?.startGame(info);
@@ -205,6 +230,7 @@ function startLocal(cfg: LocalPlayerCfg[], save: SaveData | null): void {
   show(null);
   const players: LobbyPlayer[] = cfg.map((c, i) => ({ id: i, name: sanitizeName(c.name, i), prof: i === 0 ? loadProfile() : undefined }));
   const sim = save ? HostSimulation.fromSave(players, save) : new HostSimulation(players, (Math.random() * 0x7fffffff) | 0);
+  if (!save) sim.setRunMode(runMode);
   const info: StartInfo = save ? { players, seed: sim.seed, ...sim.fullWorldDiff() } : { players, seed: sim.seed, ...sim.fullWorldDiff() };
   if (import.meta.env.DEV) Object.assign(window, { __sim: sim, __audio: audio });
   canvas.style.display = 'none';
@@ -251,7 +277,16 @@ $('btn-local').addEventListener('click', () => {
 });
 
 function showResult(r: GameResult): void {
-  audio.gameOver();
+  if (r.won) audio.victory();
+  else audio.gameOver();
+  const head = $('result-head');
+  head.textContent = r.won ? 'RESCUED' : 'K.I.A.';
+  head.classList.toggle('won', !!r.won);
+  $('result-sub').textContent = r.won
+    ? `救助ヘリで脱出した！（${r.run === 'd30' ? '30日モード' : '期限なしモード'}・DAY ${r.day}・手記 ${r.notes ?? 0}/24）`
+    : r.run === 'd30'
+      ? `救助まで あと ${Math.max(0, 30 - r.day)} 日だった・手記 ${r.notes ?? 0}/24`
+      : `読んだ手記 ${r.notes ?? 0}/24`;
   // 自分のスキル経験値・記録を保存（次回に引き継ぐ）
   const mine = r.players.find((p) => p.id === (net?.localId ?? 0));
   if (mine) {
@@ -261,7 +296,7 @@ function showResult(r: GameResult): void {
     prof.banked += mine.value;
     saveProfile(prof);
     // 戦績（上位10件）に追加
-    const { rank, best } = addRecord({ at: Date.now(), name: mine.name, day: r.day, kills: mine.kills, value: mine.value, mode, players: r.players.length });
+    const { rank, best } = addRecord({ at: Date.now(), name: mine.name, day: r.day, kills: mine.kills, value: mine.value, mode, players: r.players.length, won: r.won, run: r.run, notes: r.notes });
     $('result-record').textContent = best ? '★ 自己ベスト更新！' : rank <= 10 ? `戦績 ${rank} 位` : '';
   } else $('result-record').textContent = '';
   $('result-day').textContent = String(r.day);
